@@ -1,5 +1,6 @@
 #include "parsing.h"
 #include "util.h"
+#include "app_state.h"
 
 std::wstring HtmlDecode(const std::wstring& text)
 {
@@ -109,8 +110,8 @@ static bool ConvertBritishNationalGridToLatLon(double easting, double northing, 
     constexpr double a = 6377563.396;
     constexpr double b = 6356256.909;
     constexpr double f0 = 0.9996012717;
-    constexpr double lat0 = 49.0 * kPi / 180.0;
-    constexpr double lon0 = -2.0 * kPi / 180.0;
+    const double lat0 = 49.0 * kPi / 180.0;
+    const double lon0 = -2.0 * kPi / 180.0;
     constexpr double n0 = -100000.0;
     constexpr double e0 = 400000.0;
     constexpr double e2 = 1.0 - (b * b) / (a * a);
@@ -156,9 +157,9 @@ static bool ConvertBritishNationalGridToLatLon(double easting, double northing, 
 
     constexpr double tx = 446.448, ty = -125.157, tz = 542.060;
     constexpr double sppm = 20.4894;
-    constexpr double rx = 0.1502 * kPi / (180.0 * 3600.0);
-    constexpr double ry = 0.2470 * kPi / (180.0 * 3600.0);
-    constexpr double rz = 0.8421 * kPi / (180.0 * 3600.0);
+    const double rx = 0.1502 * kPi / (180.0 * 3600.0);
+    const double ry = 0.2470 * kPi / (180.0 * 3600.0);
+    const double rz = 0.8421 * kPi / (180.0 * 3600.0);
     double scale = 1.0 + sppm * 1e-6;
     double x2 = tx + x1 * scale - y1 * rz + z1 * ry;
     double y2 = ty + x1 * rz + y1 * scale - z1 * rx;
