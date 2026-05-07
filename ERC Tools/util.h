@@ -27,6 +27,8 @@ bool SaveBinaryToFile(const std::filesystem::path& path, const std::vector<BYTE>
 std::wstring Trim(const std::wstring& s);
 std::wstring ToLower(std::wstring s);
 std::wstring Utf8ToWide(const std::string& s);
+std::string WideToUtf8(const std::wstring& s);
+std::string JsonEscape(const std::wstring& s);
 std::wstring WinErrorText(DWORD err);
 std::wstring GetWindowTextString(HWND hWnd);
 void SetWindowTextSafe(HWND hWnd, const std::wstring& text);

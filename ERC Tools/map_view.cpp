@@ -46,6 +46,7 @@ class MapView::Impl
 {
 public:
     using SelectCallback = std::function<void(const std::wstring&)>;
+    using NoteLocationCallback = std::function<void(double lat, double lon)>;
 
     bool Create(HWND parent, int x, int y, int w, int h)
     {
@@ -76,9 +77,20 @@ public:
         m_onSelect = std::move(cb);
     }
 
+    void SetNoteLocationCallback(NoteLocationCallback cb)
+    {
+        m_onNoteLocation = std::move(cb);
+    }
+
     void SetAlerts(const std::vector<TrafficAlert>& alerts)
     {
         m_alerts = alerts;
+        Invalidate();
+    }
+
+    void SetNotes(const std::vector<MapNote>& notes)
+    {
+        m_notes = notes;
         Invalidate();
     }
 
@@ -216,7 +228,7 @@ private:
 
         WNDCLASSEXW wc{};
         wc.cbSize = sizeof(wc);
-        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
         wc.lpfnWndProc = MapWndProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.lpszClassName = kMapClassName;
@@ -285,6 +297,10 @@ private:
 
         case WM_LBUTTONUP:
             OnLeftButtonUp(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            return 0;
+
+        case WM_LBUTTONDBLCLK:
+            OnDoubleClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;
 
         case WM_MOUSEWHEEL:
@@ -443,6 +459,15 @@ private:
         m_dragging = false;
     }
 
+    void OnDoubleClick(int x, int y)
+    {
+        if (!m_onNoteLocation)
+            return;
+
+        GeoPoint geo = ScreenToGeo(x, y);
+        m_onNoteLocation(geo.lat, geo.lon);
+    }
+
     void OnMouseWheel(int screenX, int screenY, short delta)
     {
         POINT pt{ screenX, screenY };
@@ -506,6 +531,9 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.35f, 0.35f, 0.35f), &m_borderBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.55f, 0.25f, 0.18f), &m_outlineFillBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.28f, 0.12f, 0.92f), &m_outlineStrokeBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.05f, 0.10f, 0.18f, 0.72f), &m_panelBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.90f), &m_textBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.20f, 0.95f, 0.95f), &m_noteBrush);
     }
 
     void DiscardDeviceResources()
@@ -520,6 +548,9 @@ private:
         m_rt.Reset();
         m_outlineFillBrush.Reset();
         m_outlineStrokeBrush.Reset();
+        m_panelBrush.Reset();
+        m_textBrush.Reset();
+        m_noteBrush.Reset();
     }
 
     void ClearTileCache()
@@ -653,17 +684,34 @@ private:
             bool selected = (m_alerts[i].id == m_selectedId);
             ID2D1SolidColorBrush* sevBrush = BrushForSeverity(m_alerts[i].severity);
 
-            float outerR = selected ? 10.0f : 7.0f;
-            float innerR = selected ? 6.0f : 5.0f;
+            float outerR = selected ? 15.0f : 11.0f;
+            float innerR = selected ? 8.0f : 6.0f;
+
+            D2D1_POINT_2F tip = D2D1::Point2F(p.x, p.y + outerR + 7.0f);
+            D2D1_POINT_2F left = D2D1::Point2F(p.x - outerR * 0.58f, p.y + outerR * 0.35f);
+            D2D1_POINT_2F right = D2D1::Point2F(p.x + outerR * 0.58f, p.y + outerR * 0.35f);
+            ComPtr<ID2D1PathGeometry> pinGeom;
+            if (SUCCEEDED(g_d2dFactory->CreatePathGeometry(&pinGeom))) {
+                ComPtr<ID2D1GeometrySink> sink;
+                if (SUCCEEDED(pinGeom->Open(&sink))) {
+                    sink->BeginFigure(left, D2D1_FIGURE_BEGIN_FILLED);
+                    sink->AddLine(tip);
+                    sink->AddLine(right);
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                    if (SUCCEEDED(sink->Close()))
+                        m_rt->FillGeometry(pinGeom.Get(), sevBrush);
+                }
+            }
 
             D2D1_ELLIPSE outer = D2D1::Ellipse(p, outerR, outerR);
             D2D1_ELLIPSE inner = D2D1::Ellipse(p, innerR, innerR);
 
             if (selected)
-                m_rt->FillEllipse(outer, m_selectedBrush.Get());
+                m_rt->FillEllipse(D2D1::Ellipse(p, outerR + 5.0f, outerR + 5.0f), m_selectedBrush.Get());
 
-            m_rt->FillEllipse(inner, sevBrush);
-            m_rt->DrawEllipse(outer, m_borderBrush.Get(), selected ? 2.0f : 1.0f);
+            m_rt->FillEllipse(outer, sevBrush);
+            m_rt->FillEllipse(inner, m_textBrush.Get());
+            m_rt->DrawEllipse(outer, m_borderBrush.Get(), selected ? 2.5f : 1.5f);
         }
     }
 
@@ -738,6 +786,82 @@ private:
         }
     }
 
+
+
+    void DrawCityAnchors()
+    {
+        static const GeoPoint cities[] = {
+            { 51.5074, -0.1278 }, { 52.4862, -1.8904 }, { 53.4808, -2.2426 },
+            { 53.8008, -1.5491 }, { 55.9533, -3.1883 }, { 51.4816, -3.1791 },
+            { 50.8198, -1.0880 }, { 54.9783, -1.6178 }
+        };
+
+        RECT rc{};
+        GetClientRect(m_hwnd, &rc);
+        const int width = static_cast<int>(rc.right - rc.left);
+        const int height = static_cast<int>(rc.bottom - rc.top);
+
+        for (const GeoPoint& city : cities) {
+            D2D1_POINT_2F p = GeoToScreen(city.lat, city.lon);
+            if (p.x < -16.0f || p.y < -16.0f || p.x > width + 16.0f || p.y > height + 16.0f)
+                continue;
+
+            m_rt->FillEllipse(D2D1::Ellipse(p, 4.0f, 4.0f), m_textBrush.Get());
+            m_rt->DrawEllipse(D2D1::Ellipse(p, 8.0f, 8.0f), m_panelBrush.Get(), 2.0f);
+        }
+    }
+
+    void DrawNotes()
+    {
+        if (!m_rt)
+            return;
+
+        RECT rc{};
+        GetClientRect(m_hwnd, &rc);
+        int width = static_cast<int>(rc.right - rc.left);
+        int height = static_cast<int>(rc.bottom - rc.top);
+
+        for (const auto& note : m_notes) {
+            D2D1_POINT_2F p = GeoToScreen(note.latitude, note.longitude);
+            if (p.x < -80.0f || p.y < -80.0f || p.x > width + 80.0f || p.y > height + 80.0f)
+                continue;
+
+            D2D1_ROUNDED_RECT bubble = D2D1::RoundedRect(
+                D2D1::RectF(p.x + 10.0f, p.y - 42.0f, p.x + 210.0f, p.y + 18.0f),
+                10.0f,
+                10.0f);
+            m_rt->FillRoundedRectangle(bubble, m_panelBrush.Get());
+            m_rt->DrawRoundedRectangle(bubble, m_noteBrush.Get(), 1.5f);
+            m_rt->FillEllipse(D2D1::Ellipse(p, 8.0f, 8.0f), m_noteBrush.Get());
+            m_rt->DrawLine(p, D2D1::Point2F(p.x + 12.0f, p.y - 6.0f), m_noteBrush.Get(), 2.0f);
+        }
+    }
+
+    void DrawMapChrome()
+    {
+        if (!m_rt)
+            return;
+
+        RECT rc{};
+        GetClientRect(m_hwnd, &rc);
+        float width = static_cast<float>(rc.right - rc.left);
+        float height = static_cast<float>(rc.bottom - rc.top);
+
+        m_rt->FillRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(18.0f, 18.0f, 330.0f, 92.0f), 16.0f, 16.0f),
+            m_panelBrush.Get());
+        m_rt->DrawRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(18.0f, 18.0f, 330.0f, 92.0f), 16.0f, 16.0f),
+            m_textBrush.Get(),
+            1.0f);
+
+        float scaleW = ClampValue(width / static_cast<float>(m_zoom + 2), 70.0f, 180.0f);
+        D2D1_POINT_2F a = D2D1::Point2F(width - scaleW - 34.0f, height - 34.0f);
+        D2D1_POINT_2F b = D2D1::Point2F(width - 34.0f, height - 34.0f);
+        m_rt->DrawLine(a, b, m_panelBrush.Get(), 5.0f);
+        m_rt->DrawLine(a, b, m_textBrush.Get(), 2.0f);
+    }
+
     void OnPaint()
     {
         PAINTSTRUCT ps{};
@@ -750,7 +874,10 @@ private:
 
             DrawTiles();
             DrawUkBoundary();
+            DrawCityAnchors();
+            DrawNotes();
             DrawMarkers();
+            DrawMapChrome();
 
             HRESULT hr = m_rt->EndDraw();
             if (hr == D2DERR_RECREATE_TARGET)
@@ -861,8 +988,10 @@ private:
 
     HWND m_hwnd = nullptr;
     std::vector<TrafficAlert> m_alerts;
+    std::vector<MapNote> m_notes;
     std::wstring m_selectedId;
     SelectCallback m_onSelect;
+    NoteLocationCallback m_onNoteLocation;
 
     int m_zoom = kDefaultZoom;
     double m_centerLat = kDefaultCenterLat;
@@ -882,6 +1011,9 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_borderBrush;
     ComPtr<ID2D1SolidColorBrush> m_outlineFillBrush;
     ComPtr<ID2D1SolidColorBrush> m_outlineStrokeBrush;
+    ComPtr<ID2D1SolidColorBrush> m_panelBrush;
+    ComPtr<ID2D1SolidColorBrush> m_textBrush;
+    ComPtr<ID2D1SolidColorBrush> m_noteBrush;
     std::vector<std::vector<GeoPoint>> m_ukBoundaryRings;
 
     std::mutex m_tileMutex;
@@ -912,9 +1044,19 @@ void MapView::SetSelectCallback(SelectCallback cb)
     m_impl->SetSelectCallback(std::move(cb));
 }
 
+void MapView::SetNoteLocationCallback(NoteLocationCallback cb)
+{
+    m_impl->SetNoteLocationCallback(std::move(cb));
+}
+
 void MapView::SetAlerts(const std::vector<TrafficAlert>& alerts)
 {
     m_impl->SetAlerts(alerts);
+}
+
+void MapView::SetNotes(const std::vector<MapNote>& notes)
+{
+    m_impl->SetNotes(notes);
 }
 
 void MapView::SetSelectedId(const std::wstring& id)

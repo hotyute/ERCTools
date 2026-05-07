@@ -145,6 +145,8 @@ std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
     }
 
     return out;
+}
+
 bool ExtractRingFromCoords(const json& coords, std::vector<GeoPoint>& ring)
 {
     ring.clear();
@@ -231,6 +233,18 @@ void CollectBoundaryRingsFromNode(const json& node, std::vector<std::vector<GeoP
     }
 
     if (type == "Feature") {
+        auto it = node.find("geometry");
+        if (it != node.end() && it->is_object())
+            CollectBoundaryRingsFromGeometry(*it, rings);
+        return;
+    }
+
+    if (node.contains("geometry") && node["geometry"].is_object())
+        CollectBoundaryRingsFromGeometry(node["geometry"], rings);
+    else
+        CollectBoundaryRingsFromGeometry(node, rings);
+}
+
 TrafficAlert ParseAlertObject(const json& obj)
 {
     TrafficAlert a;
@@ -300,7 +314,7 @@ TrafficAlert ParseAlertObject(const json& obj)
         a.hasLocation = true;
     }
 
-    std::atomic<unsigned long long> s_idCounter{ 0 };
+    static std::atomic<unsigned long long> s_idCounter{ 0 };
     if (a.id.empty())
         a.id = L"alert-" + std::to_wstring(++s_idCounter);
 

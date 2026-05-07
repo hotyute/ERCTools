@@ -414,3 +414,142 @@ std::wstring BuildTrafficEnglandAlertsApiUrl(size_t start, size_t step)
     url += L"&_=" + std::to_wstring(cacheBuster + start);
     return url;
 }
+
+bool HttpPostJsonText(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, std::wstring& errorOut)
+{
+    bodyOut.clear();
+    errorOut.clear();
+
+    std::wstring url = NormalizeUrl(inputUrl);
+    if (url.empty()) {
+        errorOut = L"Empty URL.";
+        return false;
+    }
+
+    URL_COMPONENTS parts{};
+    parts.dwStructSize = sizeof(parts);
+
+    wchar_t host[2048]{};
+    wchar_t path[4096]{};
+    wchar_t extra[4096]{};
+
+    parts.lpszHostName = host;
+    parts.dwHostNameLength = _countof(host);
+    parts.lpszUrlPath = path;
+    parts.dwUrlPathLength = _countof(path);
+    parts.lpszExtraInfo = extra;
+    parts.dwExtraInfoLength = _countof(extra);
+
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts)) {
+        errorOut = L"Could not parse URL: " + WinErrorText(GetLastError());
+        return false;
+    }
+
+    if (parts.nScheme != INTERNET_SCHEME_HTTP && parts.nScheme != INTERNET_SCHEME_HTTPS) {
+        errorOut = L"Only http:// and https:// URLs are supported.";
+        return false;
+    }
+
+    std::wstring hostName(host, parts.dwHostNameLength);
+    std::wstring objectName(path, parts.dwUrlPathLength);
+    std::wstring extraInfo(extra, parts.dwExtraInfoLength);
+    std::wstring fullPath = objectName + extraInfo;
+    if (fullPath.empty())
+        fullPath = L"/";
+
+    InternetHandle session(WinHttpOpen(
+        L"ERCTools/1.2",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS,
+        0));
+
+    if (!session.h) {
+        errorOut = L"WinHttpOpen failed: " + WinErrorText(GetLastError());
+        return false;
+    }
+
+    WinHttpSetTimeouts(session.h, 10000, 10000, 10000, 10000);
+    ConfigureSecureProtocols(session.h);
+
+    INTERNET_PORT port = parts.nPort;
+    if (port == 0)
+        port = (parts.nScheme == INTERNET_SCHEME_HTTPS) ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+
+    InternetHandle connect(WinHttpConnect(session.h, hostName.c_str(), port, 0));
+    if (!connect.h) {
+        errorOut = L"WinHttpConnect failed: " + WinErrorText(GetLastError());
+        return false;
+    }
+
+    DWORD flags = (parts.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    InternetHandle request(WinHttpOpenRequest(
+        connect.h,
+        L"POST",
+        fullPath.c_str(),
+        nullptr,
+        WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES,
+        flags));
+
+    if (!request.h) {
+        errorOut = L"WinHttpOpenRequest failed: " + WinErrorText(GetLastError());
+        return false;
+    }
+
+    ConfigureRedirects(request.h);
+
+    std::wstring headers =
+        L"Content-Type: application/json; charset=utf-8\r\n"
+        L"Accept: application/json,text/plain,*/*;q=0.8\r\n"
+        L"Accept-Encoding: identity\r\n";
+
+    const DWORD bodySize = static_cast<DWORD>(jsonBody.size());
+    LPVOID optionalData = bodySize ? static_cast<LPVOID>(const_cast<char*>(jsonBody.data())) : WINHTTP_NO_REQUEST_DATA;
+    if (!WinHttpSendRequest(
+        request.h,
+        headers.c_str(),
+        -1L,
+        optionalData,
+        bodySize,
+        bodySize,
+        0))
+    {
+        errorOut = L"WinHttpSendRequest failed: " + WinErrorText(GetLastError());
+        return false;
+    }
+
+    if (!WinHttpReceiveResponse(request.h, nullptr)) {
+        errorOut = L"WinHttpReceiveResponse failed: " + WinErrorText(GetLastError());
+        return false;
+    }
+
+    if (!EnsureHttpSuccess(request.h, errorOut))
+        return false;
+
+    std::vector<unsigned char> bytes;
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request.h, &available)) {
+            errorOut = L"WinHttpQueryDataAvailable failed: " + WinErrorText(GetLastError());
+            return false;
+        }
+
+        if (available == 0)
+            break;
+
+        size_t oldSize = bytes.size();
+        bytes.resize(oldSize + available);
+
+        DWORD read = 0;
+        if (!WinHttpReadData(request.h, bytes.data() + oldSize, available, &read)) {
+            errorOut = L"WinHttpReadData failed: " + WinErrorText(GetLastError());
+            return false;
+        }
+
+        bytes.resize(oldSize + read);
+    }
+
+    bodyOut.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    return true;
+}

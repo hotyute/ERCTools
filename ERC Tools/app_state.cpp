@@ -1,9 +1,5 @@
 #include "app_state.h"
 
-const UINT WM_APP_FEED_READY = WM_APP + 1;
-const UINT WM_APP_TILE_READY = WM_APP + 2;
-const UINT WM_APP_BOUNDARY_READY = WM_APP + 3;
-
 const int kMinZoom = 2;
 const int kMaxZoom = 19;
 const int kDefaultZoom = 6;
