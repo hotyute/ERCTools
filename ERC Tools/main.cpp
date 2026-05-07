@@ -10,6 +10,12 @@
 #include <wrl/client.h>
 #include <winhttp.h>
 #include <wincodec.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -43,6 +49,8 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 using Microsoft::WRL::ComPtr;
 using json = nlohmann::json;
@@ -59,6 +67,11 @@ constexpr int IDC_SEVERITY_COMBO = 1004;
 constexpr int IDC_LISTVIEW = 1005;
 constexpr int IDC_DETAILS_EDIT = 1006;
 constexpr int IDC_DOWNLOAD_BOUNDARY_BTN = 1007;
+constexpr int IDC_HEADER_LABEL = 1008;
+constexpr int IDC_URL_LABEL = 1009;
+constexpr int IDC_SEARCH_LABEL = 1010;
+constexpr int IDC_SEVERITY_LABEL = 1011;
+constexpr int IDC_STATUS_BAR = 1012;
 
 constexpr int kMinZoom = 2;
 constexpr int kMaxZoom = 19;
@@ -438,11 +451,11 @@ static std::wstring BuildAlertDetails(const TrafficAlert& a)
     s += L"\r\n";
 
     s += L"Road: ";
-    s += a.road.empty() ? L"—" : a.road;
+    s += a.road.empty() ? L"Â—" : a.road;
     s += L"\r\n";
 
     s += L"Region: ";
-    s += a.region.empty() ? L"—" : a.region;
+    s += a.region.empty() ? L"Â—" : a.region;
     s += L"\r\n";
 
     s += L"Severity: ";
@@ -450,7 +463,7 @@ static std::wstring BuildAlertDetails(const TrafficAlert& a)
     s += L"\r\n";
 
     s += L"Updated: ";
-    s += a.updatedText.empty() ? L"—" : a.updatedText;
+    s += a.updatedText.empty() ? L"Â—" : a.updatedText;
     s += L"\r\n";
 
     s += L"Coordinates: ";
@@ -460,7 +473,7 @@ static std::wstring BuildAlertDetails(const TrafficAlert& a)
         s += std::to_wstring(a.longitude);
     }
     else {
-        s += L"—";
+        s += L"Â—";
     }
     s += L"\r\n\r\n";
 
@@ -629,6 +642,37 @@ static std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html
     return out;
 }
 
+
+static void EnableModernWindowFrame(HWND hwnd)
+{
+    if (!hwnd)
+        return;
+
+    const BOOL enabled = TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enabled, sizeof(enabled));
+}
+
+static HFONT CreateUiFont(int pointSize = 10, int weight = FW_NORMAL)
+{
+    HDC hdc = GetDC(nullptr);
+    const int dpiY = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc)
+        ReleaseDC(nullptr, hdc);
+
+    LOGFONTW lf{};
+    lf.lfHeight = -MulDiv(pointSize, dpiY, 72);
+    lf.lfWeight = weight;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    wcscpy_s(lf.lfFaceName, L"Segoe UI");
+    return CreateFontIndirectW(&lf);
+}
+
+static void ApplyExplorerTheme(HWND hwnd)
+{
+    if (hwnd)
+        SetWindowTheme(hwnd, L"Explorer", nullptr);
+}
+
 // ============================================================
 // HTTP
 // ============================================================
@@ -648,6 +692,93 @@ struct InternetHandle
     InternetHandle(const InternetHandle&) = delete;
     InternetHandle& operator=(const InternetHandle&) = delete;
 };
+
+
+static bool QueryHttpStatus(HINTERNET request, DWORD& statusOut, std::wstring& errorOut)
+{
+    statusOut = 0;
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
+    if (!WinHttpQueryHeaders(
+        request,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX,
+        &status,
+        &statusSize,
+        WINHTTP_NO_HEADER_INDEX))
+    {
+        errorOut = L"Could not read HTTP status: " + WinErrorText(GetLastError());
+        return false;
+    }
+
+    statusOut = status;
+    return true;
+}
+
+static bool EnsureHttpSuccess(HINTERNET request, std::wstring& errorOut)
+{
+    DWORD status = 0;
+    if (!QueryHttpStatus(request, status, errorOut))
+        return false;
+
+    if (status >= 200 && status < 300)
+        return true;
+
+    wchar_t reason[512]{};
+    DWORD reasonSize = sizeof(reason);
+    if (!WinHttpQueryHeaders(
+        request,
+        WINHTTP_QUERY_STATUS_TEXT,
+        WINHTTP_HEADER_NAME_BY_INDEX,
+        reason,
+        &reasonSize,
+        WINHTTP_NO_HEADER_INDEX))
+    {
+        reason[0] = L'\0';
+    }
+
+    errorOut = L"HTTP " + std::to_wstring(status);
+    if (reason[0] != L'\0') {
+        errorOut += L" ";
+        errorOut += reason;
+    }
+
+    if (status >= 300 && status < 400) {
+        wchar_t location[2048]{};
+        DWORD locationSize = sizeof(location);
+        if (WinHttpQueryHeaders(
+            request,
+            WINHTTP_QUERY_LOCATION,
+            WINHTTP_HEADER_NAME_BY_INDEX,
+            location,
+            &locationSize,
+            WINHTTP_NO_HEADER_INDEX) && location[0] != L'\0')
+        {
+            errorOut += L" (redirect to ";
+            errorOut += location;
+            errorOut += L")";
+        }
+    }
+
+    return false;
+}
+
+static void ConfigureSecureProtocols(HINTERNET session)
+{
+    DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+#ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+    secureProtocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+#endif
+    WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &secureProtocols, sizeof(secureProtocols));
+}
+
+static void ConfigureRedirects(HINTERNET request)
+{
+#ifdef WINHTTP_OPTION_REDIRECT_POLICY
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
+#endif
+}
 
 static bool HttpGetText(const std::wstring& inputUrl, std::string& bodyOut, std::wstring& errorOut)
 {
@@ -692,7 +823,7 @@ static bool HttpGetText(const std::wstring& inputUrl, std::string& bodyOut, std:
         fullPath = L"/";
 
     InternetHandle session(WinHttpOpen(
-        L"TrafficEnglandNative/1.0",
+        L"TrafficEnglandNative/1.1 (+https://www.trafficengland.com/traffic-alerts)",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS,
@@ -705,11 +836,7 @@ static bool HttpGetText(const std::wstring& inputUrl, std::string& bodyOut, std:
 
     WinHttpSetTimeouts(session.h, 15000, 15000, 15000, 15000);
 
-    DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
-#ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
-    secureProtocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
-#endif
-    WinHttpSetOption(session.h, WINHTTP_OPTION_SECURE_PROTOCOLS, &secureProtocols, sizeof(secureProtocols));
+    ConfigureSecureProtocols(session.h);
 
     INTERNET_PORT port = parts.nPort;
     if (port == 0)
@@ -736,10 +863,13 @@ static bool HttpGetText(const std::wstring& inputUrl, std::string& bodyOut, std:
         return false;
     }
 
+    ConfigureRedirects(request.h);
+
     std::wstring headers =
-        L"Accept: application/geo+json, application/json, text/json, text/plain, */*;q=0.8\r\n"
+        L"Accept: text/html,application/xhtml+xml,application/geo+json,application/json,text/json,text/plain,*/*;q=0.8\r\n"
         L"Accept-Encoding: identity\r\n"
-        L"Accept-Language: en-GB,en;q=0.9\r\n";
+        L"Accept-Language: en-GB,en;q=0.9\r\n"
+        L"Cache-Control: no-cache\r\n";
 
     WinHttpAddRequestHeaders(request.h, headers.c_str(), -1L, WINHTTP_ADDREQ_FLAG_ADD);
 
@@ -752,6 +882,9 @@ static bool HttpGetText(const std::wstring& inputUrl, std::string& bodyOut, std:
         errorOut = L"WinHttpReceiveResponse failed: " + WinErrorText(GetLastError());
         return false;
     }
+
+    if (!EnsureHttpSuccess(request.h, errorOut))
+        return false;
 
     std::vector<unsigned char> bytes;
     bytes.reserve(4096);
@@ -818,6 +951,11 @@ static bool HttpGetBinary(const std::wstring& inputUrl, std::vector<BYTE>& bodyO
         return false;
     }
 
+    if (parts.nScheme != INTERNET_SCHEME_HTTP && parts.nScheme != INTERNET_SCHEME_HTTPS) {
+        errorOut = L"Only http:// and https:// URLs are supported.";
+        return false;
+    }
+
     std::wstring hostName(host, parts.dwHostNameLength);
     std::wstring objectName(path, parts.dwUrlPathLength);
     std::wstring extraInfo(extra, parts.dwExtraInfoLength);
@@ -826,7 +964,7 @@ static bool HttpGetBinary(const std::wstring& inputUrl, std::vector<BYTE>& bodyO
         fullPath = L"/";
 
     InternetHandle session(WinHttpOpen(
-        L"TrafficEnglandNative/1.0",
+        L"TrafficEnglandNative/1.1 (+https://www.trafficengland.com/traffic-alerts)",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS,
@@ -838,6 +976,7 @@ static bool HttpGetBinary(const std::wstring& inputUrl, std::vector<BYTE>& bodyO
     }
 
     WinHttpSetTimeouts(session.h, 15000, 15000, 15000, 15000);
+    ConfigureSecureProtocols(session.h);
 
     INTERNET_PORT port = parts.nPort;
     if (port == 0)
@@ -864,6 +1003,8 @@ static bool HttpGetBinary(const std::wstring& inputUrl, std::vector<BYTE>& bodyO
         return false;
     }
 
+    ConfigureRedirects(request.h);
+
     std::wstring headers =
         L"Accept: image/png,image/*;q=0.9,*/*;q=0.8\r\n"
         L"Accept-Encoding: identity\r\n";
@@ -879,6 +1020,9 @@ static bool HttpGetBinary(const std::wstring& inputUrl, std::vector<BYTE>& bodyO
         errorOut = L"WinHttpReceiveResponse failed: " + WinErrorText(GetLastError());
         return false;
     }
+
+    if (!EnsureHttpSuccess(request.h, errorOut))
+        return false;
 
     std::vector<BYTE> bytes;
     for (;;) {
@@ -2229,6 +2373,14 @@ private:
         case WM_DESTROY:
             g_appQuitting.store(true);
             KillTimer(m_hwnd, 1);
+            if (m_font) {
+                DeleteObject(m_font);
+                m_font = nullptr;
+            }
+            if (m_headerFont) {
+                DeleteObject(m_headerFont);
+                m_headerFont = nullptr;
+            }
             PostQuitMessage(0);
             return 0;
         }
@@ -2240,10 +2392,57 @@ private:
     {
         INITCOMMONCONTROLSEX icc{};
         icc.dwSize = sizeof(icc);
-        icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES;
+        icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES | ICC_BAR_CLASSES;
         InitCommonControlsEx(&icc);
 
-        m_font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        EnableModernWindowFrame(m_hwnd);
+
+        m_font = CreateUiFont(10);
+        m_headerFont = CreateUiFont(16, FW_SEMIBOLD);
+
+        m_headerLabel = CreateWindowExW(
+            0,
+            L"STATIC",
+            L"Traffic England Alerts",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            0, 0, 0, 0,
+            m_hwnd,
+            reinterpret_cast<HMENU>(IDC_HEADER_LABEL),
+            m_hInst,
+            nullptr);
+
+        m_urlLabel = CreateWindowExW(
+            0,
+            L"STATIC",
+            L"Alerts endpoint",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            0, 0, 0, 0,
+            m_hwnd,
+            reinterpret_cast<HMENU>(IDC_URL_LABEL),
+            m_hInst,
+            nullptr);
+
+        m_searchLabel = CreateWindowExW(
+            0,
+            L"STATIC",
+            L"Search",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            0, 0, 0, 0,
+            m_hwnd,
+            reinterpret_cast<HMENU>(IDC_SEARCH_LABEL),
+            m_hInst,
+            nullptr);
+
+        m_severityLabel = CreateWindowExW(
+            0,
+            L"STATIC",
+            L"Severity",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            0, 0, 0, 0,
+            m_hwnd,
+            reinterpret_cast<HMENU>(IDC_SEVERITY_LABEL),
+            m_hInst,
+            nullptr);
 
         m_urlEdit = CreateWindowExW(
             WS_EX_CLIENTEDGE,
@@ -2260,7 +2459,7 @@ private:
             0,
             L"BUTTON",
             L"Refresh",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
             0, 0, 0, 0,
             m_hwnd,
             reinterpret_cast<HMENU>(IDC_REFRESH_BTN),
@@ -2271,7 +2470,7 @@ private:
             0,
             L"BUTTON",
             L"Download UK boundary",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            WS_CHILD | WS_VISIBLE | BS_COMMANDLINK,
             0, 0, 0, 0,
             m_hwnd,
             reinterpret_cast<HMENU>(IDC_DOWNLOAD_BOUNDARY_BTN),
@@ -2322,15 +2521,33 @@ private:
             m_hInst,
             nullptr);
 
-        if (!m_urlEdit || !m_refreshBtn || !m_boundaryBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit)
+        m_statusBar = CreateWindowExW(
+            0,
+            STATUSCLASSNAMEW,
+            L"Ready",
+            WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
+            0, 0, 0, 0,
+            m_hwnd,
+            reinterpret_cast<HMENU>(IDC_STATUS_BAR),
+            m_hInst,
+            nullptr);
+
+        if (!m_headerLabel || !m_urlLabel || !m_searchLabel || !m_severityLabel ||
+            !m_urlEdit || !m_refreshBtn || !m_boundaryBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_statusBar)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_urlEdit, m_refreshBtn, m_boundaryBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit }) {
+        for (HWND h : { m_urlLabel, m_searchLabel, m_severityLabel, m_urlEdit, m_refreshBtn, m_boundaryBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_statusBar }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
         }
+        SendMessageW(m_headerLabel, WM_SETFONT, reinterpret_cast<WPARAM>(m_headerFont), TRUE);
+
+        SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, region, or description"));
+        SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"https://www.trafficengland.com/traffic-alerts"));
+        SendMessageW(m_boundaryBtn, BCM_SETNOTE, 0, reinterpret_cast<LPARAM>(L"Optional: cache a high-detail UK outline for the native map."));
 
         SendMessageW(m_severityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All"));
         SendMessageW(m_severityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Severe"));
@@ -2340,7 +2557,7 @@ private:
         SendMessageW(m_severityCombo, CB_SETCURSEL, 0, 0);
 
         SendMessageW(m_listView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
-            LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
+            LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP | LVS_EX_INFOTIP);
 
         LVCOLUMNW col{};
         col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
@@ -2375,7 +2592,7 @@ private:
             SelectAlertById(id, true);
             });
 
-        SetWindowTextW(m_urlEdit, L"https://trafficengland.com/traffic-alerts");
+        SetWindowTextW(m_urlEdit, L"https://www.trafficengland.com/traffic-alerts");
 
         Layout();
         SetStatusText(L"Ready.");
@@ -2392,50 +2609,57 @@ private:
         LONG width = std::max<LONG>(1L, rc.right - rc.left);
         LONG height = std::max<LONG>(1L, rc.bottom - rc.top);
 
-        const int pad = 10;
-        const int row1Y = 8;
-        const int row2Y = 38;
-        const int topBarH = 70;   // increased to allow the extra row
+        const int pad = 16;
+        const int labelH = 18;
+        const int controlH = 28;
+        const int topBarH = 118;
+        const int statusH = 24;
 
-        // Row 1: URL + Refresh
-        MoveWindow(m_urlEdit, pad, row1Y, std::max<LONG>(200L, width - 170 - pad * 2), 24, TRUE);
-        MoveWindow(m_refreshBtn, width - 150, row1Y, 140, 24, TRUE);
+        MoveWindow(m_headerLabel, pad, 12, std::max<LONG>(200L, width - pad * 2), 28, TRUE);
 
-        // Row 2: boundary download button
-        MoveWindow(m_boundaryBtn, pad, row2Y, 180, 24, TRUE);
+        const int endpointY = 52;
+        const LONG refreshW = 132;
+        MoveWindow(m_urlLabel, pad, endpointY, 160, labelH, TRUE);
+        MoveWindow(m_urlEdit, pad, endpointY + labelH + 2, std::max<LONG>(220L, width - refreshW - pad * 3), controlH, TRUE);
+        MoveWindow(m_refreshBtn, width - refreshW - pad, endpointY + labelH + 2, refreshW, controlH, TRUE);
 
-        // Main body
         int bodyTop = topBarH;
-        int leftW = 420;
-        int detailsH = 240;
+        int leftW = 440;
+        int detailsH = 250;
 
         int leftX = pad;
         int leftY = bodyTop + pad;
         int leftInnerW = leftW - pad * 2;
 
-        MoveWindow(m_searchEdit, leftX, leftY, leftInnerW, 24, TRUE);
-        MoveWindow(m_severityCombo, leftX, leftY + 32, leftInnerW, 24, TRUE);
+        MoveWindow(m_searchLabel, leftX, leftY, leftInnerW, labelH, TRUE);
+        MoveWindow(m_searchEdit, leftX, leftY + labelH + 2, leftInnerW, controlH, TRUE);
 
-        int listTop = leftY + 64;
-        int bodyHeight = height - bodyTop - pad * 2;
-        int listHeight = std::max(120, bodyHeight - 64 - detailsH - 12);
+        const int severityY = leftY + labelH + controlH + 12;
+        MoveWindow(m_severityLabel, leftX, severityY, leftInnerW, labelH, TRUE);
+        MoveWindow(m_severityCombo, leftX, severityY + labelH + 2, leftInnerW, 180, TRUE);
+
+        const int boundaryY = severityY + labelH + controlH + 16;
+        MoveWindow(m_boundaryBtn, leftX, boundaryY, leftInnerW, 56, TRUE);
+
+        int listTop = boundaryY + 68;
+        int bodyHeight = height - bodyTop - statusH - pad * 2;
+        int listHeight = std::max(120, bodyHeight - (listTop - leftY) - detailsH - 12);
 
         MoveWindow(m_listView, leftX, listTop, leftInnerW, listHeight, TRUE);
         MoveWindow(m_detailsEdit, leftX, listTop + listHeight + 10, leftInnerW, detailsH, TRUE);
 
-        int mapX = leftW;
+        int mapX = leftW + pad;
         int mapY = bodyTop + pad;
         LONG mapW = std::max<LONG>(100L, width - mapX - pad);
-        LONG mapH = std::max<LONG>(100L, height - mapY - pad);
+        LONG mapH = std::max<LONG>(100L, height - mapY - statusH - pad);
 
         MoveWindow(m_map.Hwnd(), mapX, mapY, mapW, mapH, TRUE);
 
-        SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 0, 90);
-        SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 1, std::max(120, leftInnerW - 270));
-        SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 2, 160);
+        SendMessageW(m_statusBar, WM_SIZE, 0, 0);
 
-        InvalidateRect(m_boundaryBtn, nullptr, TRUE);
-        UpdateWindow(m_boundaryBtn);
+        SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 0, 94);
+        SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 1, std::max(120, leftInnerW - 264));
+        SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 2, 160);
     }
 
     void OnCommand(int id, int code)
@@ -2494,6 +2718,8 @@ private:
             title += text;
         }
         SetWindowTextW(m_hwnd, title.c_str());
+        if (m_statusBar)
+            SendMessageW(m_statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
     }
 
     void RefreshFeedAsync()
@@ -2634,7 +2860,7 @@ private:
 
             std::wstring sev = BuildSeverityDisplay(a.severity);
             std::wstring summary = BuildAlertSummary(a);
-            std::wstring updated = a.updatedText.empty() ? L"—" : a.updatedText;
+            std::wstring updated = a.updatedText.empty() ? L"Â—" : a.updatedText;
 
             LVITEMW item{};
             item.mask = LVIF_TEXT;
@@ -2803,14 +3029,20 @@ private:
     HWND m_hwnd = nullptr;
     HINSTANCE m_hInst = nullptr;
     HFONT m_font = nullptr;
+    HFONT m_headerFont = nullptr;
 
+    HWND m_headerLabel = nullptr;
+    HWND m_urlLabel = nullptr;
+    HWND m_searchLabel = nullptr;
+    HWND m_severityLabel = nullptr;
+    HWND m_statusBar = nullptr;
     HWND m_urlEdit = nullptr;
     HWND m_refreshBtn = nullptr;
     HWND m_searchEdit = nullptr;
     HWND m_severityCombo = nullptr;
     HWND m_listView = nullptr;
     HWND m_detailsEdit = nullptr;
-	HWND m_boundaryBtn = nullptr;
+    HWND m_boundaryBtn = nullptr;
 
     MapView m_map;
 
