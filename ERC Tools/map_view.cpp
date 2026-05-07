@@ -534,6 +534,22 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.05f, 0.10f, 0.18f, 0.72f), &m_panelBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.90f), &m_textBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.20f, 0.95f, 0.95f), &m_noteBrush);
+
+        if (g_dwriteFactory && !m_noteTextFormat) {
+            g_dwriteFactory->CreateTextFormat(
+                L"Segoe UI",
+                nullptr,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                13.0f,
+                L"en-gb",
+                &m_noteTextFormat);
+            if (m_noteTextFormat) {
+                m_noteTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+                m_noteTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            }
+        }
     }
 
     void DiscardDeviceResources()
@@ -551,6 +567,7 @@ private:
         m_panelBrush.Reset();
         m_textBrush.Reset();
         m_noteBrush.Reset();
+        m_noteTextFormat.Reset();
     }
 
     void ClearTileCache()
@@ -826,14 +843,21 @@ private:
             if (p.x < -80.0f || p.y < -80.0f || p.x > width + 80.0f || p.y > height + 80.0f)
                 continue;
 
+            std::wstring text = note.text;
+            if (text.size() > 120)
+                text = text.substr(0, 117) + L"...";
+
+            D2D1_RECT_F textRect = D2D1::RectF(p.x + 24.0f, p.y - 36.0f, p.x + 204.0f, p.y + 12.0f);
             D2D1_ROUNDED_RECT bubble = D2D1::RoundedRect(
-                D2D1::RectF(p.x + 10.0f, p.y - 42.0f, p.x + 210.0f, p.y + 18.0f),
+                D2D1::RectF(p.x + 10.0f, p.y - 44.0f, p.x + 214.0f, p.y + 20.0f),
                 10.0f,
                 10.0f);
             m_rt->FillRoundedRectangle(bubble, m_panelBrush.Get());
             m_rt->DrawRoundedRectangle(bubble, m_noteBrush.Get(), 1.5f);
             m_rt->FillEllipse(D2D1::Ellipse(p, 8.0f, 8.0f), m_noteBrush.Get());
             m_rt->DrawLine(p, D2D1::Point2F(p.x + 12.0f, p.y - 6.0f), m_noteBrush.Get(), 2.0f);
+            if (m_noteTextFormat && !text.empty())
+                m_rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), m_noteTextFormat.Get(), textRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
     }
 
@@ -1014,6 +1038,7 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_panelBrush;
     ComPtr<ID2D1SolidColorBrush> m_textBrush;
     ComPtr<ID2D1SolidColorBrush> m_noteBrush;
+    ComPtr<IDWriteTextFormat> m_noteTextFormat;
     std::vector<std::vector<GeoPoint>> m_ukBoundaryRings;
 
     std::mutex m_tileMutex;

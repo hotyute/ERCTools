@@ -19,3 +19,4 @@ std::atomic_bool g_appQuitting{ false };
 std::atomic_bool g_fetchInProgress{ false };
 ComPtr<ID2D1Factory> g_d2dFactory;
 ComPtr<IWICImagingFactory> g_wicFactory;
+ComPtr<IDWriteFactory> g_dwriteFactory;

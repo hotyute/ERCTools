@@ -26,6 +26,15 @@ constexpr int IDC_CHAT_SEND_BTN = 1017;
 constexpr int IDC_NOTE_EDIT = 1018;
 constexpr int IDC_NOTE_BTN = 1019;
 constexpr int IDC_NOTE_LABEL = 1020;
+constexpr int IDM_FILE_SETTINGS = 2001;
+constexpr int IDM_FILE_EXIT = 2002;
+constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
+constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
+constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
+constexpr int IDC_SETTINGS_CLOSE_BTN = 2104;
+constexpr int IDC_SETTINGS_FILTER_LABEL = 2105;
+constexpr int IDC_SETTINGS_ORDER_LABEL = 2106;
+constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 
 struct FeedResult
 {
@@ -94,6 +103,12 @@ static std::vector<ChatMessage> ParseChatMessages(const json& root)
     return out;
 }
 
+static bool IsValidMapCoordinate(double lat, double lon)
+{
+    return std::isfinite(lat) && std::isfinite(lon) &&
+        lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0;
+}
+
 static std::vector<MapNote> ParseMapNotes(const json& root)
 {
     std::vector<MapNote> out;
@@ -117,7 +132,18 @@ static std::vector<MapNote> ParseMapNotes(const json& root)
         note.timestamp = PickString(item, { "timestamp", "time", "createdAt" });
         bool hasLat = PickDouble(item, { "lat", "latitude" }, note.latitude);
         bool hasLon = PickDouble(item, { "lon", "lng", "longitude" }, note.longitude);
-        if (hasLat && hasLon && !note.text.empty())
+        if (!(hasLat && hasLon)) {
+            double x = 0.0;
+            double y = 0.0;
+            if (PickDouble(item, { "x" }, x) && PickDouble(item, { "y" }, y)) {
+                // Some collaborators send web-map coordinates as x/y = lon/lat.
+                note.latitude = y;
+                note.longitude = x;
+                hasLat = true;
+                hasLon = true;
+            }
+        }
+        if (hasLat && hasLon && IsValidMapCoordinate(note.latitude, note.longitude) && !note.text.empty())
             out.push_back(std::move(note));
     }
 
@@ -125,7 +151,7 @@ static std::vector<MapNote> ParseMapNotes(const json& root)
 }
 
 
-static bool FetchTrafficEnglandAlerts(std::vector<TrafficAlert>& alertsOut, std::wstring& errorOut)
+static bool FetchTrafficEnglandAlerts(std::vector<TrafficAlert>& alertsOut, std::wstring& errorOut, bool unplannedOnly, const std::wstring& order)
 {
     alertsOut.clear();
     errorOut.clear();
@@ -137,7 +163,7 @@ static bool FetchTrafficEnglandAlerts(std::vector<TrafficAlert>& alertsOut, std:
         const size_t start = page * kPageSize;
         std::string body;
         std::wstring httpError;
-        if (!HttpGetText(BuildTrafficEnglandAlertsApiUrl(start, kPageSize), body, httpError)) {
+        if (!HttpGetText(BuildTrafficEnglandAlertsApiUrl(start, kPageSize, unplannedOnly, order), body, httpError)) {
             errorOut = L"Traffic England alerts API failed: " + httpError;
             return false;
         }
@@ -255,6 +281,9 @@ private:
             OnCreate();
             return 0;
 
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+
         case WM_SIZE:
             Layout();
             return 0;
@@ -316,6 +345,8 @@ private:
 
         m_font = CreateUiFont(10);
         m_headerFont = CreateUiFont(16, FW_SEMIBOLD);
+
+        CreateMainMenu();
 
         m_headerLabel = CreateWindowExW(
             0,
@@ -388,21 +419,10 @@ private:
             0,
             L"BUTTON",
             L"Refresh",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_DEFPUSHBUTTON,
             0, 0, 0, 0,
             m_hwnd,
             reinterpret_cast<HMENU>(IDC_REFRESH_BTN),
-            m_hInst,
-            nullptr);
-
-        m_boundaryBtn = CreateWindowExW(
-            0,
-            L"BUTTON",
-            L"Download UK boundary",
-            WS_CHILD | WS_VISIBLE | BS_COMMANDLINK,
-            0, 0, 0, 0,
-            m_hwnd,
-            reinterpret_cast<HMENU>(IDC_DOWNLOAD_BOUNDARY_BTN),
             m_hInst,
             nullptr);
 
@@ -460,7 +480,7 @@ private:
             0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_CHAT_EDIT), m_hInst, nullptr);
 
         m_chatSendBtn = CreateWindowExW(
-            0, L"BUTTON", L"Send", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            0, L"BUTTON", L"Send", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_DEFPUSHBUTTON,
             0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_CHAT_SEND_BTN), m_hInst, nullptr);
 
         m_noteEdit = CreateWindowExW(
@@ -468,7 +488,7 @@ private:
             0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_NOTE_EDIT), m_hInst, nullptr);
 
         m_noteBtn = CreateWindowExW(
-            0, L"BUTTON", L"Leave note", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, L"BUTTON", L"Leave note", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON,
             0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_NOTE_BTN), m_hInst, nullptr);
 
         m_statusBar = CreateWindowExW(
@@ -483,13 +503,13 @@ private:
             nullptr);
 
         if (!m_headerLabel || !m_urlLabel || !m_searchLabel || !m_severityLabel ||
-            !m_urlEdit || !m_serverLabel || !m_serverEdit || !m_refreshBtn || !m_boundaryBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar)
+            !m_urlEdit || !m_serverLabel || !m_serverEdit || !m_refreshBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_urlLabel, m_serverLabel, m_searchLabel, m_severityLabel, m_noteLabel, m_urlEdit, m_serverEdit, m_refreshBtn, m_boundaryBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
+        for (HWND h : { m_urlLabel, m_serverLabel, m_searchLabel, m_severityLabel, m_noteLabel, m_urlEdit, m_serverEdit, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -500,7 +520,6 @@ private:
         SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"http://localhost:8080"));
         SendMessageW(m_chatEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Message local responders..."));
         SendMessageW(m_noteEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Note text for the selected map location"));
-        SendMessageW(m_boundaryBtn, BCM_SETNOTE, 0, reinterpret_cast<LPARAM>(L"Optional: cache a high-detail UK outline for the native map."));
 
         SendMessageW(m_severityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All"));
         SendMessageW(m_severityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Severe"));
@@ -573,9 +592,9 @@ private:
         LONG height = std::max<LONG>(1L, rc.bottom - rc.top);
 
         const int pad = 16;
-        const int labelH = 18;
-        const int controlH = 28;
-        const int topBarH = 148;
+        const int labelH = 22;
+        const int controlH = 32;
+        const int topBarH = 156;
         const int statusH = 24;
 
         MoveWindow(m_headerLabel, pad, 12, std::max<LONG>(200L, width - pad * 2), 28, TRUE);
@@ -605,10 +624,7 @@ private:
         MoveWindow(m_severityLabel, leftX, severityY, leftInnerW, labelH, TRUE);
         MoveWindow(m_severityCombo, leftX, severityY + labelH + 2, leftInnerW, 180, TRUE);
 
-        const int boundaryY = severityY + labelH + controlH + 16;
-        MoveWindow(m_boundaryBtn, leftX, boundaryY, leftInnerW, 56, TRUE);
-
-        int listTop = boundaryY + 68;
+        int listTop = severityY + labelH + controlH + 18;
         int bodyHeight = height - bodyTop - statusH - pad * 2;
         int listHeight = std::max(110, bodyHeight - (listTop - leftY) - detailsH - chatH - 58);
 
@@ -659,9 +675,12 @@ private:
                 SetStatusText(L"Showing " + std::to_wstring(visible) + L" alert(s).");
             }
             break;
-        case IDC_DOWNLOAD_BOUNDARY_BTN:
-            if (code == BN_CLICKED)
-                DownloadBoundaryFromGitHubAsync();
+        case IDM_FILE_SETTINGS:
+            ShowSettingsWindow();
+            break;
+
+        case IDM_FILE_EXIT:
+            DestroyWindow(m_hwnd);
             break;
 
         case IDC_CHAT_SEND_BTN:
@@ -725,15 +744,17 @@ private:
         SetStatusText(L"Fetching alerts...");
 
         HWND hwnd = m_hwnd;
+        const bool unplannedOnly = m_alertFilterUnplannedOnly;
+        const std::wstring order = m_alertOrder;
 
-        std::thread([hwnd, url]() {
+        std::thread([hwnd, url, unplannedOnly, order]() {
             auto* result = new FeedResult{};
             std::string body;
             std::wstring error;
 
             if (IsTrafficEnglandAlertsPageUrl(url)) {
                 std::vector<TrafficAlert> alerts;
-                if (FetchTrafficEnglandAlerts(alerts, error)) {
+                if (FetchTrafficEnglandAlerts(alerts, error, unplannedOnly, order)) {
                     result->ok = true;
                     result->alerts = std::move(alerts);
                 }
@@ -786,17 +807,7 @@ private:
             return;
 
         m_allAlerts = result->alerts;
-        std::sort(m_allAlerts.begin(), m_allAlerts.end(),
-            [](const TrafficAlert& a, const TrafficAlert& b)
-            {
-                std::wstring ar = ToLower(Trim(a.road.empty() ? a.region : a.road));
-                std::wstring br = ToLower(Trim(b.road.empty() ? b.region : b.road));
-
-                if (ar != br)
-                    return ar < br;
-
-                return ToLower(Trim(a.title)) < ToLower(Trim(b.title));
-            });
+        SortAlertsForCurrentOrder();
         delete result;
 
         size_t visible = ApplyFilters(true);
@@ -1112,10 +1123,8 @@ private:
                 m_chatMessages = std::move(result->chat);
                 RenderChatHistory();
             }
-            if (!result->notes.empty()) {
-                m_notes = std::move(result->notes);
-                m_map.SetNotes(m_notes);
-            }
+            m_notes = std::move(result->notes);
+            m_map.SetNotes(m_notes);
         }
         else if (result->action == ServerAction::SendChat) {
             SetStatusText(result->ok ? L"Chat message sent." : L"Chat send failed; kept locally.");
@@ -1200,6 +1209,184 @@ private:
         delete result;
     }
 
+    void CreateMainMenu()
+    {
+        HMENU menu = CreateMenu();
+        HMENU fileMenu = CreatePopupMenu();
+        AppendMenuW(fileMenu, MF_STRING, IDM_FILE_SETTINGS, L"Settings...");
+        AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
+        SetMenu(m_hwnd, menu);
+    }
+
+    void SortAlertsForCurrentOrder()
+    {
+        std::wstring order = ToLower(Trim(m_alertOrder));
+        std::sort(m_allAlerts.begin(), m_allAlerts.end(),
+            [&order](const TrafficAlert& a, const TrafficAlert& b)
+            {
+                if (order == L"updated")
+                    return ToLower(Trim(a.updatedText)) > ToLower(Trim(b.updatedText));
+                if (order == L"severity") {
+                    int sa = (SeverityBucket(a.severity) == L"severe") ? 0 : (SeverityBucket(a.severity) == L"moderate" ? 1 : (SeverityBucket(a.severity) == L"minor" ? 2 : 3));
+                    int sb = (SeverityBucket(b.severity) == L"severe") ? 0 : (SeverityBucket(b.severity) == L"moderate" ? 1 : (SeverityBucket(b.severity) == L"minor" ? 2 : 3));
+                    if (sa != sb) return sa < sb;
+                }
+                if (order == L"title")
+                    return ToLower(Trim(a.title)) < ToLower(Trim(b.title));
+
+                std::wstring ar = ToLower(Trim(a.road.empty() ? a.region : a.road));
+                std::wstring br = ToLower(Trim(b.road.empty() ? b.region : b.road));
+
+                if (ar != br)
+                    return ar < br;
+
+                return ToLower(Trim(a.title)) < ToLower(Trim(b.title));
+            });
+    }
+
+    LRESULT OnDrawItem(DRAWITEMSTRUCT* dis)
+    {
+        if (!dis || dis->CtlType != ODT_BUTTON)
+            return FALSE;
+
+        bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+        bool hot = (dis->itemState & ODS_HOTLIGHT) != 0;
+        HBRUSH bg = CreateSolidBrush(pressed ? RGB(21, 92, 171) : (hot ? RGB(32, 124, 229) : RGB(0, 103, 192)));
+        FillRect(dis->hDC, &dis->rcItem, bg);
+        DeleteObject(bg);
+
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(88, 166, 255));
+        HGDIOBJ oldPen = SelectObject(dis->hDC, pen);
+        HGDIOBJ oldBrush = SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+        RoundRect(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom, 9, 9);
+        SelectObject(dis->hDC, oldBrush);
+        SelectObject(dis->hDC, oldPen);
+        DeleteObject(pen);
+
+        wchar_t text[128]{};
+        GetWindowTextW(dis->hwndItem, text, _countof(text));
+        SetBkMode(dis->hDC, TRANSPARENT);
+        SetTextColor(dis->hDC, RGB(255, 255, 255));
+        HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(dis->hDC, m_font));
+        RECT textRc = dis->rcItem;
+        DrawTextW(dis->hDC, text, -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(dis->hDC, oldFont);
+        return TRUE;
+    }
+
+    static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleSettingsMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleSettingsMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateSettingsControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnSettingsCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowSettingsWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = SettingsWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.lpszClassName = kSettingsClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_settingsWnd || !IsWindow(m_settingsWnd)) {
+            m_settingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClassName, L"Settings", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT, CW_USEDEFAULT, 430, 255, m_hwnd, nullptr, m_hInst, this);
+        }
+        SyncSettingsControls();
+        ShowWindow(m_settingsWnd, SW_SHOW);
+        SetForegroundWindow(m_settingsWnd);
+    }
+
+    void CreateSettingsControls(HWND parent)
+    {
+        HWND filterLabel = CreateWindowExW(0, L"STATIC", L"Traffic England alert filter", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 18, 360, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_FILTER_LABEL), m_hInst, nullptr);
+        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 44, 370, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
+        HWND orderLabel = CreateWindowExW(0, L"STATIC", L"Traffic England order", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 82, 360, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ORDER_LABEL), m_hInst, nullptr);
+        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 108, 370, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
+        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 154, 250, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 286, 154, 102, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+
+        for (HWND h : { filterLabel, m_settingsFilterCombo, orderLabel, m_settingsOrderCombo, boundary, close }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+
+        SendMessageW(m_settingsFilterCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Unplanned only"));
+        SendMessageW(m_settingsFilterCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All alerts"));
+        SendMessageW(m_settingsOrderCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Road"));
+        SendMessageW(m_settingsOrderCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Severity"));
+        SendMessageW(m_settingsOrderCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Updated"));
+        SendMessageW(m_settingsOrderCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Title"));
+        SyncSettingsControls();
+    }
+
+    void SyncSettingsControls()
+    {
+        if (m_settingsFilterCombo)
+            SendMessageW(m_settingsFilterCombo, CB_SETCURSEL, m_alertFilterUnplannedOnly ? 0 : 1, 0);
+        if (m_settingsOrderCombo) {
+            int idx = 0;
+            std::wstring order = ToLower(Trim(m_alertOrder));
+            if (order == L"severity") idx = 1;
+            else if (order == L"updated") idx = 2;
+            else if (order == L"title") idx = 3;
+            SendMessageW(m_settingsOrderCombo, CB_SETCURSEL, idx, 0);
+        }
+    }
+
+    void OnSettingsCommand(int id, int code)
+    {
+        if (id == IDC_SETTINGS_ALERT_FILTER && code == CBN_SELCHANGE) {
+            m_alertFilterUnplannedOnly = SendMessageW(m_settingsFilterCombo, CB_GETCURSEL, 0, 0) == 0;
+            RefreshFeedAsync();
+        }
+        else if (id == IDC_SETTINGS_ALERT_ORDER && code == CBN_SELCHANGE) {
+            int idx = static_cast<int>(SendMessageW(m_settingsOrderCombo, CB_GETCURSEL, 0, 0));
+            const wchar_t* orders[] = { L"Road", L"Severity", L"Updated", L"Title" };
+            m_alertOrder = orders[ClampValue(idx, 0, 3)];
+            SortAlertsForCurrentOrder();
+            ApplyFilters(true);
+        }
+        else if (id == IDC_SETTINGS_BOUNDARY_BTN && code == BN_CLICKED) {
+            DownloadBoundaryFromGitHubAsync();
+        }
+        else if (id == IDC_SETTINGS_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_settingsWnd, SW_HIDE);
+        }
+    }
+
     HWND m_hwnd = nullptr;
     HINSTANCE m_hInst = nullptr;
     HFONT m_font = nullptr;
@@ -1219,7 +1406,9 @@ private:
     HWND m_severityCombo = nullptr;
     HWND m_listView = nullptr;
     HWND m_detailsEdit = nullptr;
-    HWND m_boundaryBtn = nullptr;
+    HWND m_settingsWnd = nullptr;
+    HWND m_settingsFilterCombo = nullptr;
+    HWND m_settingsOrderCombo = nullptr;
     HWND m_chatHistory = nullptr;
     HWND m_chatEdit = nullptr;
     HWND m_chatSendBtn = nullptr;
@@ -1234,6 +1423,8 @@ private:
     std::vector<MapNote> m_notes;
     std::wstring m_selectedId;
     bool m_programmaticSelection = false;
+    bool m_alertFilterUnplannedOnly = true;
+    std::wstring m_alertOrder = L"Road";
     std::atomic_bool m_serverRequestInProgress{ false };
     bool m_hasPendingNoteLocation = false;
     double m_pendingNoteLat = 0.0;

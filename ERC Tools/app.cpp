@@ -4,6 +4,7 @@
 #include "util.h"
 
 #pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -24,6 +25,11 @@ bool InitGraphicsFactories()
 
     if (!g_wicFactory) {
         if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_wicFactory))))
+            return false;
+    }
+
+    if (!g_dwriteFactory) {
+        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(g_dwriteFactory.GetAddressOf()))))
             return false;
     }
 
@@ -50,6 +56,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
 
     const int rc = RunMainWindow(hInstance, nCmdShow);
 
+    g_dwriteFactory.Reset();
     g_wicFactory.Reset();
     g_d2dFactory.Reset();
     CoUninitialize();
