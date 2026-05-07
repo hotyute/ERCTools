@@ -1,0 +1,25 @@
+#pragma once
+#include "common.h"
+
+extern const UINT WM_APP_FEED_READY;
+extern const UINT WM_APP_TILE_READY;
+extern const UINT WM_APP_BOUNDARY_READY;
+
+extern const int kMinZoom;
+extern const int kMaxZoom;
+extern const int kDefaultZoom;
+
+extern const double kDefaultCenterLat;
+extern const double kDefaultCenterLon;
+extern const double kMaxMercatorLat;
+extern const double kPi;
+
+extern const wchar_t kMainClassName[];
+extern const wchar_t kMapClassName[];
+extern const wchar_t kUkBoundarySourceUrl[];
+
+extern std::atomic_bool g_boundaryDownloadInProgress;
+extern std::atomic_bool g_appQuitting;
+extern std::atomic_bool g_fetchInProgress;
+extern ComPtr<ID2D1Factory> g_d2dFactory;
+extern ComPtr<IWICImagingFactory> g_wicFactory;

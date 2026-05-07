@@ -1,0 +1,28 @@
+#pragma once
+#include "common.h"
+
+struct GeoPoint
+{
+    double lat = 0.0;
+    double lon = 0.0;
+};
+
+struct WorldPoint
+{
+    double x = 0.0;
+    double y = 0.0;
+};
+
+struct TrafficAlert
+{
+    std::wstring id;
+    std::wstring title;
+    std::wstring description;
+    std::wstring road;
+    std::wstring region;
+    std::wstring severity;
+    std::wstring updatedText;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    bool hasLocation = false;
+};
