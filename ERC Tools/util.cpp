@@ -345,6 +345,36 @@ std::wstring BuildAlertDetails(const TrafficAlert& a)
 }
 
 std::wstring NormalizeUrl(std::wstring url)
+{
+    url = Trim(url);
+    if (url.empty())
+        return {};
+
+    if (url.find(L"://") == std::wstring::npos)
+        url = L"https://" + url;
+
+    return url;
+}
+
+std::string WideToUtf8(const std::wstring& s)
+{
+    if (s.empty())
+        return {};
+
+    int needed = WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0, nullptr, nullptr);
+    if (needed <= 0)
+        return {};
+
+    std::string out(static_cast<size_t>(needed), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &out[0], needed, nullptr, nullptr);
+    return out;
+}
+
+std::string JsonEscape(const std::wstring& s)
+{
+    return json(WideToUtf8(s)).dump();
+}
+
 void EnableModernWindowFrame(HWND hwnd)
 {
     if (!hwnd)
@@ -354,7 +384,7 @@ void EnableModernWindowFrame(HWND hwnd)
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enabled, sizeof(enabled));
 }
 
-HFONT CreateUiFont(int pointSize = 10, int weight = FW_NORMAL)
+HFONT CreateUiFont(int pointSize, int weight)
 {
     HDC hdc = GetDC(nullptr);
     const int dpiY = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;

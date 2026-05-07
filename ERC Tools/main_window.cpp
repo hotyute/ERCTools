@@ -18,6 +18,14 @@ constexpr int IDC_URL_LABEL = 1009;
 constexpr int IDC_SEARCH_LABEL = 1010;
 constexpr int IDC_SEVERITY_LABEL = 1011;
 constexpr int IDC_STATUS_BAR = 1012;
+constexpr int IDC_SERVER_EDIT = 1013;
+constexpr int IDC_SERVER_LABEL = 1014;
+constexpr int IDC_CHAT_HISTORY = 1015;
+constexpr int IDC_CHAT_EDIT = 1016;
+constexpr int IDC_CHAT_SEND_BTN = 1017;
+constexpr int IDC_NOTE_EDIT = 1018;
+constexpr int IDC_NOTE_BTN = 1019;
+constexpr int IDC_NOTE_LABEL = 1020;
 
 struct FeedResult
 {
@@ -32,6 +40,89 @@ struct BoundaryDownloadResult
     std::wstring error;
     std::filesystem::path filePath;
 };
+
+enum class ServerAction
+{
+    Poll,
+    SendChat,
+    SendNote
+};
+
+struct ServerResult
+{
+    ServerAction action = ServerAction::Poll;
+    bool ok = false;
+    std::wstring error;
+    std::vector<ChatMessage> chat;
+    std::vector<MapNote> notes;
+};
+
+static std::wstring AppendPath(std::wstring base, const wchar_t* path)
+{
+    base = NormalizeUrl(base);
+    while (!base.empty() && base.back() == L'/')
+        base.pop_back();
+    return base + path;
+}
+
+static std::vector<ChatMessage> ParseChatMessages(const json& root)
+{
+    std::vector<ChatMessage> out;
+    const json* arr = nullptr;
+    if (root.is_array())
+        arr = &root;
+    else if (root.contains("chat") && root["chat"].is_array())
+        arr = &root["chat"];
+    else if (root.contains("messages") && root["messages"].is_array())
+        arr = &root["messages"];
+
+    if (!arr)
+        return out;
+
+    for (const auto& item : *arr) {
+        if (!item.is_object())
+            continue;
+
+        ChatMessage msg;
+        msg.author = PickString(item, { "author", "user", "name" });
+        msg.text = PickString(item, { "text", "message", "body" });
+        msg.timestamp = PickString(item, { "timestamp", "time", "createdAt" });
+        if (!msg.text.empty())
+            out.push_back(std::move(msg));
+    }
+
+    return out;
+}
+
+static std::vector<MapNote> ParseMapNotes(const json& root)
+{
+    std::vector<MapNote> out;
+    const json* arr = nullptr;
+    if (root.is_array())
+        arr = &root;
+    else if (root.contains("notes") && root["notes"].is_array())
+        arr = &root["notes"];
+
+    if (!arr)
+        return out;
+
+    for (const auto& item : *arr) {
+        if (!item.is_object())
+            continue;
+
+        MapNote note;
+        note.id = PickString(item, { "id", "noteId" });
+        note.author = PickString(item, { "author", "user", "name" });
+        note.text = PickString(item, { "text", "note", "body" });
+        note.timestamp = PickString(item, { "timestamp", "time", "createdAt" });
+        bool hasLat = PickDouble(item, { "lat", "latitude" }, note.latitude);
+        bool hasLon = PickDouble(item, { "lon", "lng", "longitude" }, note.longitude);
+        if (hasLat && hasLon && !note.text.empty())
+            out.push_back(std::move(note));
+    }
+
+    return out;
+}
 
 
 static bool FetchTrafficEnglandAlerts(std::vector<TrafficAlert>& alertsOut, std::wstring& errorOut)
@@ -179,6 +270,8 @@ private:
         case WM_TIMER:
             if (wParam == 1)
                 RefreshFeedAsync();
+            else if (wParam == 2)
+                PollServerAsync();
             return 0;
 
         case WM_APP_FEED_READY:
@@ -189,9 +282,14 @@ private:
             OnBoundaryReady(reinterpret_cast<BoundaryDownloadResult*>(lParam));
             return 0;
 
+        case WM_APP_SERVER_READY:
+            OnServerReady(reinterpret_cast<ServerResult*>(lParam));
+            return 0;
+
         case WM_DESTROY:
             g_appQuitting.store(true);
             KillTimer(m_hwnd, 1);
+            KillTimer(m_hwnd, 2);
             if (m_font) {
                 DeleteObject(m_font);
                 m_font = nullptr;
@@ -263,6 +361,14 @@ private:
             m_hInst,
             nullptr);
 
+        m_serverLabel = CreateWindowExW(
+            0, L"STATIC", L"Collaboration server", WS_CHILD | WS_VISIBLE | SS_LEFT,
+            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_SERVER_LABEL), m_hInst, nullptr);
+
+        m_noteLabel = CreateWindowExW(
+            0, L"STATIC", L"Map note (double-click map to choose a location)", WS_CHILD | WS_VISIBLE | SS_LEFT,
+            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_NOTE_LABEL), m_hInst, nullptr);
+
         m_urlEdit = CreateWindowExW(
             WS_EX_CLIENTEDGE,
             L"EDIT",
@@ -273,6 +379,10 @@ private:
             reinterpret_cast<HMENU>(IDC_URL_EDIT),
             m_hInst,
             nullptr);
+
+        m_serverEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_SERVER_EDIT), m_hInst, nullptr);
 
         m_refreshBtn = CreateWindowExW(
             0,
@@ -340,6 +450,27 @@ private:
             m_hInst,
             nullptr);
 
+        m_chatHistory = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
+            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_CHAT_HISTORY), m_hInst, nullptr);
+
+        m_chatEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_CHAT_EDIT), m_hInst, nullptr);
+
+        m_chatSendBtn = CreateWindowExW(
+            0, L"BUTTON", L"Send", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_CHAT_SEND_BTN), m_hInst, nullptr);
+
+        m_noteEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_NOTE_EDIT), m_hInst, nullptr);
+
+        m_noteBtn = CreateWindowExW(
+            0, L"BUTTON", L"Leave note", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_NOTE_BTN), m_hInst, nullptr);
+
         m_statusBar = CreateWindowExW(
             0,
             STATUSCLASSNAMEW,
@@ -352,13 +483,13 @@ private:
             nullptr);
 
         if (!m_headerLabel || !m_urlLabel || !m_searchLabel || !m_severityLabel ||
-            !m_urlEdit || !m_refreshBtn || !m_boundaryBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_statusBar)
+            !m_urlEdit || !m_serverLabel || !m_serverEdit || !m_refreshBtn || !m_boundaryBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_urlLabel, m_searchLabel, m_severityLabel, m_urlEdit, m_refreshBtn, m_boundaryBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_statusBar }) {
+        for (HWND h : { m_urlLabel, m_serverLabel, m_searchLabel, m_severityLabel, m_noteLabel, m_urlEdit, m_serverEdit, m_refreshBtn, m_boundaryBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -366,6 +497,9 @@ private:
 
         SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, region, or description"));
         SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"https://www.trafficengland.com/traffic-alerts"));
+        SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"http://localhost:8080"));
+        SendMessageW(m_chatEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Message local responders..."));
+        SendMessageW(m_noteEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Note text for the selected map location"));
         SendMessageW(m_boundaryBtn, BCM_SETNOTE, 0, reinterpret_cast<LPARAM>(L"Optional: cache a high-detail UK outline for the native map."));
 
         SendMessageW(m_severityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All"));
@@ -410,14 +544,24 @@ private:
         m_map.SetSelectCallback([this](const std::wstring& id) {
             SelectAlertById(id, true);
             });
+        m_map.SetNoteLocationCallback([this](double lat, double lon) {
+            m_pendingNoteLat = lat;
+            m_pendingNoteLon = lon;
+            m_hasPendingNoteLocation = true;
+            SetStatusText(L"Note location selected: " + std::to_wstring(lat) + L", " + std::to_wstring(lon));
+            SetFocus(m_noteEdit);
+            });
 
         SetWindowTextW(m_urlEdit, L"https://www.trafficengland.com/traffic-alerts");
+        SetWindowTextW(m_serverEdit, L"http://localhost:8080");
 
         Layout();
         SetStatusText(L"Ready.");
         SetTimer(m_hwnd, 1, 5 * 60 * 1000, nullptr);
+        SetTimer(m_hwnd, 2, 8 * 1000, nullptr);
 
         RefreshFeedAsync();
+        PollServerAsync();
     }
 
     void Layout()
@@ -431,20 +575,24 @@ private:
         const int pad = 16;
         const int labelH = 18;
         const int controlH = 28;
-        const int topBarH = 118;
+        const int topBarH = 148;
         const int statusH = 24;
 
         MoveWindow(m_headerLabel, pad, 12, std::max<LONG>(200L, width - pad * 2), 28, TRUE);
 
         const int endpointY = 52;
         const LONG refreshW = 132;
+        LONG topEditW = std::max<LONG>(220L, (width - refreshW - pad * 4) / 2);
         MoveWindow(m_urlLabel, pad, endpointY, 160, labelH, TRUE);
-        MoveWindow(m_urlEdit, pad, endpointY + labelH + 2, std::max<LONG>(220L, width - refreshW - pad * 3), controlH, TRUE);
+        MoveWindow(m_urlEdit, pad, endpointY + labelH + 2, topEditW, controlH, TRUE);
+        MoveWindow(m_serverLabel, pad * 2 + topEditW, endpointY, 180, labelH, TRUE);
+        MoveWindow(m_serverEdit, pad * 2 + topEditW, endpointY + labelH + 2, std::max<LONG>(220L, width - refreshW - topEditW - pad * 4), controlH, TRUE);
         MoveWindow(m_refreshBtn, width - refreshW - pad, endpointY + labelH + 2, refreshW, controlH, TRUE);
 
         int bodyTop = topBarH;
         int leftW = 440;
-        int detailsH = 250;
+        int detailsH = 185;
+        int chatH = 154;
 
         int leftX = pad;
         int leftY = bodyTop + pad;
@@ -462,17 +610,26 @@ private:
 
         int listTop = boundaryY + 68;
         int bodyHeight = height - bodyTop - statusH - pad * 2;
-        int listHeight = std::max(120, bodyHeight - (listTop - leftY) - detailsH - 12);
+        int listHeight = std::max(110, bodyHeight - (listTop - leftY) - detailsH - chatH - 58);
 
         MoveWindow(m_listView, leftX, listTop, leftInnerW, listHeight, TRUE);
-        MoveWindow(m_detailsEdit, leftX, listTop + listHeight + 10, leftInnerW, detailsH, TRUE);
+        int detailsTop = listTop + listHeight + 10;
+        MoveWindow(m_detailsEdit, leftX, detailsTop, leftInnerW, detailsH, TRUE);
+        int chatTop = detailsTop + detailsH + 10;
+        MoveWindow(m_chatHistory, leftX, chatTop, leftInnerW, chatH - controlH - 8, TRUE);
+        MoveWindow(m_chatEdit, leftX, chatTop + chatH - controlH, leftInnerW - 72, controlH, TRUE);
+        MoveWindow(m_chatSendBtn, leftX + leftInnerW - 66, chatTop + chatH - controlH, 66, controlH, TRUE);
 
         int mapX = leftW + pad;
         int mapY = bodyTop + pad;
         LONG mapW = std::max<LONG>(100L, width - mapX - pad);
-        LONG mapH = std::max<LONG>(100L, height - mapY - statusH - pad);
+        LONG mapH = std::max<LONG>(100L, height - mapY - statusH - pad - 66);
 
         MoveWindow(m_map.Hwnd(), mapX, mapY, mapW, mapH, TRUE);
+        int noteY = mapY + mapH + 8;
+        MoveWindow(m_noteLabel, mapX, noteY, mapW, labelH, TRUE);
+        MoveWindow(m_noteEdit, mapX, noteY + labelH + 2, std::max<LONG>(180L, mapW - 132), controlH, TRUE);
+        MoveWindow(m_noteBtn, mapX + mapW - 122, noteY + labelH + 2, 122, controlH, TRUE);
 
         SendMessageW(m_statusBar, WM_SIZE, 0, 0);
 
@@ -505,6 +662,16 @@ private:
         case IDC_DOWNLOAD_BOUNDARY_BTN:
             if (code == BN_CLICKED)
                 DownloadBoundaryFromGitHubAsync();
+            break;
+
+        case IDC_CHAT_SEND_BTN:
+            if (code == BN_CLICKED)
+                SendChatAsync();
+            break;
+
+        case IDC_NOTE_BTN:
+            if (code == BN_CLICKED)
+                SendNoteAsync();
             break;
         }
     }
@@ -786,6 +953,182 @@ private:
         m_programmaticSelection = false;
     }
 
+
+    std::wstring ServerBaseUrl() const
+    {
+        return NormalizeUrl(GetWindowTextString(m_serverEdit));
+    }
+
+    void RenderChatHistory()
+    {
+        std::wstring text;
+        for (const auto& msg : m_chatMessages) {
+            if (!msg.timestamp.empty()) {
+                text += L"[" + msg.timestamp + L"] ";
+            }
+            if (!msg.author.empty())
+                text += msg.author + L": ";
+            text += msg.text + L"\r\n";
+        }
+        SetWindowTextSafe(m_chatHistory, text);
+    }
+
+    void PollServerAsync()
+    {
+        if (m_serverRequestInProgress.exchange(true))
+            return;
+
+        std::wstring server = ServerBaseUrl();
+        if (server.empty()) {
+            m_serverRequestInProgress.store(false);
+            return;
+        }
+
+        HWND hwnd = m_hwnd;
+        std::thread([hwnd, server]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::Poll;
+
+            std::string chatBody;
+            std::wstring chatError;
+            if (HttpGetText(AppendPath(server, L"/api/chat"), chatBody, chatError)) {
+                try {
+                    result->chat = ParseChatMessages(json::parse(chatBody));
+                    result->ok = true;
+                }
+                catch (const std::exception& e) {
+                    result->error = L"Chat parse failed: " + Utf8ToWide(e.what());
+                }
+            }
+            else {
+                result->error = L"Chat poll failed: " + chatError;
+            }
+
+            std::string noteBody;
+            std::wstring noteError;
+            if (HttpGetText(AppendPath(server, L"/api/notes"), noteBody, noteError)) {
+                try {
+                    result->notes = ParseMapNotes(json::parse(noteBody));
+                    result->ok = true;
+                }
+                catch (const std::exception& e) {
+                    if (!result->error.empty())
+                        result->error += L" ";
+                    result->error += L"Notes parse failed: " + Utf8ToWide(e.what());
+                }
+            }
+            else if (result->error.empty()) {
+                result->error = L"Notes poll failed: " + noteError;
+            }
+
+            if (g_appQuitting.load() || !IsWindow(hwnd)) {
+                delete result;
+                return;
+            }
+            PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            }).detach();
+    }
+
+    void SendChatAsync()
+    {
+        std::wstring text = Trim(GetWindowTextString(m_chatEdit));
+        if (text.empty())
+            return;
+
+        SetWindowTextSafe(m_chatEdit, L"");
+        ChatMessage local{ L"Me", text, L"pending" };
+        m_chatMessages.push_back(local);
+        RenderChatHistory();
+
+        std::wstring server = ServerBaseUrl();
+        HWND hwnd = m_hwnd;
+        std::thread([hwnd, server, text]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::SendChat;
+            std::string response;
+            std::wstring error;
+            std::string body = "{\"author\":" + JsonEscape(L"ERCTools") + ",\"text\":" + JsonEscape(text) + "}";
+            result->ok = HttpPostJsonText(AppendPath(server, L"/api/chat"), body, response, error);
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            }).detach();
+    }
+
+    void SendNoteAsync()
+    {
+        std::wstring text = Trim(GetWindowTextString(m_noteEdit));
+        if (text.empty()) {
+            SetStatusText(L"Type note text first.");
+            return;
+        }
+        if (!m_hasPendingNoteLocation) {
+            SetStatusText(L"Double-click the map to choose where the note belongs.");
+            return;
+        }
+
+        MapNote note;
+        note.author = L"Me";
+        note.text = text;
+        note.timestamp = L"pending";
+        note.latitude = m_pendingNoteLat;
+        note.longitude = m_pendingNoteLon;
+        m_notes.push_back(note);
+        m_map.SetNotes(m_notes);
+        SetWindowTextSafe(m_noteEdit, L"");
+
+        std::wstring server = ServerBaseUrl();
+        HWND hwnd = m_hwnd;
+        double lat = m_pendingNoteLat;
+        double lon = m_pendingNoteLon;
+        std::thread([hwnd, server, text, lat, lon]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::SendNote;
+            std::string response;
+            std::wstring error;
+            std::string body = "{\"author\":" + JsonEscape(L"ERCTools") +
+                ",\"text\":" + JsonEscape(text) +
+                ",\"latitude\":" + std::to_string(lat) +
+                ",\"longitude\":" + std::to_string(lon) + "}";
+            result->ok = HttpPostJsonText(AppendPath(server, L"/api/notes"), body, response, error);
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            }).detach();
+    }
+
+    void OnServerReady(ServerResult* result)
+    {
+        m_serverRequestInProgress.store(false);
+        if (!result)
+            return;
+
+        if (result->action == ServerAction::Poll && result->ok) {
+            if (!result->chat.empty()) {
+                m_chatMessages = std::move(result->chat);
+                RenderChatHistory();
+            }
+            if (!result->notes.empty()) {
+                m_notes = std::move(result->notes);
+                m_map.SetNotes(m_notes);
+            }
+        }
+        else if (result->action == ServerAction::SendChat) {
+            SetStatusText(result->ok ? L"Chat message sent." : L"Chat send failed; kept locally.");
+            PollServerAsync();
+        }
+        else if (result->action == ServerAction::SendNote) {
+            SetStatusText(result->ok ? L"Map note shared." : L"Note share failed; kept locally.");
+            PollServerAsync();
+        }
+
+        delete result;
+    }
+
     void DownloadBoundaryFromGitHubAsync()
     {
         if (g_boundaryDownloadInProgress.exchange(true)) {
@@ -867,20 +1210,34 @@ private:
     HWND m_searchLabel = nullptr;
     HWND m_severityLabel = nullptr;
     HWND m_statusBar = nullptr;
+    HWND m_serverLabel = nullptr;
+    HWND m_noteLabel = nullptr;
     HWND m_urlEdit = nullptr;
+    HWND m_serverEdit = nullptr;
     HWND m_refreshBtn = nullptr;
     HWND m_searchEdit = nullptr;
     HWND m_severityCombo = nullptr;
     HWND m_listView = nullptr;
     HWND m_detailsEdit = nullptr;
     HWND m_boundaryBtn = nullptr;
+    HWND m_chatHistory = nullptr;
+    HWND m_chatEdit = nullptr;
+    HWND m_chatSendBtn = nullptr;
+    HWND m_noteEdit = nullptr;
+    HWND m_noteBtn = nullptr;
 
     MapView m_map;
 
     std::vector<TrafficAlert> m_allAlerts;
     std::vector<TrafficAlert> m_filteredAlerts;
+    std::vector<ChatMessage> m_chatMessages;
+    std::vector<MapNote> m_notes;
     std::wstring m_selectedId;
     bool m_programmaticSelection = false;
+    std::atomic_bool m_serverRequestInProgress{ false };
+    bool m_hasPendingNoteLocation = false;
+    double m_pendingNoteLat = 0.0;
+    double m_pendingNoteLon = 0.0;
 };
 
 

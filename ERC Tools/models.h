@@ -26,3 +26,20 @@ struct TrafficAlert
     double longitude = 0.0;
     bool hasLocation = false;
 };
+
+struct ChatMessage
+{
+    std::wstring author;
+    std::wstring text;
+    std::wstring timestamp;
+};
+
+struct MapNote
+{
+    std::wstring id;
+    std::wstring author;
+    std::wstring text;
+    std::wstring timestamp;
+    double latitude = 0.0;
+    double longitude = 0.0;
+};

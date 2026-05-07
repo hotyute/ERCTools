@@ -6,6 +6,7 @@ class MapView
 {
 public:
     using SelectCallback = std::function<void(const std::wstring& id)>;
+    using NoteLocationCallback = std::function<void(double lat, double lon)>;
 
     MapView();
     ~MapView();
@@ -18,7 +19,9 @@ public:
     bool Create(HWND parent, int x, int y, int w, int h);
     HWND Hwnd() const;
     void SetSelectCallback(SelectCallback cb);
+    void SetNoteLocationCallback(NoteLocationCallback cb);
     void SetAlerts(const std::vector<TrafficAlert>& alerts);
+    void SetNotes(const std::vector<MapNote>& notes);
     void SetSelectedId(const std::wstring& id);
     void CenterOnAlert(const std::wstring& id);
     void FitToAlerts();
