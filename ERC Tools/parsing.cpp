@@ -93,6 +93,120 @@ std::wstring StripHtmlTags(std::wstring text)
     return Trim(out);
 }
 
+
+static bool IsValidLatLon(double lat, double lon)
+{
+    return std::isfinite(lat) && std::isfinite(lon) &&
+        lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0;
+}
+
+static bool ConvertBritishNationalGridToLatLon(double easting, double northing, double& latOut, double& lonOut)
+{
+    if (!std::isfinite(easting) || !std::isfinite(northing) ||
+        easting < 0.0 || easting > 700000.0 || northing < 0.0 || northing > 1300000.0)
+        return false;
+
+    constexpr double a = 6377563.396;
+    constexpr double b = 6356256.909;
+    constexpr double f0 = 0.9996012717;
+    constexpr double lat0 = 49.0 * kPi / 180.0;
+    constexpr double lon0 = -2.0 * kPi / 180.0;
+    constexpr double n0 = -100000.0;
+    constexpr double e0 = 400000.0;
+    constexpr double e2 = 1.0 - (b * b) / (a * a);
+    constexpr double n = (a - b) / (a + b);
+
+    double lat = lat0;
+    double m = 0.0;
+    do {
+        lat = (northing - n0 - m) / (a * f0) + lat;
+        double ma = (1.0 + n + 5.0 / 4.0 * n * n + 5.0 / 4.0 * n * n * n) * (lat - lat0);
+        double mb = (3.0 * n + 3.0 * n * n + 21.0 / 8.0 * n * n * n) * std::sin(lat - lat0) * std::cos(lat + lat0);
+        double mc = (15.0 / 8.0 * n * n + 15.0 / 8.0 * n * n * n) * std::sin(2.0 * (lat - lat0)) * std::cos(2.0 * (lat + lat0));
+        double md = 35.0 / 24.0 * n * n * n * std::sin(3.0 * (lat - lat0)) * std::cos(3.0 * (lat + lat0));
+        m = b * f0 * (ma - mb + mc - md);
+    } while (std::abs(northing - n0 - m) >= 0.00001);
+
+    const double sinLat = std::sin(lat);
+    const double cosLat = std::cos(lat);
+    const double tanLat = std::tan(lat);
+    const double nu = a * f0 / std::sqrt(1.0 - e2 * sinLat * sinLat);
+    const double rho = a * f0 * (1.0 - e2) / std::pow(1.0 - e2 * sinLat * sinLat, 1.5);
+    const double eta2 = nu / rho - 1.0;
+    const double dE = easting - e0;
+
+    const double vii = tanLat / (2.0 * rho * nu);
+    const double viii = tanLat / (24.0 * rho * std::pow(nu, 3.0)) * (5.0 + 3.0 * tanLat * tanLat + eta2 - 9.0 * tanLat * tanLat * eta2);
+    const double ix = tanLat / (720.0 * rho * std::pow(nu, 5.0)) * (61.0 + 90.0 * tanLat * tanLat + 45.0 * std::pow(tanLat, 4.0));
+    const double x = 1.0 / (cosLat * nu);
+    const double xi = 1.0 / (6.0 * cosLat * std::pow(nu, 3.0)) * (nu / rho + 2.0 * tanLat * tanLat);
+    const double xii = 1.0 / (120.0 * cosLat * std::pow(nu, 5.0)) * (5.0 + 28.0 * tanLat * tanLat + 24.0 * std::pow(tanLat, 4.0));
+    const double xiia = 1.0 / (5040.0 * cosLat * std::pow(nu, 7.0)) * (61.0 + 662.0 * tanLat * tanLat + 1320.0 * std::pow(tanLat, 4.0) + 720.0 * std::pow(tanLat, 6.0));
+
+    lat = lat - vii * dE * dE + viii * std::pow(dE, 4.0) - ix * std::pow(dE, 6.0);
+    double lon = lon0 + x * dE - xi * std::pow(dE, 3.0) + xii * std::pow(dE, 5.0) - xiia * std::pow(dE, 7.0);
+
+    // Airy 1830 / OSGB36 to WGS84 Helmert transform.
+    double h = 0.0;
+    double sinPhi = std::sin(lat), cosPhi = std::cos(lat), sinLam = std::sin(lon), cosLam = std::cos(lon);
+    double nuA = a / std::sqrt(1.0 - e2 * sinPhi * sinPhi);
+    double x1 = (nuA + h) * cosPhi * cosLam;
+    double y1 = (nuA + h) * cosPhi * sinLam;
+    double z1 = ((1.0 - e2) * nuA + h) * sinPhi;
+
+    constexpr double tx = 446.448, ty = -125.157, tz = 542.060;
+    constexpr double sppm = 20.4894;
+    constexpr double rx = 0.1502 * kPi / (180.0 * 3600.0);
+    constexpr double ry = 0.2470 * kPi / (180.0 * 3600.0);
+    constexpr double rz = 0.8421 * kPi / (180.0 * 3600.0);
+    double scale = 1.0 + sppm * 1e-6;
+    double x2 = tx + x1 * scale - y1 * rz + z1 * ry;
+    double y2 = ty + x1 * rz + y1 * scale - z1 * rx;
+    double z2 = tz - x1 * ry + y1 * rx + z1 * scale;
+
+    constexpr double a2 = 6378137.000;
+    constexpr double b2 = 6356752.3141;
+    constexpr double e22 = 1.0 - (b2 * b2) / (a2 * a2);
+    double p = std::sqrt(x2 * x2 + y2 * y2);
+    double phi = std::atan2(z2, p * (1.0 - e22));
+    double phiPrev;
+    do {
+        phiPrev = phi;
+        double nu2 = a2 / std::sqrt(1.0 - e22 * std::sin(phi) * std::sin(phi));
+        phi = std::atan2(z2 + e22 * nu2 * std::sin(phi), p);
+    } while (std::abs(phi - phiPrev) > 1e-12);
+
+    latOut = phi * 180.0 / kPi;
+    lonOut = std::atan2(y2, x2) * 180.0 / kPi;
+    return IsValidLatLon(latOut, lonOut);
+}
+
+static bool NormalizeCoordinatePair(double first, double second, double& latOut, double& lonOut, bool geoJsonOrder)
+{
+    double candidateLat = geoJsonOrder ? second : first;
+    double candidateLon = geoJsonOrder ? first : second;
+    if (IsValidLatLon(candidateLat, candidateLon)) {
+        latOut = candidateLat;
+        lonOut = candidateLon;
+        return true;
+    }
+
+    if (geoJsonOrder) {
+        if (ConvertBritishNationalGridToLatLon(first, second, latOut, lonOut))
+            return true;
+        if (ConvertBritishNationalGridToLatLon(second, first, latOut, lonOut))
+            return true;
+    }
+    else {
+        if (ConvertBritishNationalGridToLatLon(second, first, latOut, lonOut))
+            return true;
+        if (ConvertBritishNationalGridToLatLon(first, second, latOut, lonOut))
+            return true;
+    }
+
+    return false;
+}
+
 std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
 {
     std::vector<TrafficAlert> out;
@@ -158,12 +272,16 @@ bool ExtractRingFromCoords(const json& coords, std::vector<GeoPoint>& ring)
         if (!pos.is_array() || pos.size() < 2)
             continue;
 
-        double lon = 0.0;
+        double first = 0.0;
+        double second = 0.0;
         double lat = 0.0;
+        double lon = 0.0;
 
-        if (!TryGetDoubleFromJsonValue(pos[0], lon))
+        if (!TryGetDoubleFromJsonValue(pos[0], first))
             continue;
-        if (!TryGetDoubleFromJsonValue(pos[1], lat))
+        if (!TryGetDoubleFromJsonValue(pos[1], second))
+            continue;
+        if (!NormalizeCoordinatePair(first, second, lat, lon, true))
             continue;
 
         ring.push_back({ lat, lon });
@@ -283,6 +401,7 @@ TrafficAlert ParseAlertObject(const json& obj)
 
     double lat = 0.0;
     double lon = 0.0;
+    bool coordinatePairIsGeoJson = false;
     bool hasLat = PickDouble(*props, { "latitude", "lat", "y", "latitudeDecimal" }, lat);
     bool hasLon = PickDouble(*props, { "longitude", "lon", "lng", "long", "x", "longitudeDecimal" }, lon);
 
@@ -300,18 +419,25 @@ TrafficAlert ParseAlertObject(const json& obj)
         {
             const json& coords = geom["coordinates"];
             if (coords.size() >= 2) {
-                TryGetDoubleFromJsonValue(coords[0], lon);
-                TryGetDoubleFromJsonValue(coords[1], lat);
-                hasLat = true;
-                hasLon = true;
+                if (TryGetDoubleFromJsonValue(coords[0], lon) && TryGetDoubleFromJsonValue(coords[1], lat)) {
+                    hasLat = true;
+                    hasLon = true;
+                    coordinatePairIsGeoJson = true;
+                }
             }
         }
     }
 
     if (hasLat && hasLon) {
-        a.latitude = lat;
-        a.longitude = lon;
-        a.hasLocation = true;
+        double fixedLat = 0.0;
+        double fixedLon = 0.0;
+        double first = coordinatePairIsGeoJson ? lon : lat;
+        double second = coordinatePairIsGeoJson ? lat : lon;
+        if (NormalizeCoordinatePair(first, second, fixedLat, fixedLon, coordinatePairIsGeoJson)) {
+            a.latitude = fixedLat;
+            a.longitude = fixedLon;
+            a.hasLocation = true;
+        }
     }
 
     static std::atomic<unsigned long long> s_idCounter{ 0 };

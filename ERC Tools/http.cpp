@@ -399,15 +399,18 @@ bool IsTrafficEnglandAlertsPageUrl(const std::wstring& inputUrl)
         url == L"http://trafficengland.com/traffic-alerts";
 }
 
-std::wstring BuildTrafficEnglandAlertsApiUrl(size_t start, size_t step)
+std::wstring BuildTrafficEnglandAlertsApiUrl(size_t start, size_t step, bool unplannedOnly, const std::wstring& order)
 {
     const ULONGLONG cacheBuster = GetTickCount64();
     std::wstring url = L"https://www.trafficengland.com/api/events/getAlerts";
     url += L"?start=" + std::to_wstring(start);
     url += L"&step=" + std::to_wstring(step);
-    url += L"&order=Severity";
+    std::wstring safeOrder = order.empty() ? L"Road" : order;
+    url += L"&order=" + safeOrder;
     url += L"&is_current=1";
-    url += L"&events=CONGESTION,FULL_CLOSURES,ROADWORKS,INCIDENT,WEATHER,MAJOR_ORGANISED_EVENTS,ABNORMAL_LOADS";
+    url += unplannedOnly
+        ? L"&events=CONGESTION,FULL_CLOSURES,INCIDENT,WEATHER,ABNORMAL_LOADS"
+        : L"&events=CONGESTION,FULL_CLOSURES,ROADWORKS,INCIDENT,WEATHER,MAJOR_ORGANISED_EVENTS,ABNORMAL_LOADS";
     url += L"&unconfirmed=false";
     url += L"&completed=false";
     url += L"&includeUnconfirmedRoadworks=true";

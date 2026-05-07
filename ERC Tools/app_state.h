@@ -24,3 +24,4 @@ extern std::atomic_bool g_appQuitting;
 extern std::atomic_bool g_fetchInProgress;
 extern ComPtr<ID2D1Factory> g_d2dFactory;
 extern ComPtr<IWICImagingFactory> g_wicFactory;
+extern ComPtr<IDWriteFactory> g_dwriteFactory;
