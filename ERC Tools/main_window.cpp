@@ -561,9 +561,7 @@ private:
         }
 
         m_map.SetSelectCallback([this](const std::wstring& id) {
-            // Keep map position stable so double-click note placement does not drift
-            // after the first click selects a nearby alert marker.
-            SelectAlertById(id, false);
+            SelectAlertById(id, true);
             });
         m_map.SetNoteLocationCallback([this](double lat, double lon) {
             m_pendingNoteLat = lat;
