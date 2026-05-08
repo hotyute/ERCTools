@@ -340,17 +340,10 @@ private:
     static GeoPoint WorldToGeo(double x, double y, int zoom)
     {
         double worldSize = 256.0 * static_cast<double>(1 << zoom);
+        double lon = x / worldSize * 360.0 - 180.0;
 
-        // The map world repeats horizontally. Normalize x first so the resulting
-        // longitude always lands in the canonical [-180, 180] range.
-        double wrappedX = std::fmod(x, worldSize);
-        if (wrappedX < 0.0)
-            wrappedX += worldSize;
-
-        double lon = wrappedX / worldSize * 360.0 - 180.0;
         double n = kPi - 2.0 * kPi * y / worldSize;
         double lat = 180.0 / kPi * std::atan(std::sinh(n));
-        lat = ClampValue(lat, -kMaxMercatorLat, kMaxMercatorLat);
         return { lat, lon };
     }
 
