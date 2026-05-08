@@ -361,3 +361,8 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+/ERC Tools/head.txt
+/ERC Tools/merge-headers.ps1
+/ERC Tools/merge-sources.ps1
+/ERC Tools/All.txt
+/ERC Tools/All2.txt
