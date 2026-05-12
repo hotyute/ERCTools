@@ -390,21 +390,90 @@ private:
         return WorldToGeo(worldX, worldY, m_zoom);
     }
 
-    D2D1_POINT_2F GeoToScreen(double lat, double lon) const
+    struct ViewState
+    {
+        int width = 1;
+        int height = 1;
+        WorldPoint centerWorld{};
+        double minLat = -kMaxMercatorLat;
+        double maxLat = kMaxMercatorLat;
+        double minLon = -180.0;
+        double maxLon = 180.0;
+        bool wrapsLongitude = false;
+        bool allLongitudes = true;
+    };
+
+    static double NormalizeLongitude(double lon)
+    {
+        while (lon < -180.0) lon += 360.0;
+        while (lon > 180.0) lon -= 360.0;
+        return lon;
+    }
+
+    ViewState BuildViewState(double marginPixels = 0.0) const
     {
         RECT rc{};
         GetClientRect(m_hwnd, &rc);
 
-        LONG width = std::max<LONG>(1L, rc.right - rc.left);
-        LONG height = std::max<LONG>(1L, rc.bottom - rc.top);
+        ViewState view;
+        view.width = std::max(1, static_cast<int>(rc.right - rc.left));
+        view.height = std::max(1, static_cast<int>(rc.bottom - rc.top));
+        view.centerWorld = GeoToWorld(m_centerLat, m_centerLon, m_zoom);
 
-        WorldPoint center = GeoToWorld(m_centerLat, m_centerLon, m_zoom);
+        const double left = view.centerWorld.x - view.width * 0.5 - marginPixels;
+        const double right = view.centerWorld.x + view.width * 0.5 + marginPixels;
+        const double top = view.centerWorld.y - view.height * 0.5 - marginPixels;
+        const double bottom = view.centerWorld.y + view.height * 0.5 + marginPixels;
+
+        GeoPoint nw = WorldToGeo(left, top, m_zoom);
+        GeoPoint se = WorldToGeo(right, bottom, m_zoom);
+
+        view.minLat = ClampValue(MinValue(nw.lat, se.lat), -kMaxMercatorLat, kMaxMercatorLat);
+        view.maxLat = ClampValue(MaxValue(nw.lat, se.lat), -kMaxMercatorLat, kMaxMercatorLat);
+
+        // Longitude can wrap when the viewport crosses the antimeridian. Keep this
+        // explicit so high-zoom culling remains cheap without hiding wrapped points.
+        const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
+        view.allLongitudes = (right - left) >= worldSize;
+        view.minLon = NormalizeLongitude(nw.lon);
+        view.maxLon = NormalizeLongitude(se.lon);
+        view.wrapsLongitude = !view.allLongitudes && view.minLon > view.maxLon;
+
+        return view;
+    }
+
+    D2D1_POINT_2F GeoToScreen(const ViewState& view, double lat, double lon) const
+    {
         WorldPoint p = GeoToWorld(lat, lon, m_zoom);
 
-        float x = static_cast<float>((p.x - center.x) + width * 0.5);
-        float y = static_cast<float>((p.y - center.y) + height * 0.5);
+        float x = static_cast<float>((p.x - view.centerWorld.x) + view.width * 0.5);
+        float y = static_cast<float>((p.y - view.centerWorld.y) + view.height * 0.5);
 
         return D2D1::Point2F(x, y);
+    }
+
+    D2D1_POINT_2F GeoToScreen(double lat, double lon) const
+    {
+        return GeoToScreen(BuildViewState(), lat, lon);
+    }
+
+    static bool IsGeoPointInView(const ViewState& view, double lat, double lon)
+    {
+        if (!std::isfinite(lat) || !std::isfinite(lon))
+            return false;
+
+        if (lat < view.minLat || lat > view.maxLat)
+            return false;
+
+        if (view.allLongitudes)
+            return true;
+
+        lon = NormalizeLongitude(lon);
+
+        if (view.wrapsLongitude)
+            return lon >= view.minLon || lon <= view.maxLon;
+
+        return lon >= view.minLon && lon <= view.maxLon;
     }
 
     void NormalizeCenter()
@@ -437,12 +506,16 @@ private:
     {
         std::wstring bestId;
         double bestDist = 14.0;
+        const ViewState view = BuildViewState(bestDist + 8.0);
 
         for (size_t i = 0; i < m_alerts.size(); ++i) {
-            if (!m_alerts[i].hasLocation)
+            if (!m_alerts[i].hasLocation ||
+                !IsGeoPointInView(view, m_alerts[i].latitude, m_alerts[i].longitude))
+            {
                 continue;
+            }
 
-            D2D1_POINT_2F pt = GeoToScreen(m_alerts[i].latitude, m_alerts[i].longitude);
+            D2D1_POINT_2F pt = GeoToScreen(view, m_alerts[i].latitude, m_alerts[i].longitude);
             double dx = pt.x - x;
             double dy = pt.y - y;
             double d = std::sqrt(dx * dx + dy * dy);
@@ -767,17 +840,18 @@ private:
 
     void DrawMarkers()
     {
-        RECT rc{};
-        GetClientRect(m_hwnd, &rc);
-
-        int width = static_cast<int>(rc.right - rc.left);
-        int height = static_cast<int>(rc.bottom - rc.top);
+        const ViewState view = BuildViewState(32.0);
+        const int width = view.width;
+        const int height = view.height;
 
         for (size_t i = 0; i < m_alerts.size(); ++i) {
-            if (!m_alerts[i].hasLocation)
+            if (!m_alerts[i].hasLocation ||
+                !IsGeoPointInView(view, m_alerts[i].latitude, m_alerts[i].longitude))
+            {
                 continue;
+            }
 
-            D2D1_POINT_2F p = GeoToScreen(m_alerts[i].latitude, m_alerts[i].longitude);
+            D2D1_POINT_2F p = GeoToScreen(view, m_alerts[i].latitude, m_alerts[i].longitude);
             if (p.x < -20.0f || p.y < -20.0f || p.x > width + 20.0f || p.y > height + 20.0f)
                 continue;
 
@@ -902,13 +976,15 @@ private:
             { 50.8198, -1.0880 }, { 54.9783, -1.6178 }
         };
 
-        RECT rc{};
-        GetClientRect(m_hwnd, &rc);
-        const int width = static_cast<int>(rc.right - rc.left);
-        const int height = static_cast<int>(rc.bottom - rc.top);
+        const ViewState view = BuildViewState(16.0);
+        const int width = view.width;
+        const int height = view.height;
 
         for (const GeoPoint& city : cities) {
-            D2D1_POINT_2F p = GeoToScreen(city.lat, city.lon);
+            if (!IsGeoPointInView(view, city.lat, city.lon))
+                continue;
+
+            D2D1_POINT_2F p = GeoToScreen(view, city.lat, city.lon);
             if (p.x < -16.0f || p.y < -16.0f || p.x > width + 16.0f || p.y > height + 16.0f)
                 continue;
 
@@ -922,16 +998,15 @@ private:
         if (!m_rt)
             return;
 
-        RECT rc{};
-        GetClientRect(m_hwnd, &rc);
-        int width = static_cast<int>(rc.right - rc.left);
-        int height = static_cast<int>(rc.bottom - rc.top);
+        const ViewState view = BuildViewState(220.0);
+        int width = view.width;
+        int height = view.height;
 
         for (const auto& note : m_notes) {
-            if (!std::isfinite(note.latitude) || !std::isfinite(note.longitude))
+            if (!IsGeoPointInView(view, note.latitude, note.longitude))
                 continue;
 
-            D2D1_POINT_2F p = GeoToScreen(note.latitude, note.longitude);
+            D2D1_POINT_2F p = GeoToScreen(view, note.latitude, note.longitude);
             if (p.x < -80.0f || p.y < -80.0f || p.x > width + 80.0f || p.y > height + 80.0f)
                 continue;
 
@@ -1098,9 +1173,10 @@ private:
 
     void DrawUkBoundary()
     {
-        // Detailed UK boundary files can contain very large rings. At street-level
-        // zoom they are mostly off-screen and add input latency without useful context.
-        if (m_zoom >= 12)
+        // Detailed UK boundary files can contain very large rings. At local/street
+        // zoom levels they add input latency without useful context, so avoid
+        // rebuilding and rasterising thousands of outline segments on every pan.
+        if (m_zoom >= 10)
             return;
 
         for (const auto& ring : m_ukBoundaryRings)
