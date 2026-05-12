@@ -56,6 +56,11 @@ constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
 constexpr UINT_PTR kInteractionIdleTimer = 1;
 constexpr UINT kInteractionIdleMs = 120;
+constexpr float kMapWaterR = 0.80f;
+constexpr float kMapWaterG = 0.91f;
+constexpr float kMapWaterB = 0.98f;
+constexpr int kMaxFallbackTileZoomDelta = 5;
+constexpr double kBoundaryDrawMarginPixels = 512.0;
 std::atomic<int> g_activeTileDownloads{ 0 };
 
 // ============================================================
@@ -685,7 +690,7 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.15f, 0.52f, 0.90f, 0.95f), &m_minorBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.20f, 0.70f, 0.55f, 0.95f), &m_unknownBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.92f, 0.2f, 0.55f), &m_selectedBrush);
-        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.88f, 0.92f, 0.96f), &m_placeholderBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(kMapWaterR, kMapWaterG, kMapWaterB), &m_placeholderBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.35f, 0.35f, 0.35f), &m_borderBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.55f, 0.25f, 0.18f), &m_outlineFillBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.28f, 0.12f, 0.92f), &m_outlineStrokeBrush);
@@ -757,6 +762,47 @@ private:
         if (it == m_tiles.end())
             return {};
         return it->second;
+    }
+
+    ComPtr<ID2D1Bitmap> GetCachedTileBitmap(const TileKey& key)
+    {
+        auto entry = FindTile(key);
+        if (!entry)
+            return {};
+
+        std::lock_guard<std::mutex> lk(entry->mutex);
+        entry->lastUsedMs = GetTickCount64();
+        return entry->bitmap;
+    }
+
+    bool TryDrawFallbackTile(const TileKey& key, const D2D1_RECT_F& dest)
+    {
+        if (!m_rt || key.z <= kMinZoom)
+            return false;
+
+        const int maxDelta = MinValue(kMaxFallbackTileZoomDelta, key.z - kMinZoom);
+        for (int delta = 1; delta <= maxDelta; ++delta) {
+            const int parentZ = key.z - delta;
+            const int scale = 1 << delta;
+            TileKey parentKey{ parentZ, key.x / scale, key.y / scale };
+            ComPtr<ID2D1Bitmap> parentBmp = GetCachedTileBitmap(parentKey);
+            if (!parentBmp)
+                continue;
+
+            const int subX = key.x % scale;
+            const int subY = key.y % scale;
+            const float srcSize = 256.0f / static_cast<float>(scale);
+            const D2D1_RECT_F src = D2D1::RectF(
+                subX * srcSize,
+                subY * srcSize,
+                (subX + 1) * srcSize,
+                (subY + 1) * srcSize);
+
+            m_rt->DrawBitmap(parentBmp.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, src);
+            return true;
+        }
+
+        return false;
     }
 
     void RequestTile(const TileKey& key)
@@ -1013,10 +1059,15 @@ private:
                     m_rt->DrawBitmap(bmp.Get(), dest);
                 }
                 else {
+                    const bool drewFallback = TryDrawFallbackTile(key, dest);
                     if (!interactive)
                         RequestTile(key);
-                    m_rt->FillRectangle(dest, m_placeholderBrush.Get());
-                    m_rt->DrawRectangle(dest, m_borderBrush.Get(), 0.5f);
+
+                    if (!drewFallback)
+                        m_rt->FillRectangle(dest, m_placeholderBrush.Get());
+
+                    if (!interactive && !drewFallback)
+                        m_rt->DrawRectangle(dest, m_borderBrush.Get(), 0.5f);
                 }
             }
         }
@@ -1120,7 +1171,7 @@ private:
         EnsureDeviceResources();
         if (m_rt) {
             m_rt->BeginDraw();
-            m_rt->Clear(D2D1::ColorF(0.80f, 0.91f, 0.98f, 1.0f));
+            m_rt->Clear(D2D1::ColorF(kMapWaterR, kMapWaterG, kMapWaterB, 1.0f));
 
             const bool interactive = m_interactivePan;
 
@@ -1340,7 +1391,7 @@ private:
         if (m_ukBoundaryRings.empty())
             return;
 
-        const ViewState view = BuildViewState(96.0);
+        const ViewState view = BuildViewState(kBoundaryDrawMarginPixels);
         const bool fullBoundary = !interactive && m_zoom < 10;
 
         if (!fullBoundary) {
