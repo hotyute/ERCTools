@@ -43,9 +43,20 @@ struct TileEntry
     ComPtr<ID2D1Bitmap> bitmap;
 };
 
+struct BoundarySegment
+{
+    GeoPoint a;
+    GeoPoint b;
+    double minLat = 0.0;
+    double maxLat = 0.0;
+    double minLon = 0.0;
+    double maxLon = 0.0;
+};
+
 struct BoundaryRing
 {
     std::vector<GeoPoint> points;
+    std::vector<BoundarySegment> segmentsByMinLat;
     double minLat = 0.0;
     double maxLat = 0.0;
     double minLon = 0.0;
@@ -257,6 +268,21 @@ public:
                 cached.minLon = MinValue(cached.minLon, pt.lon);
                 cached.maxLon = MaxValue(cached.maxLon, pt.lon);
             }
+            cached.segmentsByMinLat.reserve(ring.size());
+            for (size_t i = 1; i < ring.size(); ++i) {
+                BoundarySegment segment;
+                segment.a = ring[i - 1];
+                segment.b = ring[i];
+                segment.minLat = MinValue(segment.a.lat, segment.b.lat);
+                segment.maxLat = MaxValue(segment.a.lat, segment.b.lat);
+                segment.minLon = MinValue(segment.a.lon, segment.b.lon);
+                segment.maxLon = MaxValue(segment.a.lon, segment.b.lon);
+                cached.segmentsByMinLat.push_back(segment);
+            }
+            std::sort(cached.segmentsByMinLat.begin(), cached.segmentsByMinLat.end(), [](const auto& a, const auto& b) {
+                return a.minLat < b.minLat;
+                });
+
             cached.points = std::move(ring);
             m_ukBoundaryRings.push_back(std::move(cached));
         }
@@ -1278,7 +1304,7 @@ private:
 
     static bool IsGeoPointInRing(const BoundaryRing& ring, double lat, double lon)
     {
-        if (ring.points.size() < 3 ||
+        if (ring.segmentsByMinLat.empty() ||
             lat < ring.minLat || lat > ring.maxLat ||
             lon < ring.minLon || lon > ring.maxLon)
         {
@@ -1286,18 +1312,19 @@ private:
         }
 
         bool inside = false;
-        size_t j = ring.points.size() - 1;
-        for (size_t i = 0; i < ring.points.size(); ++i) {
-            const GeoPoint& a = ring.points[i];
-            const GeoPoint& b = ring.points[j];
+        for (const BoundarySegment& segment : ring.segmentsByMinLat) {
+            if (segment.minLat > lat)
+                break;
+            if (segment.maxLat <= lat || segment.maxLon < lon)
+                continue;
 
+            const GeoPoint& a = segment.a;
+            const GeoPoint& b = segment.b;
             if (((a.lat > lat) != (b.lat > lat)) &&
                 (lon < (b.lon - a.lon) * (lat - a.lat) / (b.lat - a.lat) + a.lon))
             {
                 inside = !inside;
             }
-
-            j = i;
         }
 
         return inside;
@@ -1349,7 +1376,7 @@ private:
 
     void DrawBoundaryRingVisibleStroke(const BoundaryRing& ring, const ViewState& view)
     {
-        if (!m_rt || !m_outlineStrokeBrush || ring.points.size() < 2)
+        if (!m_rt || !m_outlineStrokeBrush || ring.segmentsByMinLat.empty())
             return;
 
         ComPtr<ID2D1PathGeometry> geom;
@@ -1361,22 +1388,17 @@ private:
             return;
 
         bool hasFigure = false;
-        for (size_t i = 1; i < ring.points.size(); ++i) {
-            const GeoPoint& a = ring.points[i - 1];
-            const GeoPoint& b = ring.points[i];
-
-            double minLat = MinValue(a.lat, b.lat);
-            double maxLat = MaxValue(a.lat, b.lat);
-            if (maxLat < view.minLat || minLat > view.maxLat)
+        for (const BoundarySegment& segment : ring.segmentsByMinLat) {
+            if (segment.minLat > view.maxLat)
+                break;
+            if (segment.maxLat < view.minLat)
                 continue;
 
-            double minLon = MinValue(a.lon, b.lon);
-            double maxLon = MaxValue(a.lon, b.lon);
-            if (!LongitudeRangesIntersect(view, minLon, maxLon))
+            if (!LongitudeRangesIntersect(view, segment.minLon, segment.maxLon))
                 continue;
 
-            sink->BeginFigure(GeoToScreen(view, a.lat, a.lon), D2D1_FIGURE_BEGIN_HOLLOW);
-            sink->AddLine(GeoToScreen(view, b.lat, b.lon));
+            sink->BeginFigure(GeoToScreen(view, segment.a.lat, segment.a.lon), D2D1_FIGURE_BEGIN_HOLLOW);
+            sink->AddLine(GeoToScreen(view, segment.b.lat, segment.b.lon));
             sink->EndFigure(D2D1_FIGURE_END_OPEN);
             hasFigure = true;
         }
