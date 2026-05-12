@@ -636,11 +636,13 @@ private:
 
         const int endpointY = 52;
         const LONG refreshW = 132;
-        LONG topEditW = std::max<LONG>(220L, (width - refreshW - pad * 4) / 2);
+        const LONG toggleW = 132;
+        LONG topEditW = std::max<LONG>(220L, (width - refreshW - toggleW - pad * 5) / 2);
         MoveWindow(m_urlLabel, pad, endpointY, 160, labelH, TRUE);
         MoveWindow(m_urlEdit, pad, endpointY + labelH + 2, topEditW, controlH, TRUE);
         MoveWindow(m_serverLabel, pad * 2 + topEditW, endpointY, 180, labelH, TRUE);
-        MoveWindow(m_serverEdit, pad * 2 + topEditW, endpointY + labelH + 2, std::max<LONG>(220L, width - refreshW - topEditW - pad * 4), controlH, TRUE);
+        MoveWindow(m_serverEdit, pad * 2 + topEditW, endpointY + labelH + 2, std::max<LONG>(220L, width - refreshW - toggleW - topEditW - pad * 5), controlH, TRUE);
+        MoveWindow(m_togglePanelBtn, width - refreshW - toggleW - pad * 2, endpointY + labelH + 2, toggleW, controlH, TRUE);
         MoveWindow(m_refreshBtn, width - refreshW - pad, endpointY + labelH + 2, refreshW, controlH, TRUE);
 
         int bodyTop = topBarH;
