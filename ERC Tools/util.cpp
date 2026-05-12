@@ -186,10 +186,37 @@ bool TryGetDoubleFromJsonValue(const json& v, double& out)
     return false;
 }
 
+static json::const_iterator FindJsonKey(const json& obj, const char* key)
+{
+    auto it = obj.find(key);
+    if (it != obj.end())
+        return it;
+
+    std::string wanted = key;
+    std::transform(wanted.begin(), wanted.end(), wanted.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+        });
+
+    for (auto candidate = obj.begin(); candidate != obj.end(); ++candidate) {
+        std::string actual = candidate.key();
+        std::transform(actual.begin(), actual.end(), actual.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+            });
+
+        if (actual == wanted)
+            return candidate;
+    }
+
+    return obj.end();
+}
+
 std::wstring PickString(const json& obj, std::initializer_list<const char*> keys)
 {
+    if (!obj.is_object())
+        return {};
+
     for (const char* key : keys) {
-        auto it = obj.find(key);
+        auto it = FindJsonKey(obj, key);
         if (it == obj.end())
             continue;
 
@@ -203,8 +230,11 @@ std::wstring PickString(const json& obj, std::initializer_list<const char*> keys
 
 bool PickDouble(const json& obj, std::initializer_list<const char*> keys, double& out)
 {
+    if (!obj.is_object())
+        return false;
+
     for (const char* key : keys) {
-        auto it = obj.find(key);
+        auto it = FindJsonKey(obj, key);
         if (it == obj.end())
             continue;
 
@@ -217,8 +247,11 @@ bool PickDouble(const json& obj, std::initializer_list<const char*> keys, double
 
 std::wstring PickDateText(const json& obj, std::initializer_list<const char*> keys)
 {
+    if (!obj.is_object())
+        return {};
+
     for (const char* key : keys) {
-        auto it = obj.find(key);
+        auto it = FindJsonKey(obj, key);
         if (it == obj.end())
             continue;
 
