@@ -1161,7 +1161,11 @@ private:
             std::string body = "{\"author\":" + JsonEscape(L"ERCTools") +
                 ",\"text\":" + JsonEscape(text) +
                 ",\"latitude\":" + std::to_string(lat) +
-                ",\"longitude\":" + std::to_string(lon) + "}";
+                ",\"longitude\":" + std::to_string(lon) +
+                ",\"lat\":" + std::to_string(lat) +
+                ",\"lon\":" + std::to_string(lon) +
+                ",\"x\":" + std::to_string(lon) +
+                ",\"y\":" + std::to_string(lat) + "}";
             result->ok = HttpPostJsonText(AppendPath(server, L"/api/notes"), body, response, error);
             result->error = error;
             if (!g_appQuitting.load() && IsWindow(hwnd))

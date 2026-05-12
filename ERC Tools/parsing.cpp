@@ -101,6 +101,16 @@ std::wstring StripHtmlTags(std::wstring text)
 
 
 
+
+static bool IsGenericAlertTitle(const std::wstring& title)
+{
+    std::wstring normalized = ToLower(Trim(title));
+    return normalized.empty() ||
+        normalized == L"traffic alert" ||
+        normalized == L"title alert" ||
+        normalized == L"alert";
+}
+
 static std::wstring ExtractReasonTitle(const std::wstring& description)
 {
     if (description.empty())
@@ -396,13 +406,21 @@ TrafficAlert ParseAlertObject(const json& obj)
     if (a.id.empty())
         a.id = PickString(obj, { "id", "incidentId", "alertId", "uuid", "eventId", "eventID", "event_id" });
 
+    std::wstring reason = PickString(*props, { "reason", "eventReason" });
+    if (reason.empty())
+        reason = PickString(obj, { "reason", "eventReason" });
+
     a.title = PickString(*props, { "title", "headline", "summary", "name", "eventType", "type", "event_type" });
     if (a.title.empty())
         a.title = PickString(obj, { "title", "headline", "summary", "name", "eventType", "type", "event_type" });
+    if (!reason.empty() && IsGenericAlertTitle(a.title))
+        a.title = reason;
 
     a.description = PickString(*props, { "description", "details", "message", "fullText", "eventDescription", "event_description", "comment" });
     if (a.description.empty())
         a.description = PickString(obj, { "description", "details", "message", "fullText", "eventDescription", "event_description", "comment" });
+    if (a.description.empty() && !reason.empty())
+        a.description = reason;
 
     a.road = PickString(*props, { "road", "roadName", "route", "roadNumber", "road_number" });
     if (a.road.empty())
@@ -465,8 +483,10 @@ TrafficAlert ParseAlertObject(const json& obj)
     if (a.id.empty())
         a.id = L"alert-" + std::to_wstring(++s_idCounter);
 
-    if (a.title.empty())
-        a.title = L"Traffic alert";
+    if (IsGenericAlertTitle(a.title)) {
+        std::wstring descriptionReason = ExtractReasonTitle(a.description);
+        a.title = descriptionReason.empty() ? L"Traffic alert" : descriptionReason;
+    }
 
     if (a.severity.empty())
         a.severity = L"Unknown";
