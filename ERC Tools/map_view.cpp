@@ -38,9 +38,14 @@ struct TileEntry
     bool ready = false;
     bool failed = false;
     ULONGLONG lastAttemptMs = 0;
+    ULONGLONG lastUsedMs = 0;
     std::vector<BYTE> bytes;
     ComPtr<ID2D1Bitmap> bitmap;
 };
+
+constexpr int kMaxConcurrentTileDownloads = 6;
+constexpr size_t kMaxTileCacheEntries = 768;
+std::atomic<int> g_activeTileDownloads{ 0 };
 
 // ============================================================
 // MapView
@@ -94,6 +99,9 @@ public:
 
     void SetNotes(const std::vector<MapNote>& notes)
     {
+        if (NotesEqual(m_notes, notes))
+            return;
+
         m_notes = notes;
         Invalidate();
     }
@@ -224,6 +232,26 @@ public:
     }
 
 private:
+    static bool NotesEqual(const std::vector<MapNote>& a, const std::vector<MapNote>& b)
+    {
+        if (a.size() != b.size())
+            return false;
+
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (a[i].id != b[i].id ||
+                a[i].author != b[i].author ||
+                a[i].text != b[i].text ||
+                a[i].timestamp != b[i].timestamp ||
+                std::abs(a[i].latitude - b[i].latitude) > 1e-9 ||
+                std::abs(a[i].longitude - b[i].longitude) > 1e-9)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     static bool RegisterClass()
     {
         static bool registered = false;
@@ -527,6 +555,11 @@ private:
         if (FAILED(g_d2dFactory->CreateHwndRenderTarget(rtProps, hwndProps, &m_rt)))
             return;
 
+        // Keep Direct2D drawing units aligned with Win32 mouse/client coordinates.
+        // Otherwise high-DPI scaling can make ScreenToGeo and GeoToScreen disagree,
+        // which places newly-created notes away from the double-clicked map point.
+        m_rt->SetDpi(96.0f, 96.0f);
+
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.85f, 0.10f, 0.10f, 0.95f), &m_severeBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.62f, 0.18f, 0.95f), &m_moderateBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.15f, 0.52f, 0.90f, 0.95f), &m_minorBrush);
@@ -611,9 +644,25 @@ private:
             // Throttle retries if a tile recently failed.
             if (entry->failed && (now - entry->lastAttemptMs) < 30000)
                 return;
+        }
+
+        int active = g_activeTileDownloads.load();
+        while (active < kMaxConcurrentTileDownloads) {
+            if (g_activeTileDownloads.compare_exchange_weak(active, active + 1))
+                break;
+        }
+        if (active >= kMaxConcurrentTileDownloads)
+            return;
+
+        {
+            std::lock_guard<std::mutex> lk(entry->mutex);
+            if (entry->ready || entry->loading) {
+                --g_activeTileDownloads;
+                return;
+            }
 
             entry->loading = true;
-            entry->lastAttemptMs = now;
+            entry->lastAttemptMs = GetTickCount64();
         }
 
         HWND hwnd = m_hwnd;
@@ -635,6 +684,8 @@ private:
                     entry->failed = true;
                 }
             }
+
+            --g_activeTileDownloads;
 
             if (hwnd && !g_appQuitting.load() && IsWindow(hwnd))
                 PostMessageW(hwnd, WM_APP_TILE_READY, 0, 0);
@@ -676,6 +727,33 @@ private:
             return {};
 
         return bmp;
+    }
+
+    void PruneTileCache()
+    {
+        std::lock_guard<std::mutex> lk(m_tileMutex);
+        if (m_tiles.size() <= kMaxTileCacheEntries)
+            return;
+
+        std::vector<std::pair<TileKey, ULONGLONG>> candidates;
+        candidates.reserve(m_tiles.size());
+
+        for (const auto& item : m_tiles) {
+            std::lock_guard<std::mutex> entryLock(item.second->mutex);
+            if (!item.second->loading)
+                candidates.push_back({ item.first, item.second->lastUsedMs });
+        }
+
+        if (candidates.empty())
+            return;
+
+        std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+            return a.second < b.second;
+            });
+
+        const size_t removeCount = MinValue(candidates.size(), m_tiles.size() - kMaxTileCacheEntries);
+        for (size_t i = 0; i < removeCount; ++i)
+            m_tiles.erase(candidates[i].first);
     }
 
     ID2D1SolidColorBrush* BrushForSeverity(const std::wstring& severity)
@@ -767,6 +845,10 @@ private:
 
                 TileKey key{ m_zoom, wrappedX, ty };
                 auto entry = GetOrCreateTile(key);
+                {
+                    std::lock_guard<std::mutex> lk(entry->mutex);
+                    entry->lastUsedMs = GetTickCount64();
+                }
 
                 D2D1_RECT_F dest = D2D1::RectF(
                     static_cast<float>(tx * 256.0 - originX),
@@ -806,6 +888,8 @@ private:
                 }
             }
         }
+
+        PruneTileCache();
     }
 
 
@@ -844,6 +928,9 @@ private:
         int height = static_cast<int>(rc.bottom - rc.top);
 
         for (const auto& note : m_notes) {
+            if (!std::isfinite(note.latitude) || !std::isfinite(note.longitude))
+                continue;
+
             D2D1_POINT_2F p = GeoToScreen(note.latitude, note.longitude);
             if (p.x < -80.0f || p.y < -80.0f || p.x > width + 80.0f || p.y > height + 80.0f)
                 continue;
@@ -1011,6 +1098,11 @@ private:
 
     void DrawUkBoundary()
     {
+        // Detailed UK boundary files can contain very large rings. At street-level
+        // zoom they are mostly off-screen and add input latency without useful context.
+        if (m_zoom >= 12)
+            return;
+
         for (const auto& ring : m_ukBoundaryRings)
             DrawBoundaryRing(ring);
     }

@@ -67,6 +67,8 @@ struct ServerResult
 {
     ServerAction action = ServerAction::Poll;
     bool ok = false;
+    bool chatOk = false;
+    bool notesOk = false;
     std::wstring error;
     std::vector<ChatMessage> chat;
     std::vector<MapNote> notes;
@@ -174,6 +176,43 @@ static std::vector<MapNote> ParseMapNotes(const json& root)
     return out;
 }
 
+static bool MapNotesEqual(const std::vector<MapNote>& a, const std::vector<MapNote>& b)
+{
+    if (a.size() != b.size())
+        return false;
+
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].id != b[i].id ||
+            a[i].author != b[i].author ||
+            a[i].text != b[i].text ||
+            a[i].timestamp != b[i].timestamp ||
+            std::abs(a[i].latitude - b[i].latitude) > 1e-9 ||
+            std::abs(a[i].longitude - b[i].longitude) > 1e-9)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void MergePendingLocalNotes(std::vector<MapNote>& serverNotes, const std::vector<MapNote>& currentNotes)
+{
+    for (const auto& note : currentNotes) {
+        if (note.timestamp != L"pending")
+            continue;
+
+        const bool alreadyPresent = std::any_of(serverNotes.begin(), serverNotes.end(), [&](const MapNote& serverNote) {
+            return serverNote.text == note.text &&
+                serverNote.author == note.author &&
+                std::abs(serverNote.latitude - note.latitude) <= 1e-9 &&
+                std::abs(serverNote.longitude - note.longitude) <= 1e-9;
+            });
+
+        if (!alreadyPresent)
+            serverNotes.push_back(note);
+    }
+}
 
 static bool FetchTrafficEnglandAlerts(std::vector<TrafficAlert>& alertsOut, std::wstring& errorOut, bool unplannedOnly, const std::wstring& order)
 {
@@ -1064,6 +1103,7 @@ private:
             if (HttpGetText(AppendPath(server, L"/api/chat"), chatBody, chatError)) {
                 try {
                     result->chat = ParseChatMessages(json::parse(chatBody));
+                    result->chatOk = true;
                     result->ok = true;
                 }
                 catch (const std::exception& e) {
@@ -1079,6 +1119,7 @@ private:
             if (HttpGetText(AppendPath(server, L"/api/notes"), noteBody, noteError)) {
                 try {
                     result->notes = ParseMapNotes(json::parse(noteBody));
+                    result->notesOk = true;
                     result->ok = true;
                 }
                 catch (const std::exception& e) {
@@ -1161,7 +1202,11 @@ private:
             std::string body = "{\"author\":" + JsonEscape(L"ERCTools") +
                 ",\"text\":" + JsonEscape(text) +
                 ",\"latitude\":" + std::to_string(lat) +
-                ",\"longitude\":" + std::to_string(lon) + "}";
+                ",\"longitude\":" + std::to_string(lon) +
+                ",\"lat\":" + std::to_string(lat) +
+                ",\"lon\":" + std::to_string(lon) +
+                ",\"x\":" + std::to_string(lon) +
+                ",\"y\":" + std::to_string(lat) + "}";
             result->ok = HttpPostJsonText(AppendPath(server, L"/api/notes"), body, response, error);
             result->error = error;
             if (!g_appQuitting.load() && IsWindow(hwnd))
@@ -1178,12 +1223,18 @@ private:
             return;
 
         if (result->action == ServerAction::Poll && result->ok) {
-            if (!result->chat.empty()) {
+            if (result->chatOk && !result->chat.empty()) {
                 m_chatMessages = std::move(result->chat);
                 RenderChatHistory();
             }
-            m_notes = std::move(result->notes);
-            m_map.SetNotes(m_notes);
+
+            if (result->notesOk) {
+                MergePendingLocalNotes(result->notes, m_notes);
+                if (!MapNotesEqual(m_notes, result->notes)) {
+                    m_notes = std::move(result->notes);
+                    m_map.SetNotes(m_notes);
+                }
+            }
         }
         else if (result->action == ServerAction::SendChat) {
             SetStatusText(result->ok ? L"Chat message sent." : L"Chat send failed; kept locally.");

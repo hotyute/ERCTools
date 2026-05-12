@@ -101,19 +101,134 @@ std::wstring StripHtmlTags(std::wstring text)
 
 
 
+
+static bool IsGenericAlertTitle(const std::wstring& title)
+{
+    std::wstring normalized = ToLower(Trim(title));
+    return normalized.empty() ||
+        normalized == L"traffic alert" ||
+        normalized == L"traffic alerts" ||
+        normalized == L"title alert" ||
+        normalized == L"alert";
+}
+
+static std::wstring NormalizeAlertDescription(const std::wstring& description)
+{
+    if (description.find(L'<') != std::wstring::npos && description.find(L'>') != std::wstring::npos)
+        return StripHtmlTags(description);
+
+    return Trim(description);
+}
+
+static std::wstring ExtractLabeledAlertField(const std::wstring& description, const wchar_t* label)
+{
+    std::wstring normalized = NormalizeAlertDescription(description);
+    if (normalized.empty())
+        return L"";
+
+    std::wstring pattern = LR"((?:^|[\r\n])\s*)";
+    pattern += label;
+    pattern += LR"(\s*:\s*([^\r\n]+))";
+
+    std::wsmatch m;
+    std::wregex lineRe(pattern, std::regex_constants::icase);
+    if (std::regex_search(normalized, m, lineRe) && m.size() > 1)
+        return Trim(m[1].str());
+
+    // Be tolerant of descriptions whose <br> separators were already collapsed to spaces.
+    static const wchar_t* kKnownLabels =
+        L"Location|Reason|Status|Time To Clear|Return To Normal|Lanes Closed";
+    std::wstring inlinePattern = LR"((?:^|\s))";
+    inlinePattern += label;
+    inlinePattern += LR"(\s*:\s*(.*?)(?=\s+(?:)";
+    inlinePattern += kKnownLabels;
+    inlinePattern += LR"()\s*:|$))";
+
+    std::wregex inlineRe(inlinePattern, std::regex_constants::icase);
+    if (std::regex_search(normalized, m, inlineRe) && m.size() > 1)
+        return Trim(m[1].str());
+
+    return L"";
+}
+
+static bool LooksLikeTrafficEnglandDescription(const std::wstring& text)
+{
+    std::wstring normalized = NormalizeAlertDescription(text);
+    return !ExtractLabeledAlertField(normalized, L"Reason").empty() ||
+        !ExtractLabeledAlertField(normalized, L"Location").empty() ||
+        !ExtractLabeledAlertField(normalized, L"Status").empty();
+}
+
 static std::wstring ExtractReasonTitle(const std::wstring& description)
 {
     if (description.empty())
         return L"";
 
-    std::wsmatch m;
-    std::wregex reasonRe(LR"((?:^|\n)\s*Reason\s*:\s*([^\n\r]+))", std::regex_constants::icase);
-    if (std::regex_search(description, m, reasonRe) && m.size() > 1)
-        return Trim(m[1].str());
+    std::wstring reason = ExtractLabeledAlertField(description, L"Reason");
+    if (!reason.empty())
+        return reason;
 
-    size_t lineEnd = description.find_first_of(L"\r\n");
-    return Trim(description.substr(0, lineEnd));
+    std::wstring normalized = NormalizeAlertDescription(description);
+    size_t lineEnd = normalized.find_first_of(L"\r\n");
+    return Trim(normalized.substr(0, lineEnd));
 }
+
+static std::wstring BuildLabeledLine(const wchar_t* label, const std::wstring& value)
+{
+    if (value.empty())
+        return L"";
+
+    std::wstring line = label;
+    line += L" : ";
+    line += value;
+    return line;
+}
+
+static void AppendDescriptionLine(std::wstring& description, const std::wstring& line)
+{
+    if (line.empty())
+        return;
+
+    if (!description.empty())
+        description += L"\r\n";
+    description += line;
+}
+
+static std::wstring BuildTrafficEnglandDescriptionFromFields(const json& props, const json& obj)
+{
+    auto pick = [&](std::initializer_list<const char*> keys) {
+        std::wstring value = PickString(props, keys);
+        if (value.empty())
+            value = PickString(obj, keys);
+        return NormalizeAlertDescription(value);
+        };
+
+    std::wstring description;
+    AppendDescriptionLine(description, BuildLabeledLine(L"Location", pick({
+        "location", "eventLocation", "event location", "locationDescription", "location description",
+        "where", "whereIsIt", "where is it"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"Reason", pick({
+        "reason", "eventReason", "event reason", "reasonDescription", "reason description",
+        "cause", "eventSubType", "event sub type", "incidentType", "incident type"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"Status", pick({
+        "status", "eventStatus", "event status", "currentStatus", "current status"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"Time To Clear", pick({
+        "timeToClear", "time to clear", "expectedClearTime", "expected clear time", "clearTime", "clear time"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"Return To Normal", pick({
+        "returnToNormal", "return to normal", "returnToNormalTime", "return to normal time",
+        "normalTime", "normal time"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"Lanes Closed", pick({
+        "lanesClosed", "lanes closed", "closedLanes", "closed lanes", "laneClosures", "lane closures"
+        })));
+
+    return description;
+}
+
 static bool IsValidLatLon(double lat, double lon)
 {
     return std::isfinite(lat) && std::isfinite(lon) &&
@@ -227,6 +342,90 @@ static bool NormalizeCoordinatePair(double first, double second, double& latOut,
     return false;
 }
 
+
+
+static std::wstring JsonValueToAlertCellText(const json& value)
+{
+    if (value.is_object()) {
+        std::wstring picked = PickString(value, {
+            "display", "text", "html", "value", "data", "rendered", "filter", "sort"
+            });
+        if (!picked.empty())
+            return picked;
+
+        std::wstring joined;
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            std::wstring part = JsonValueToAlertCellText(*it);
+            if (part.empty())
+                continue;
+            if (!joined.empty())
+                joined += L" ";
+            joined += part;
+        }
+        return joined;
+    }
+
+    if (value.is_array()) {
+        std::wstring joined;
+        for (const auto& item : value) {
+            std::wstring part = JsonValueToAlertCellText(item);
+            if (part.empty())
+                continue;
+            if (!joined.empty())
+                joined += L" ";
+            joined += part;
+        }
+        return joined;
+    }
+
+    return JsonValueToText(value);
+}
+
+static bool BuildHtmlAlertFromCells(const std::vector<std::wstring>& cells, size_t& idCounter, TrafficAlert& alertOut)
+{
+    if (cells.empty())
+        return false;
+
+    size_t descriptionIndex = cells.size();
+    for (size_t i = 0; i < cells.size(); ++i) {
+        if (LooksLikeTrafficEnglandDescription(cells[i])) {
+            descriptionIndex = i;
+            break;
+        }
+    }
+
+    if (descriptionIndex == cells.size() && cells.size() >= 4)
+        descriptionIndex = 3;
+
+    if (descriptionIndex == cells.size())
+        return false;
+
+    std::wstring description = NormalizeAlertDescription(cells[descriptionIndex]);
+    if (description.empty())
+        return false;
+
+    std::wstring road = descriptionIndex > 0 ? Trim(cells[0]) : ExtractLabeledAlertField(description, L"Location");
+    std::wstring type = descriptionIndex > 1 ? Trim(cells[1]) : L"";
+    std::wstring severity = descriptionIndex > 2 ? Trim(cells[2]) : L"";
+
+    if (ToLower(road) == L"road" && ToLower(type) == L"type")
+        return false;
+
+    TrafficAlert a;
+    a.id = L"html-" + std::to_wstring(++idCounter);
+    a.road = road;
+    a.description = description;
+    std::wstring reason = ExtractReasonTitle(description);
+    a.title = reason.empty() ? (type.empty() ? L"Traffic alert" : type) : reason;
+    a.severity = severity.empty() ? L"Unknown" : severity;
+    a.updatedText = L"";
+    a.region = L"";
+    a.hasLocation = false;
+
+    alertOut = std::move(a);
+    return true;
+}
+
 std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
 {
     std::vector<TrafficAlert> out;
@@ -250,33 +449,23 @@ std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
             cells.push_back(StripHtmlTags((*cellIt)[1].str()));
         }
 
-        if (cells.size() < 4)
-            continue;
+        TrafficAlert a;
+        if (BuildHtmlAlertFromCells(cells, idCounter, a))
+            out.push_back(std::move(a));
+    }
 
-        std::wstring road = Trim(cells[0]);
-        std::wstring type = Trim(cells[1]);
-        std::wstring severity = Trim(cells[2]);
-        std::wstring description = Trim(cells[3]);
-
-        // Skip the table header row
-        if (ToLower(road) == L"road" && ToLower(type) == L"type")
-            continue;
-
-        if (road.empty() || description.empty())
-            continue;
+    if (out.empty()) {
+        std::vector<std::wstring> cells;
+        for (std::wsregex_iterator cellIt(html.begin(), html.end(), cellRe), cellEnd;
+            cellIt != cellEnd;
+            ++cellIt)
+        {
+            cells.push_back(StripHtmlTags((*cellIt)[1].str()));
+        }
 
         TrafficAlert a;
-        a.id = L"html-" + std::to_wstring(++idCounter);
-        a.road = road;
-        a.description = description;
-        std::wstring reason = ExtractReasonTitle(description);
-        a.title = reason.empty() ? (type.empty() ? L"Traffic alert" : type) : reason;
-        a.severity = severity.empty() ? L"Unknown" : severity;
-        a.updatedText = L"";
-        a.region = L"";
-        a.hasLocation = false;
-
-        out.push_back(std::move(a));
+        if (BuildHtmlAlertFromCells(cells, idCounter, a))
+            out.push_back(std::move(a));
     }
 
     return out;
@@ -389,28 +578,70 @@ TrafficAlert ParseAlertObject(const json& obj)
     TrafficAlert a;
 
     const json* props = &obj;
-    if (obj.contains("properties") && obj["properties"].is_object())
-        props = &obj["properties"];
+    auto propertiesIt = obj.find("properties");
+    if (propertiesIt == obj.end())
+        propertiesIt = obj.find("Properties");
+    if (propertiesIt != obj.end() && propertiesIt->is_object())
+        props = &(*propertiesIt);
 
     a.id = PickString(*props, { "id", "incidentId", "alertId", "uuid", "eventId", "eventID", "event_id" });
     if (a.id.empty())
         a.id = PickString(obj, { "id", "incidentId", "alertId", "uuid", "eventId", "eventID", "event_id" });
 
-    a.title = PickString(*props, { "title", "headline", "summary", "name", "eventType", "type", "event_type" });
-    if (a.title.empty())
-        a.title = PickString(obj, { "title", "headline", "summary", "name", "eventType", "type", "event_type" });
+    std::wstring reason = PickString(*props, {
+        "reason", "eventReason", "event reason", "reasonDescription", "reason description",
+        "cause", "eventSubType", "event sub type", "incidentType", "incident type"
+        });
+    if (reason.empty())
+        reason = PickString(obj, {
+            "reason", "eventReason", "event reason", "reasonDescription", "reason description",
+            "cause", "eventSubType", "event sub type", "incidentType", "incident type"
+            });
+    reason = NormalizeAlertDescription(reason);
 
-    a.description = PickString(*props, { "description", "details", "message", "fullText", "eventDescription", "event_description", "comment" });
+    a.title = PickString(*props, {
+        "title", "headline", "summary", "name", "eventType", "event_type",
+        "event type", "alertType", "alert type", "type"
+        });
+    if (a.title.empty())
+        a.title = PickString(obj, {
+            "title", "headline", "summary", "name", "eventType", "event_type",
+            "event type", "alertType", "alert type", "type"
+            });
+    a.title = NormalizeAlertDescription(a.title);
+    if (!reason.empty() && IsGenericAlertTitle(a.title))
+        a.title = reason;
+
+    a.description = PickString(*props, {
+        "description", "details", "detail", "message", "fullText", "full text",
+        "eventDescription", "event_description", "event description", "comment", "comments",
+        "disseminationText", "dissemination text", "publicDescription", "public description",
+        "gdp", "popup", "popupContent", "popup content", "content", "html", "info", "information"
+        });
     if (a.description.empty())
-        a.description = PickString(obj, { "description", "details", "message", "fullText", "eventDescription", "event_description", "comment" });
+        a.description = PickString(obj, {
+            "description", "details", "detail", "message", "fullText", "full text",
+            "eventDescription", "event_description", "event description", "comment", "comments",
+            "disseminationText", "dissemination text", "publicDescription", "public description",
+            "gdp", "popup", "popupContent", "popup content", "content", "html", "info", "information"
+            });
+    a.description = NormalizeAlertDescription(a.description);
+    if (a.description.empty())
+        a.description = BuildTrafficEnglandDescriptionFromFields(*props, obj);
+    if (a.description.empty() && !reason.empty())
+        a.description = reason;
+    if (reason.empty())
+        reason = ExtractLabeledAlertField(a.description, L"Reason");
+    if (!reason.empty() && IsGenericAlertTitle(a.title))
+        a.title = reason;
 
     a.road = PickString(*props, { "road", "roadName", "route", "roadNumber", "road_number" });
     if (a.road.empty())
         a.road = PickString(obj, { "road", "roadName", "route", "roadNumber", "road_number" });
 
-    a.region = PickString(*props, { "region", "area", "county", "district", "location" });
+    a.region = PickString(*props, { "region", "area", "county", "district", "location", "eventLocation", "event location" });
     if (a.region.empty())
-        a.region = PickString(obj, { "region", "area", "county", "district", "location" });
+        a.region = PickString(obj, { "region", "area", "county", "district", "location", "eventLocation", "event location" });
 
     a.severity = PickString(*props, { "severity", "impact", "level", "priority", "severityId", "severity_id" });
     if (a.severity.empty())
@@ -465,13 +696,61 @@ TrafficAlert ParseAlertObject(const json& obj)
     if (a.id.empty())
         a.id = L"alert-" + std::to_wstring(++s_idCounter);
 
-    if (a.title.empty())
-        a.title = L"Traffic alert";
+    if (IsGenericAlertTitle(a.title)) {
+        std::wstring descriptionReason = ExtractReasonTitle(a.description);
+        a.title = descriptionReason.empty() ? L"Traffic alert" : descriptionReason;
+    }
 
     if (a.severity.empty())
         a.severity = L"Unknown";
 
     return a;
+}
+
+
+static std::string NormalizeJsonKeyName(std::string key)
+{
+    std::string out;
+    out.reserve(key.size());
+
+    for (unsigned char ch : key) {
+        if (std::isalnum(ch))
+            out.push_back(static_cast<char>(std::tolower(ch)));
+    }
+
+    return out;
+}
+
+static json::const_iterator FindJsonKeyInsensitive(const json& obj, const char* key)
+{
+    if (!obj.is_object())
+        return obj.end();
+
+    auto it = obj.find(key);
+    if (it != obj.end())
+        return it;
+
+    std::string wanted = NormalizeJsonKeyName(key);
+
+    for (auto candidate = obj.begin(); candidate != obj.end(); ++candidate) {
+        if (NormalizeJsonKeyName(candidate.key()) == wanted)
+            return candidate;
+    }
+
+    return obj.end();
+}
+
+static bool TryGetArrayByKeys(const json& obj, std::initializer_list<const char*> keys, const json*& arrOut)
+{
+    for (const char* key : keys) {
+        auto it = FindJsonKeyInsensitive(obj, key);
+        if (it != obj.end() && it->is_array()) {
+            arrOut = &(*it);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 std::vector<TrafficAlert> ParseTrafficAlerts(const std::string& text, std::wstring& errorOut)
@@ -490,27 +769,44 @@ std::vector<TrafficAlert> ParseTrafficAlerts(const std::string& text, std::wstri
         std::vector<TrafficAlert> out;
         bool recognized = false;
 
-        auto addIfObject = [&](const json& item)
+        size_t jsonRowIdCounter = 0;
+
+        auto addItem = [&](const json& item)
             {
-                if (item.is_object())
+                if (item.is_object()) {
                     out.push_back(ParseAlertObject(item));
+                    return;
+                }
+
+                if (item.is_array()) {
+                    std::vector<std::wstring> cells;
+                    for (const auto& cell : item) {
+                        std::wstring value = NormalizeAlertDescription(JsonValueToAlertCellText(cell));
+                        if (!value.empty())
+                            cells.push_back(value);
+                    }
+
+                    TrafficAlert a;
+                    if (BuildHtmlAlertFromCells(cells, jsonRowIdCounter, a))
+                        out.push_back(std::move(a));
+                }
             };
 
         auto addArray = [&](const json& arr)
             {
                 recognized = true;
                 for (const auto& item : arr)
-                    addIfObject(item);
+                    addItem(item);
             };
 
         auto addArrayByKeys = [&](const json& obj, std::initializer_list<const char*> keys)
             {
-                for (const char* key : keys) {
-                    if (obj.contains(key) && obj[key].is_array()) {
-                        addArray(obj[key]);
-                        return true;
-                    }
+                const json* arr = nullptr;
+                if (TryGetArrayByKeys(obj, keys, arr)) {
+                    addArray(*arr);
+                    return true;
                 }
+
                 return false;
             };
 
@@ -521,19 +817,21 @@ std::vector<TrafficAlert> ParseTrafficAlerts(const std::string& text, std::wstri
             if (addArrayByKeys(root, { "features", "alerts", "data", "events", "items", "results", "rows", "aaData" })) {
                 // Recognized and added above.
             }
-            else if (root.contains("data") && root["data"].is_object() &&
-                addArrayByKeys(root["data"], { "events", "alerts", "items", "results", "rows" }))
+            else if (FindJsonKeyInsensitive(root, "data") != root.end() &&
+                FindJsonKeyInsensitive(root, "data")->is_object() &&
+                addArrayByKeys(*FindJsonKeyInsensitive(root, "data"), { "events", "alerts", "items", "results", "rows" }))
             {
                 // Recognized and added above.
             }
-            else if (root.contains("geometry") ||
-                root.contains("latitude") ||
-                root.contains("lat") ||
-                root.contains("title") ||
-                root.contains("description") ||
-                root.contains("headline") ||
-                root.contains("eventType") ||
-                root.contains("roadNumber"))
+            else if (FindJsonKeyInsensitive(root, "geometry") != root.end() ||
+                FindJsonKeyInsensitive(root, "latitude") != root.end() ||
+                FindJsonKeyInsensitive(root, "lat") != root.end() ||
+                FindJsonKeyInsensitive(root, "title") != root.end() ||
+                FindJsonKeyInsensitive(root, "description") != root.end() ||
+                FindJsonKeyInsensitive(root, "headline") != root.end() ||
+                FindJsonKeyInsensitive(root, "eventType") != root.end() ||
+                FindJsonKeyInsensitive(root, "roadNumber") != root.end() ||
+                FindJsonKeyInsensitive(root, "reason") != root.end())
             {
                 recognized = true;
                 out.push_back(ParseAlertObject(root));
