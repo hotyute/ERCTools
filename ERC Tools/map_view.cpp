@@ -43,6 +43,15 @@ struct TileEntry
     ComPtr<ID2D1Bitmap> bitmap;
 };
 
+struct BoundaryRing
+{
+    std::vector<GeoPoint> points;
+    double minLat = 0.0;
+    double maxLat = 0.0;
+    double minLon = 0.0;
+    double maxLon = 0.0;
+};
+
 constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
 constexpr UINT_PTR kInteractionIdleTimer = 1;
@@ -228,7 +237,25 @@ public:
             return false;
         }
 
-        m_ukBoundaryRings = std::move(rings);
+        m_ukBoundaryRings.clear();
+        m_ukBoundaryRings.reserve(rings.size());
+        for (auto& ring : rings) {
+            if (ring.empty())
+                continue;
+
+            BoundaryRing cached;
+            cached.minLat = cached.maxLat = ring[0].lat;
+            cached.minLon = cached.maxLon = ring[0].lon;
+            for (const GeoPoint& pt : ring) {
+                cached.minLat = MinValue(cached.minLat, pt.lat);
+                cached.maxLat = MaxValue(cached.maxLat, pt.lat);
+                cached.minLon = MinValue(cached.minLon, pt.lon);
+                cached.maxLon = MaxValue(cached.maxLon, pt.lon);
+            }
+            cached.points = std::move(ring);
+            m_ukBoundaryRings.push_back(std::move(cached));
+        }
+
         Invalidate();
         return true;
     }
@@ -867,7 +894,7 @@ private:
         return m_unknownBrush.Get();
     }
 
-    void DrawMarkers(bool interactive)
+    void DrawMarkers()
     {
         const ViewState view = BuildViewState(32.0);
         const int width = view.width;
@@ -875,8 +902,6 @@ private:
 
         for (size_t i = 0; i < m_alerts.size(); ++i) {
             const bool selected = (m_alerts[i].id == m_selectedId);
-            if (interactive && !selected)
-                continue;
 
             if (!m_alerts[i].hasLocation ||
                 !IsGeoPointInView(view, m_alerts[i].latitude, m_alerts[i].longitude))
@@ -1100,14 +1125,11 @@ private:
             const bool interactive = m_interactivePan;
 
             DrawTiles(interactive);
-            if (!interactive) {
-                DrawUkBoundary();
-                DrawCityAnchors();
-                DrawNotes();
-            }
-            DrawMarkers(interactive);
-            if (!interactive)
-                DrawMapChrome();
+            DrawUkBoundary(interactive);
+            DrawCityAnchors();
+            DrawNotes();
+            DrawMarkers();
+            DrawMapChrome();
 
             HRESULT hr = m_rt->EndDraw();
             if (hr == D2DERR_RECREATE_TARGET)
@@ -1176,9 +1198,34 @@ private:
         DrawClosedPolygon(northernIreland, _countof(northernIreland));
     }
 
-    void DrawBoundaryRing(const std::vector<GeoPoint>& ring)
+    static bool LongitudeRangesIntersect(const ViewState& view, double minLon, double maxLon)
     {
-        if (!m_rt || ring.size() < 3)
+        if (view.allLongitudes)
+            return true;
+
+        minLon = NormalizeLongitude(minLon);
+        maxLon = NormalizeLongitude(maxLon);
+
+        if (view.wrapsLongitude)
+            return maxLon >= view.minLon || minLon <= view.maxLon;
+
+        return maxLon >= view.minLon && minLon <= view.maxLon;
+    }
+
+    static bool RingIntersectsView(const BoundaryRing& ring, const ViewState& view)
+    {
+        if (ring.points.size() < 3)
+            return false;
+
+        if (ring.maxLat < view.minLat || ring.minLat > view.maxLat)
+            return false;
+
+        return LongitudeRangesIntersect(view, ring.minLon, ring.maxLon);
+    }
+
+    void DrawBoundaryRingFull(const BoundaryRing& ring)
+    {
+        if (!m_rt || ring.points.size() < 3)
             return;
 
         ComPtr<ID2D1PathGeometry> geom;
@@ -1192,11 +1239,11 @@ private:
         sink->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
 
         sink->BeginFigure(
-            GeoToScreen(ring[0].lat, ring[0].lon),
+            GeoToScreen(ring.points[0].lat, ring.points[0].lon),
             D2D1_FIGURE_BEGIN_FILLED);
 
-        for (size_t i = 1; i < ring.size(); ++i)
-            sink->AddLine(GeoToScreen(ring[i].lat, ring[i].lon));
+        for (size_t i = 1; i < ring.points.size(); ++i)
+            sink->AddLine(GeoToScreen(ring.points[i].lat, ring.points[i].lon));
 
         sink->EndFigure(D2D1_FIGURE_END_CLOSED);
 
@@ -1210,16 +1257,64 @@ private:
             m_rt->DrawGeometry(geom.Get(), m_outlineStrokeBrush.Get(), 2.0f);
     }
 
-    void DrawUkBoundary()
+    void DrawBoundaryRingVisibleStroke(const BoundaryRing& ring, const ViewState& view)
     {
-        // Detailed UK boundary files can contain very large rings. At local/street
-        // zoom levels they add input latency without useful context, so avoid
-        // rebuilding and rasterising thousands of outline segments on every pan.
-        if (m_zoom >= 10)
+        if (!m_rt || !m_outlineStrokeBrush || ring.points.size() < 2)
             return;
 
-        for (const auto& ring : m_ukBoundaryRings)
-            DrawBoundaryRing(ring);
+        ComPtr<ID2D1PathGeometry> geom;
+        if (FAILED(g_d2dFactory->CreatePathGeometry(&geom)))
+            return;
+
+        ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(geom->Open(&sink)))
+            return;
+
+        bool hasFigure = false;
+        for (size_t i = 1; i < ring.points.size(); ++i) {
+            const GeoPoint& a = ring.points[i - 1];
+            const GeoPoint& b = ring.points[i];
+
+            double minLat = MinValue(a.lat, b.lat);
+            double maxLat = MaxValue(a.lat, b.lat);
+            if (maxLat < view.minLat || minLat > view.maxLat)
+                continue;
+
+            double minLon = MinValue(a.lon, b.lon);
+            double maxLon = MaxValue(a.lon, b.lon);
+            if (!LongitudeRangesIntersect(view, minLon, maxLon))
+                continue;
+
+            sink->BeginFigure(GeoToScreen(view, a.lat, a.lon), D2D1_FIGURE_BEGIN_HOLLOW);
+            sink->AddLine(GeoToScreen(view, b.lat, b.lon));
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+            hasFigure = true;
+        }
+
+        HRESULT closeHr = sink->Close();
+        if (FAILED(closeHr) || !hasFigure)
+            return;
+
+        m_rt->DrawGeometry(geom.Get(), m_outlineStrokeBrush.Get(), 2.0f);
+    }
+
+    void DrawUkBoundary(bool interactive)
+    {
+        if (m_ukBoundaryRings.empty())
+            return;
+
+        const ViewState view = BuildViewState(96.0);
+        const bool fullBoundary = !interactive && m_zoom < 10;
+
+        for (const auto& ring : m_ukBoundaryRings) {
+            if (!RingIntersectsView(ring, view))
+                continue;
+
+            if (fullBoundary)
+                DrawBoundaryRingFull(ring);
+            else
+                DrawBoundaryRingVisibleStroke(ring, view);
+        }
     }
 
     HWND m_hwnd = nullptr;
@@ -1252,7 +1347,7 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_textBrush;
     ComPtr<ID2D1SolidColorBrush> m_noteBrush;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
-    std::vector<std::vector<GeoPoint>> m_ukBoundaryRings;
+    std::vector<BoundaryRing> m_ukBoundaryRings;
 
     std::mutex m_tileMutex;
     std::unordered_map<TileKey, std::shared_ptr<TileEntry>, TileKeyHash> m_tiles;
