@@ -103,6 +103,18 @@ std::wstring StripHtmlTags(std::wstring text)
 
 
 static bool IsGenericAlertTitle(const std::wstring& title)
+<<<<<<< codex/fix-notes-system-display-issues-dgllbn
+=======
+{
+    std::wstring normalized = ToLower(Trim(title));
+    return normalized.empty() ||
+        normalized == L"traffic alert" ||
+        normalized == L"title alert" ||
+        normalized == L"alert";
+}
+
+static std::wstring ExtractReasonTitle(const std::wstring& description)
+>>>>>>> master
 {
     std::wstring normalized = ToLower(Trim(title));
     return normalized.empty() ||
@@ -502,7 +514,10 @@ TrafficAlert ParseAlertObject(const json& obj)
     a.description = PickString(*props, { "description", "details", "message", "fullText", "eventDescription", "event_description", "comment" });
     if (a.description.empty())
         a.description = PickString(obj, { "description", "details", "message", "fullText", "eventDescription", "event_description", "comment" });
+<<<<<<< codex/fix-notes-system-display-issues-dgllbn
     a.description = NormalizeAlertDescription(a.description);
+=======
+>>>>>>> master
     if (a.description.empty() && !reason.empty())
         a.description = reason;
 
