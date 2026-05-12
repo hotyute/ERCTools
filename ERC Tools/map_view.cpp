@@ -1066,8 +1066,10 @@ private:
                     if (!drewFallback)
                         m_rt->FillRectangle(dest, m_placeholderBrush.Get());
 
-                    if (!interactive && !drewFallback)
-                        m_rt->DrawRectangle(dest, m_borderBrush.Get(), 0.5f);
+                    // Keep the unloaded-tile grid stable during interaction too;
+                    // otherwise placeholder/fallback tile boundaries visibly blink
+                    // off while panning or zooming.
+                    m_rt->DrawRectangle(dest, m_borderBrush.Get(), 0.5f);
                 }
             }
         }
@@ -1176,7 +1178,7 @@ private:
             const bool interactive = m_interactivePan;
 
             DrawTiles(interactive);
-            DrawUkBoundary(interactive);
+            DrawUkBoundary();
             DrawCityAnchors();
             DrawNotes();
             DrawMarkers();
@@ -1386,13 +1388,16 @@ private:
         m_rt->DrawGeometry(geom.Get(), m_outlineStrokeBrush.Get(), 2.0f);
     }
 
-    void DrawUkBoundary(bool interactive)
+    void DrawUkBoundary()
     {
         if (m_ukBoundaryRings.empty())
             return;
 
         const ViewState view = BuildViewState(kBoundaryDrawMarginPixels);
-        const bool fullBoundary = !interactive && m_zoom < 10;
+        // Keep the boundary fill path stable while panning/zooming. Switching from
+        // full polygon fill to viewport fill solely because the user is interacting
+        // changes the apparent tint and causes obvious flicker at mid zoom levels.
+        const bool fullBoundary = m_zoom < 10;
 
         if (!fullBoundary) {
             // At close zoom levels the visible outline is drawn segment-by-segment
