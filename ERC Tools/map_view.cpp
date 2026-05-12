@@ -1223,6 +1223,43 @@ private:
         return LongitudeRangesIntersect(view, ring.minLon, ring.maxLon);
     }
 
+    static bool IsGeoPointInRing(const BoundaryRing& ring, double lat, double lon)
+    {
+        if (ring.points.size() < 3 ||
+            lat < ring.minLat || lat > ring.maxLat ||
+            lon < ring.minLon || lon > ring.maxLon)
+        {
+            return false;
+        }
+
+        bool inside = false;
+        size_t j = ring.points.size() - 1;
+        for (size_t i = 0; i < ring.points.size(); ++i) {
+            const GeoPoint& a = ring.points[i];
+            const GeoPoint& b = ring.points[j];
+
+            if (((a.lat > lat) != (b.lat > lat)) &&
+                (lon < (b.lon - a.lon) * (lat - a.lat) / (b.lat - a.lat) + a.lon))
+            {
+                inside = !inside;
+            }
+
+            j = i;
+        }
+
+        return inside;
+    }
+
+    void DrawHighZoomBoundaryFill(const ViewState& view)
+    {
+        if (!m_rt || !m_outlineFillBrush)
+            return;
+
+        m_rt->FillRectangle(
+            D2D1::RectF(0.0f, 0.0f, static_cast<float>(view.width), static_cast<float>(view.height)),
+            m_outlineFillBrush.Get());
+    }
+
     void DrawBoundaryRingFull(const BoundaryRing& ring)
     {
         if (!m_rt || ring.points.size() < 3)
@@ -1305,6 +1342,20 @@ private:
 
         const ViewState view = BuildViewState(96.0);
         const bool fullBoundary = !interactive && m_zoom < 10;
+
+        if (!fullBoundary) {
+            // At close zoom levels the visible outline is drawn segment-by-segment
+            // for performance. Keep the land tint stable by applying the same
+            // translucent fill over the viewport when the view centre is inside
+            // the boundary, instead of letting it flicker off during interaction.
+            const double centerLon = NormalizeLongitude(m_centerLon);
+            for (const auto& ring : m_ukBoundaryRings) {
+                if (RingIntersectsView(ring, view) && IsGeoPointInRing(ring, m_centerLat, centerLon)) {
+                    DrawHighZoomBoundaryFill(view);
+                    break;
+                }
+            }
+        }
 
         for (const auto& ring : m_ukBoundaryRings) {
             if (!RingIntersectsView(ring, view))
