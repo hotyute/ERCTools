@@ -31,6 +31,7 @@ constexpr int IDC_CHAT_SEND_BTN = 1017;
 constexpr int IDC_NOTE_EDIT = 1018;
 constexpr int IDC_NOTE_BTN = 1019;
 constexpr int IDC_NOTE_LABEL = 1020;
+constexpr int IDC_PANEL_TAB_BTN = 1021;
 constexpr int IDM_FILE_SETTINGS = 2001;
 constexpr int IDM_FILE_EXIT = 2002;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
@@ -114,6 +115,11 @@ static bool IsValidMapCoordinate(double lat, double lon)
         lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0;
 }
 
+static bool IsLikelyUkCoordinate(double lat, double lon)
+{
+    return lat >= 48.0 && lat <= 62.0 && lon >= -12.0 && lon <= 6.0;
+}
+
 static std::vector<MapNote> ParseMapNotes(const json& root)
 {
     std::vector<MapNote> out;
@@ -137,15 +143,28 @@ static std::vector<MapNote> ParseMapNotes(const json& root)
         note.timestamp = PickString(item, { "timestamp", "time", "createdAt" });
         bool hasLat = PickDouble(item, { "lat", "latitude" }, note.latitude);
         bool hasLon = PickDouble(item, { "lon", "lng", "longitude" }, note.longitude);
+        if (hasLat && hasLon) {
+            if (IsLikelyUkCoordinate(note.longitude, note.latitude) && !IsLikelyUkCoordinate(note.latitude, note.longitude)) {
+                std::swap(note.latitude, note.longitude);
+            }
+        }
         if (!(hasLat && hasLon)) {
             double x = 0.0;
             double y = 0.0;
             if (PickDouble(item, { "x" }, x) && PickDouble(item, { "y" }, y)) {
-                // Some collaborators send web-map coordinates as x/y = lon/lat.
-                note.latitude = y;
-                note.longitude = x;
-                hasLat = true;
-                hasLon = true;
+                // Some collaborators send x/y in lon/lat order or lat/lon order.
+                if (IsValidMapCoordinate(y, x)) {
+                    note.latitude = y;
+                    note.longitude = x;
+                    hasLat = true;
+                    hasLon = true;
+                }
+                else if (IsValidMapCoordinate(x, y)) {
+                    note.latitude = x;
+                    note.longitude = y;
+                    hasLat = true;
+                    hasLon = true;
+                }
             }
         }
         if (hasLat && hasLon && IsValidMapCoordinate(note.latitude, note.longitude) && !note.text.empty())
@@ -420,6 +439,17 @@ private:
             WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_SERVER_EDIT), m_hInst, nullptr);
 
+        m_panelTabBtn = CreateWindowExW(
+            0,
+            L"BUTTON",
+            L"\x25C0",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON,
+            0, 0, 0, 0,
+            m_hwnd,
+            reinterpret_cast<HMENU>(IDC_PANEL_TAB_BTN),
+            m_hInst,
+            nullptr);
+
         m_refreshBtn = CreateWindowExW(
             0,
             L"BUTTON",
@@ -508,13 +538,13 @@ private:
             nullptr);
 
         if (!m_headerLabel || !m_urlLabel || !m_searchLabel || !m_severityLabel ||
-            !m_urlEdit || !m_serverLabel || !m_serverEdit || !m_refreshBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar)
+            !m_urlEdit || !m_serverLabel || !m_serverEdit || !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_urlLabel, m_serverLabel, m_searchLabel, m_severityLabel, m_noteLabel, m_urlEdit, m_serverEdit, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
+        for (HWND h : { m_urlLabel, m_serverLabel, m_searchLabel, m_severityLabel, m_noteLabel, m_urlEdit, m_serverEdit, m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -614,15 +644,20 @@ private:
         MoveWindow(m_refreshBtn, width - refreshW - pad, endpointY + labelH + 2, refreshW, controlH, TRUE);
 
         int bodyTop = topBarH;
-        int leftW = 440;
+        int leftW = m_isSidePanelVisible ? 440 : 0;
         int detailsH = 185;
         int chatH = 154;
 
         int leftX = pad;
         int leftY = bodyTop + pad;
-        int leftInnerW = leftW - pad * 2;
+        int leftInnerW = std::max(10, leftW - pad * 2);
 
-        MoveWindow(m_searchLabel, leftX, leftY, leftInnerW, labelH, TRUE);
+        const int panelShow = m_isSidePanelVisible ? SW_SHOW : SW_HIDE;
+        for (HWND h : { m_searchLabel, m_searchEdit, m_severityLabel, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn })
+            ShowWindow(h, panelShow);
+
+        if (m_isSidePanelVisible) {
+            MoveWindow(m_searchLabel, leftX, leftY, leftInnerW, labelH, TRUE);
         MoveWindow(m_searchEdit, leftX, leftY + labelH + 2, leftInnerW, controlH, TRUE);
 
         const int severityY = leftY + labelH + controlH + 12;
@@ -640,8 +675,9 @@ private:
         MoveWindow(m_chatHistory, leftX, chatTop, leftInnerW, chatH - controlH - 8, TRUE);
         MoveWindow(m_chatEdit, leftX, chatTop + chatH - controlH, leftInnerW - 72, controlH, TRUE);
         MoveWindow(m_chatSendBtn, leftX + leftInnerW - 66, chatTop + chatH - controlH, 66, controlH, TRUE);
+        }
 
-        int mapX = leftW + pad;
+        int mapX = (m_isSidePanelVisible ? leftW + pad : pad);
         int mapY = bodyTop + pad;
         LONG mapW = std::max<LONG>(100L, width - mapX - pad);
         LONG mapH = std::max<LONG>(100L, height - mapY - statusH - pad - 66);
@@ -652,16 +688,32 @@ private:
         MoveWindow(m_noteEdit, mapX, noteY + labelH + 2, std::max<LONG>(180L, mapW - 132), controlH, TRUE);
         MoveWindow(m_noteBtn, mapX + mapW - 122, noteY + labelH + 2, 122, controlH, TRUE);
 
+        const int tabW = 24;
+        const int tabH = 72;
+        int tabX = m_isSidePanelVisible ? (leftW - tabW / 2) : 0;
+        int tabY = bodyTop + std::max(60, (height - bodyTop - statusH) / 2 - tabH / 2);
+        MoveWindow(m_panelTabBtn, tabX, tabY, tabW, tabH, TRUE);
+
         SendMessageW(m_statusBar, WM_SIZE, 0, 0);
 
+        if (m_isSidePanelVisible) {
         SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 0, 94);
         SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 1, std::max(120, leftInnerW - 264));
         SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 2, 160);
+        }
     }
 
     void OnCommand(int id, int code)
     {
         switch (id) {
+        case IDC_PANEL_TAB_BTN:
+            if (code == BN_CLICKED) {
+                m_isSidePanelVisible = !m_isSidePanelVisible;
+                SetWindowTextW(m_panelTabBtn, m_isSidePanelVisible ? L"\x25C0" : L"\x25B6");
+                Layout();
+            }
+            break;
+
         case IDC_REFRESH_BTN:
             if (code == BN_CLICKED)
                 RefreshFeedAsync();
@@ -1404,6 +1456,7 @@ private:
     HWND m_statusBar = nullptr;
     HWND m_serverLabel = nullptr;
     HWND m_noteLabel = nullptr;
+    HWND m_panelTabBtn = nullptr;
     HWND m_urlEdit = nullptr;
     HWND m_serverEdit = nullptr;
     HWND m_refreshBtn = nullptr;
@@ -1428,6 +1481,7 @@ private:
     std::vector<MapNote> m_notes;
     std::wstring m_selectedId;
     bool m_programmaticSelection = false;
+    bool m_isSidePanelVisible = true;
     bool m_alertFilterUnplannedOnly = true;
     std::wstring m_alertOrder = L"Road";
     std::atomic_bool m_serverRequestInProgress{ false };

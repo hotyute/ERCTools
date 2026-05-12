@@ -100,6 +100,20 @@ std::wstring StripHtmlTags(std::wstring text)
 }
 
 
+
+static std::wstring ExtractReasonTitle(const std::wstring& description)
+{
+    if (description.empty())
+        return L"";
+
+    std::wsmatch m;
+    std::wregex reasonRe(LR"((?:^|\n)\s*Reason\s*:\s*([^\n\r]+))", std::regex_constants::icase);
+    if (std::regex_search(description, m, reasonRe) && m.size() > 1)
+        return Trim(m[1].str());
+
+    size_t lineEnd = description.find_first_of(L"\r\n");
+    return Trim(description.substr(0, lineEnd));
+}
 static bool IsValidLatLon(double lat, double lon)
 {
     return std::isfinite(lat) && std::isfinite(lon) &&
@@ -254,9 +268,10 @@ std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
         TrafficAlert a;
         a.id = L"html-" + std::to_wstring(++idCounter);
         a.road = road;
-        a.title = type.empty() ? L"Traffic alert" : type;
-        a.severity = severity.empty() ? L"Unknown" : severity;
         a.description = description;
+        std::wstring reason = ExtractReasonTitle(description);
+        a.title = reason.empty() ? (type.empty() ? L"Traffic alert" : type) : reason;
+        a.severity = severity.empty() ? L"Unknown" : severity;
         a.updatedText = L"";
         a.region = L"";
         a.hasLocation = false;
