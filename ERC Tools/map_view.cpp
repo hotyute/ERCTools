@@ -45,6 +45,8 @@ struct TileEntry
 
 constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
+constexpr UINT_PTR kInteractionIdleTimer = 1;
+constexpr UINT kInteractionIdleMs = 120;
 std::atomic<int> g_activeTileDownloads{ 0 };
 
 // ============================================================
@@ -312,6 +314,15 @@ private:
             OnPaint();
             return 0;
 
+        case WM_TIMER:
+            if (wParam == kInteractionIdleTimer) {
+                KillTimer(m_hwnd, kInteractionIdleTimer);
+                m_interactivePan = false;
+                Invalidate();
+                return 0;
+            }
+            break;
+
         case WM_ERASEBKGND:
             return 1;
 
@@ -321,6 +332,8 @@ private:
             m_mouseDown.y = GET_Y_LPARAM(lParam);
             m_lastMouse = m_mouseDown;
             m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
             return 0;
 
         case WM_MOUSEMOVE:
@@ -544,6 +557,7 @@ private:
             }
 
             if (m_dragging && (dx != 0 || dy != 0)) {
+                m_interactivePan = true;
                 MoveCenterByPixels(-dx, -dy);
                 m_lastMouse = pt;
                 Invalidate();
@@ -563,6 +577,9 @@ private:
         }
 
         m_dragging = false;
+        m_interactivePan = false;
+        KillTimer(m_hwnd, kInteractionIdleTimer);
+        Invalidate();
     }
 
     void OnDoubleClick(int x, int y)
@@ -585,6 +602,9 @@ private:
             return;
 
         GeoPoint geoUnderCursor = ScreenToGeo(pt.x, pt.y);
+
+        m_interactivePan = true;
+        SetTimer(m_hwnd, kInteractionIdleTimer, kInteractionIdleMs, nullptr);
 
         m_zoom = newZoom;
 
@@ -701,6 +721,15 @@ private:
         if (!entry)
             entry = std::make_shared<TileEntry>();
         return entry;
+    }
+
+    std::shared_ptr<TileEntry> FindTile(const TileKey& key)
+    {
+        std::lock_guard<std::mutex> lk(m_tileMutex);
+        auto it = m_tiles.find(key);
+        if (it == m_tiles.end())
+            return {};
+        return it->second;
     }
 
     void RequestTile(const TileKey& key)
@@ -838,13 +867,17 @@ private:
         return m_unknownBrush.Get();
     }
 
-    void DrawMarkers()
+    void DrawMarkers(bool interactive)
     {
         const ViewState view = BuildViewState(32.0);
         const int width = view.width;
         const int height = view.height;
 
         for (size_t i = 0; i < m_alerts.size(); ++i) {
+            const bool selected = (m_alerts[i].id == m_selectedId);
+            if (interactive && !selected)
+                continue;
+
             if (!m_alerts[i].hasLocation ||
                 !IsGeoPointInView(view, m_alerts[i].latitude, m_alerts[i].longitude))
             {
@@ -855,7 +888,6 @@ private:
             if (p.x < -20.0f || p.y < -20.0f || p.x > width + 20.0f || p.y > height + 20.0f)
                 continue;
 
-            bool selected = (m_alerts[i].id == m_selectedId);
             ID2D1SolidColorBrush* sevBrush = BrushForSeverity(m_alerts[i].severity);
 
             float outerR = selected ? 15.0f : 11.0f;
@@ -889,7 +921,7 @@ private:
         }
     }
 
-    void DrawTiles()
+    void DrawTiles(bool interactive)
     {
         RECT rc{};
         GetClientRect(m_hwnd, &rc);
@@ -918,8 +950,8 @@ private:
                 while (wrappedX >= tilesPerAxis) wrappedX -= tilesPerAxis;
 
                 TileKey key{ m_zoom, wrappedX, ty };
-                auto entry = GetOrCreateTile(key);
-                {
+                auto entry = interactive ? FindTile(key) : GetOrCreateTile(key);
+                if (entry) {
                     std::lock_guard<std::mutex> lk(entry->mutex);
                     entry->lastUsedMs = GetTickCount64();
                 }
@@ -933,17 +965,17 @@ private:
                 ComPtr<ID2D1Bitmap> bmp;
                 std::vector<BYTE> bytesCopy;
 
-                {
+                if (entry) {
                     std::lock_guard<std::mutex> lk(entry->mutex);
                     if (entry->bitmap) {
                         bmp = entry->bitmap;
                     }
-                    else if (entry->ready && !entry->bytes.empty()) {
+                    else if (!interactive && entry->ready && !entry->bytes.empty()) {
                         bytesCopy = entry->bytes;
                     }
                 }
 
-                if (!bmp && !bytesCopy.empty()) {
+                if (!interactive && entry && !bmp && !bytesCopy.empty()) {
                     bmp = CreateBitmapFromBytes(bytesCopy);
                     if (bmp) {
                         std::lock_guard<std::mutex> lk(entry->mutex);
@@ -956,14 +988,16 @@ private:
                     m_rt->DrawBitmap(bmp.Get(), dest);
                 }
                 else {
-                    RequestTile(key);
+                    if (!interactive)
+                        RequestTile(key);
                     m_rt->FillRectangle(dest, m_placeholderBrush.Get());
                     m_rt->DrawRectangle(dest, m_borderBrush.Get(), 0.5f);
                 }
             }
         }
 
-        PruneTileCache();
+        if (!interactive)
+            PruneTileCache();
     }
 
 
@@ -1063,12 +1097,17 @@ private:
             m_rt->BeginDraw();
             m_rt->Clear(D2D1::ColorF(0.80f, 0.91f, 0.98f, 1.0f));
 
-            DrawTiles();
-            DrawUkBoundary();
-            DrawCityAnchors();
-            DrawNotes();
-            DrawMarkers();
-            DrawMapChrome();
+            const bool interactive = m_interactivePan;
+
+            DrawTiles(interactive);
+            if (!interactive) {
+                DrawUkBoundary();
+                DrawCityAnchors();
+                DrawNotes();
+            }
+            DrawMarkers(interactive);
+            if (!interactive)
+                DrawMapChrome();
 
             HRESULT hr = m_rt->EndDraw();
             if (hr == D2DERR_RECREATE_TARGET)
@@ -1197,6 +1236,7 @@ private:
     POINT m_mouseDown{};
     POINT m_lastMouse{};
     bool m_dragging = false;
+    bool m_interactivePan = false;
 
     ComPtr<ID2D1HwndRenderTarget> m_rt;
     ComPtr<ID2D1SolidColorBrush> m_severeBrush;
