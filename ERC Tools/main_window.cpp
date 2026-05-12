@@ -732,7 +732,7 @@ private:
         const int tabW = 24;
         const int tabH = 72;
         int tabX = m_isSidePanelVisible ? (leftW - tabW / 2) : 0;
-        int tabY = bodyTop + std::max(60, (height - bodyTop - statusH) / 2 - tabH / 2);
+        int tabY = bodyTop + std::max<INT>(60, (height - bodyTop - statusH) / 2 - tabH / 2);
         MoveWindow(m_panelTabBtn, tabX, tabY, tabW, tabH, TRUE);
 
         SendMessageW(m_statusBar, WM_SIZE, 0, 0);
@@ -1512,6 +1512,7 @@ private:
     HWND m_panelTabBtn = nullptr;
     HWND m_urlEdit = nullptr;
     HWND m_serverEdit = nullptr;
+    HWND  m_togglePanelBtn = nullptr;
     HWND m_refreshBtn = nullptr;
     HWND m_searchEdit = nullptr;
     HWND m_severityCombo = nullptr;
