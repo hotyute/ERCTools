@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cctype>
 #include <cstdlib>
 #include <cwctype>
 #include <functional>

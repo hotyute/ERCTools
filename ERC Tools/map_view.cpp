@@ -527,6 +527,11 @@ private:
         if (FAILED(g_d2dFactory->CreateHwndRenderTarget(rtProps, hwndProps, &m_rt)))
             return;
 
+        // Keep Direct2D drawing units aligned with Win32 mouse/client coordinates.
+        // Otherwise high-DPI scaling can make ScreenToGeo and GeoToScreen disagree,
+        // which places newly-created notes away from the double-clicked map point.
+        m_rt->SetDpi(96.0f, 96.0f);
+
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.85f, 0.10f, 0.10f, 0.95f), &m_severeBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.62f, 0.18f, 0.95f), &m_moderateBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.15f, 0.52f, 0.90f, 0.95f), &m_minorBrush);
