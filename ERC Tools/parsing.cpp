@@ -107,6 +107,7 @@ static bool IsGenericAlertTitle(const std::wstring& title)
     std::wstring normalized = ToLower(Trim(title));
     return normalized.empty() ||
         normalized == L"traffic alert" ||
+        normalized == L"traffic alerts" ||
         normalized == L"title alert" ||
         normalized == L"alert";
 }
@@ -171,6 +172,63 @@ static std::wstring ExtractReasonTitle(const std::wstring& description)
     size_t lineEnd = normalized.find_first_of(L"\r\n");
     return Trim(normalized.substr(0, lineEnd));
 }
+
+static std::wstring BuildLabeledLine(const wchar_t* label, const std::wstring& value)
+{
+    if (value.empty())
+        return L"";
+
+    std::wstring line = label;
+    line += L" : ";
+    line += value;
+    return line;
+}
+
+static void AppendDescriptionLine(std::wstring& description, const std::wstring& line)
+{
+    if (line.empty())
+        return;
+
+    if (!description.empty())
+        description += L"\r\n";
+    description += line;
+}
+
+static std::wstring BuildTrafficEnglandDescriptionFromFields(const json& props, const json& obj)
+{
+    auto pick = [&](std::initializer_list<const char*> keys) {
+        std::wstring value = PickString(props, keys);
+        if (value.empty())
+            value = PickString(obj, keys);
+        return NormalizeAlertDescription(value);
+        };
+
+    std::wstring description;
+    AppendDescriptionLine(description, BuildLabeledLine(L"Location", pick({
+        "location", "eventLocation", "event location", "locationDescription", "location description",
+        "where", "whereIsIt", "where is it"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"Reason", pick({
+        "reason", "eventReason", "event reason", "reasonDescription", "reason description",
+        "cause", "eventSubType", "event sub type", "incidentType", "incident type"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"Status", pick({
+        "status", "eventStatus", "event status", "currentStatus", "current status"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"Time To Clear", pick({
+        "timeToClear", "time to clear", "expectedClearTime", "expected clear time", "clearTime", "clear time"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"Return To Normal", pick({
+        "returnToNormal", "return to normal", "returnToNormalTime", "return to normal time",
+        "normalTime", "normal time"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"Lanes Closed", pick({
+        "lanesClosed", "lanes closed", "closedLanes", "closed lanes", "laneClosures", "lane closures"
+        })));
+
+    return description;
+}
+
 static bool IsValidLatLon(double lat, double lon)
 {
     return std::isfinite(lat) && std::isfinite(lon) &&
@@ -284,6 +342,44 @@ static bool NormalizeCoordinatePair(double first, double second, double& latOut,
     return false;
 }
 
+
+
+static std::wstring JsonValueToAlertCellText(const json& value)
+{
+    if (value.is_object()) {
+        std::wstring picked = PickString(value, {
+            "display", "text", "html", "value", "data", "rendered", "filter", "sort"
+            });
+        if (!picked.empty())
+            return picked;
+
+        std::wstring joined;
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            std::wstring part = JsonValueToAlertCellText(*it);
+            if (part.empty())
+                continue;
+            if (!joined.empty())
+                joined += L" ";
+            joined += part;
+        }
+        return joined;
+    }
+
+    if (value.is_array()) {
+        std::wstring joined;
+        for (const auto& item : value) {
+            std::wstring part = JsonValueToAlertCellText(item);
+            if (part.empty())
+                continue;
+            if (!joined.empty())
+                joined += L" ";
+            joined += part;
+        }
+        return joined;
+    }
+
+    return JsonValueToText(value);
+}
 
 static bool BuildHtmlAlertFromCells(const std::vector<std::wstring>& cells, size_t& idCounter, TrafficAlert& alertOut)
 {
@@ -482,37 +578,68 @@ TrafficAlert ParseAlertObject(const json& obj)
     TrafficAlert a;
 
     const json* props = &obj;
-    if (obj.contains("properties") && obj["properties"].is_object())
-        props = &obj["properties"];
+    auto propertiesIt = obj.find("properties");
+    if (propertiesIt == obj.end())
+        propertiesIt = obj.find("Properties");
+    if (propertiesIt != obj.end() && propertiesIt->is_object())
+        props = &(*propertiesIt);
 
     a.id = PickString(*props, { "id", "incidentId", "alertId", "uuid", "eventId", "eventID", "event_id" });
     if (a.id.empty())
         a.id = PickString(obj, { "id", "incidentId", "alertId", "uuid", "eventId", "eventID", "event_id" });
 
-    std::wstring reason = PickString(*props, { "reason", "eventReason" });
+    std::wstring reason = PickString(*props, {
+        "reason", "eventReason", "event reason", "reasonDescription", "reason description",
+        "cause", "eventSubType", "event sub type", "incidentType", "incident type"
+        });
     if (reason.empty())
-        reason = PickString(obj, { "reason", "eventReason" });
+        reason = PickString(obj, {
+            "reason", "eventReason", "event reason", "reasonDescription", "reason description",
+            "cause", "eventSubType", "event sub type", "incidentType", "incident type"
+            });
+    reason = NormalizeAlertDescription(reason);
 
-    a.title = PickString(*props, { "title", "headline", "summary", "name", "eventType", "type", "event_type" });
+    a.title = PickString(*props, {
+        "title", "headline", "summary", "name", "eventType", "event_type",
+        "event type", "alertType", "alert type", "type"
+        });
     if (a.title.empty())
-        a.title = PickString(obj, { "title", "headline", "summary", "name", "eventType", "type", "event_type" });
+        a.title = PickString(obj, {
+            "title", "headline", "summary", "name", "eventType", "event_type",
+            "event type", "alertType", "alert type", "type"
+            });
+    a.title = NormalizeAlertDescription(a.title);
     if (!reason.empty() && IsGenericAlertTitle(a.title))
         a.title = reason;
 
-    a.description = PickString(*props, { "description", "details", "message", "fullText", "eventDescription", "event_description", "comment" });
+    a.description = PickString(*props, {
+        "description", "details", "detail", "message", "fullText", "full text",
+        "eventDescription", "event_description", "event description", "comment", "comments",
+        "disseminationText", "dissemination text", "publicDescription", "public description"
+        });
     if (a.description.empty())
-        a.description = PickString(obj, { "description", "details", "message", "fullText", "eventDescription", "event_description", "comment" });
+        a.description = PickString(obj, {
+            "description", "details", "detail", "message", "fullText", "full text",
+            "eventDescription", "event_description", "event description", "comment", "comments",
+            "disseminationText", "dissemination text", "publicDescription", "public description"
+            });
     a.description = NormalizeAlertDescription(a.description);
+    if (a.description.empty())
+        a.description = BuildTrafficEnglandDescriptionFromFields(*props, obj);
     if (a.description.empty() && !reason.empty())
         a.description = reason;
+    if (reason.empty())
+        reason = ExtractLabeledAlertField(a.description, L"Reason");
+    if (!reason.empty() && IsGenericAlertTitle(a.title))
+        a.title = reason;
 
     a.road = PickString(*props, { "road", "roadName", "route", "roadNumber", "road_number" });
     if (a.road.empty())
         a.road = PickString(obj, { "road", "roadName", "route", "roadNumber", "road_number" });
 
-    a.region = PickString(*props, { "region", "area", "county", "district", "location" });
+    a.region = PickString(*props, { "region", "area", "county", "district", "location", "eventLocation", "event location" });
     if (a.region.empty())
-        a.region = PickString(obj, { "region", "area", "county", "district", "location" });
+        a.region = PickString(obj, { "region", "area", "county", "district", "location", "eventLocation", "event location" });
 
     a.severity = PickString(*props, { "severity", "impact", "level", "priority", "severityId", "severity_id" });
     if (a.severity.empty())
@@ -579,6 +706,19 @@ TrafficAlert ParseAlertObject(const json& obj)
 }
 
 
+static std::string NormalizeJsonKeyName(std::string key)
+{
+    std::string out;
+    out.reserve(key.size());
+
+    for (unsigned char ch : key) {
+        if (std::isalnum(ch))
+            out.push_back(static_cast<char>(std::tolower(ch)));
+    }
+
+    return out;
+}
+
 static json::const_iterator FindJsonKeyInsensitive(const json& obj, const char* key)
 {
     if (!obj.is_object())
@@ -588,17 +728,10 @@ static json::const_iterator FindJsonKeyInsensitive(const json& obj, const char* 
     if (it != obj.end())
         return it;
 
-    std::string wanted = key;
-    std::transform(wanted.begin(), wanted.end(), wanted.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-        });
+    std::string wanted = NormalizeJsonKeyName(key);
 
     for (auto candidate = obj.begin(); candidate != obj.end(); ++candidate) {
-        std::string actual = candidate.key();
-        std::transform(actual.begin(), actual.end(), actual.begin(), [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-            });
-        if (actual == wanted)
+        if (NormalizeJsonKeyName(candidate.key()) == wanted)
             return candidate;
     }
 
@@ -646,7 +779,7 @@ std::vector<TrafficAlert> ParseTrafficAlerts(const std::string& text, std::wstri
                 if (item.is_array()) {
                     std::vector<std::wstring> cells;
                     for (const auto& cell : item) {
-                        std::wstring value = NormalizeAlertDescription(JsonValueToText(cell));
+                        std::wstring value = NormalizeAlertDescription(JsonValueToAlertCellText(cell));
                         if (!value.empty())
                             cells.push_back(value);
                     }

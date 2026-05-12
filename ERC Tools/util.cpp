@@ -186,24 +186,29 @@ bool TryGetDoubleFromJsonValue(const json& v, double& out)
     return false;
 }
 
+static std::string NormalizeJsonKeyName(std::string key)
+{
+    std::string out;
+    out.reserve(key.size());
+
+    for (unsigned char ch : key) {
+        if (std::isalnum(ch))
+            out.push_back(static_cast<char>(std::tolower(ch)));
+    }
+
+    return out;
+}
+
 static json::const_iterator FindJsonKey(const json& obj, const char* key)
 {
     auto it = obj.find(key);
     if (it != obj.end())
         return it;
 
-    std::string wanted = key;
-    std::transform(wanted.begin(), wanted.end(), wanted.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-        });
+    std::string wanted = NormalizeJsonKeyName(key);
 
     for (auto candidate = obj.begin(); candidate != obj.end(); ++candidate) {
-        std::string actual = candidate.key();
-        std::transform(actual.begin(), actual.end(), actual.begin(), [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-            });
-
-        if (actual == wanted)
+        if (NormalizeJsonKeyName(candidate.key()) == wanted)
             return candidate;
     }
 
