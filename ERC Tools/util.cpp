@@ -76,6 +76,11 @@ std::filesystem::path GetLaneImageCachePath(const std::wstring& imageUrl)
     return folder / (L"lane_" + hash + extension);
 }
 
+std::filesystem::path GetSettingsPath()
+{
+    return GetTrafficEnglandCacheFolder() / L"settings.json";
+}
+
 bool SaveBinaryToFile(const std::filesystem::path& path, const std::vector<BYTE>& bytes)
 {
     std::ofstream out(path, std::ios::binary);

@@ -26,6 +26,7 @@ struct TrafficAlert
     std::wstring road;
     std::wstring region;
     std::wstring severity;
+    std::wstring eventType;
     std::wstring updatedText;
     std::vector<std::wstring> laneImageUrls;
     std::vector<bool> laneClosedStates;

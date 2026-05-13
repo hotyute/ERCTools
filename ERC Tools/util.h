@@ -29,6 +29,7 @@ void OpenConsole();
 void ConsoleLog(const std::wstring& text);
 std::filesystem::path GetBoundaryCachePath();
 std::filesystem::path GetLaneImageCachePath(const std::wstring& imageUrl);
+std::filesystem::path GetSettingsPath();
 bool SaveBinaryToFile(const std::filesystem::path& path, const std::vector<BYTE>& bytes);
 std::wstring Trim(const std::wstring& s);
 std::wstring ToLower(std::wstring s);

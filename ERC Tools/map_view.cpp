@@ -1101,10 +1101,10 @@ private:
 
         const float icon = 34.0f;
         const float gap = 4.0f;
-        const float textH = 22.0f;
+        const float textH = 42.0f;
         const float panelPad = 8.0f;
         const float iconsW = total * icon + (total - 1) * gap;
-        const float panelW = MaxValue(210.0f, iconsW + panelPad * 2.0f);
+        const float panelW = MaxValue(230.0f, iconsW + panelPad * 2.0f);
         const float panelH = textH + icon + panelPad * 2.0f + 4.0f;
 
         float left = marker.x + 18.0f;
@@ -1122,10 +1122,16 @@ private:
         m_rt->FillRoundedRectangle(panel, m_panelBrush.Get());
         m_rt->DrawRoundedRectangle(panel, m_borderBrush.Get(), 1.0f);
 
-        std::wstring title = L"Lanes closed: " + std::to_wstring(closed) + L" of " + std::to_wstring(total);
-        D2D1_RECT_F textRect = D2D1::RectF(left + panelPad, top + panelPad - 1.0f, left + panelW - panelPad, top + panelPad + textH);
-        if (m_noteTextFormat)
-            m_rt->DrawTextW(title.c_str(), static_cast<UINT32>(title.size()), m_noteTextFormat.Get(), textRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        std::wstring roadTitle = alert->road.empty() ? alert->region : alert->road;
+        if (roadTitle.empty())
+            roadTitle = L"Traffic alert";
+        std::wstring laneTitle = L"Lanes closed: " + std::to_wstring(closed) + L" of " + std::to_wstring(total);
+        if (m_noteTextFormat) {
+            D2D1_RECT_F roadRect = D2D1::RectF(left + panelPad, top + panelPad - 1.0f, left + panelW - panelPad, top + panelPad + 20.0f);
+            D2D1_RECT_F laneRect = D2D1::RectF(left + panelPad, top + panelPad + 19.0f, left + panelW - panelPad, top + panelPad + textH);
+            m_rt->DrawTextW(roadTitle.c_str(), static_cast<UINT32>(roadTitle.size()), m_noteTextFormat.Get(), roadRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            m_rt->DrawTextW(laneTitle.c_str(), static_cast<UINT32>(laneTitle.size()), m_noteTextFormat.Get(), laneRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
 
         float x = left + panelPad;
         const float y = top + panelPad + textH + 4.0f;

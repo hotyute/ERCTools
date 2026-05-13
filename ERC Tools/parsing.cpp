@@ -961,9 +961,20 @@ TrafficAlert ParseAlertObject(const json& obj)
     if (a.severity.empty())
         a.severity = PickString(obj, { "severity", "impact", "level", "priority", "severityId", "severity_id" });
 
-    a.updatedText = PickDateText(*props, { "updated", "lastUpdated", "lastUpdatedTime", "timestamp", "created", "published", "last_update" });
+    a.eventType = PickString(*props, {
+        "teEventType", "trafficEnglandEventType", "traffic england event type",
+        "eventType", "event_type", "event type", "alertType", "alert type", "type"
+        });
+    if (a.eventType.empty())
+        a.eventType = PickString(obj, {
+            "teEventType", "trafficEnglandEventType", "traffic england event type",
+            "eventType", "event_type", "event type", "alertType", "alert type", "type"
+            });
+    a.eventType = NormalizeAlertDescription(a.eventType);
+
+    a.updatedText = PickDateText(*props, { "updated", "lastUpdated", "lastUpdatedTime", "lastUpdatedTimestamp", "timestamp", "created", "published", "last_update" });
     if (a.updatedText.empty())
-        a.updatedText = PickDateText(obj, { "updated", "lastUpdated", "lastUpdatedTime", "timestamp", "created", "published", "last_update" });
+        a.updatedText = PickDateText(obj, { "updated", "lastUpdated", "lastUpdatedTime", "lastUpdatedTimestamp", "timestamp", "created", "published", "last_update" });
 
     double lat = 0.0;
     double lon = 0.0;
@@ -1215,6 +1226,7 @@ std::vector<TrafficAlert> SampleAlerts()
     a2.road = L"M25";
     a2.region = L"Greater London";
     a2.severity = L"Severe";
+    a2.eventType = L"INCIDENT";
     a2.updatedText = TimeTToText(now - 420);
     a2.lanesClosed = 2;
     a2.lanesTotal = 4;

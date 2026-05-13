@@ -12,6 +12,7 @@
 #include <commctrl.h>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <shellapi.h>
 #include <wrl/client.h>
 #include <winhttp.h>
 #include <wincodec.h>
@@ -39,6 +40,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <ctime>

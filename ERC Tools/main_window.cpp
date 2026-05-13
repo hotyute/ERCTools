@@ -29,6 +29,7 @@ constexpr int IDC_NOTE_EDIT = 1018;
 constexpr int IDC_NOTE_BTN = 1019;
 constexpr int IDC_NOTE_LABEL = 1020;
 constexpr int IDC_PANEL_TAB_BTN = 1021;
+constexpr int IDC_INAPP_NOTIFICATION = 1022;
 constexpr int IDM_FILE_SETTINGS = 2001;
 constexpr int IDM_FILE_EXIT = 2002;
 constexpr int IDM_ABOUT = 2003;
@@ -70,6 +71,11 @@ constexpr int IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN = 2309;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
 constexpr const wchar_t* kIncidentNotificationsClassName = L"TrafficEnglandIncidentNotificationsWindow";
+constexpr UINT WM_APP_NOTIFY_ICON = WM_APP + 20;
+constexpr UINT kNotificationIconId = 1;
+constexpr UINT_PTR kAlertRefreshTimerId = 1;
+constexpr UINT_PTR kServerPollTimerId = 2;
+constexpr UINT_PTR kInAppNotificationTimerId = 3;
 
 struct FeedResult
 {
@@ -243,6 +249,91 @@ static bool TryParseRefreshIntervalMilliseconds(const std::wstring& text, UINT& 
 
     millisecondsOut = static_cast<UINT>(milliseconds);
     return true;
+}
+
+static std::vector<std::wstring> SplitCommaSeparatedTokens(const std::wstring& text)
+{
+    std::vector<std::wstring> tokens;
+    std::wstring token;
+    bool quoted = false;
+
+    for (wchar_t ch : text) {
+        if (ch == L'"') {
+            quoted = !quoted;
+            continue;
+        }
+
+        if (ch == L',' && !quoted) {
+            std::wstring trimmed = Trim(token);
+            if (!trimmed.empty())
+                tokens.push_back(std::move(trimmed));
+            token.clear();
+            continue;
+        }
+
+        token.push_back(ch);
+    }
+
+    std::wstring trimmed = Trim(token);
+    if (!trimmed.empty())
+        tokens.push_back(std::move(trimmed));
+    return tokens;
+}
+
+static bool StartsWithNoCase(const std::wstring& text, const std::wstring& prefix)
+{
+    std::wstring lowerText = ToLower(Trim(text));
+    std::wstring lowerPrefix = ToLower(Trim(prefix));
+    return !lowerPrefix.empty() && lowerText.rfind(lowerPrefix, 0) == 0;
+}
+
+static bool IsMotorwayRoadName(const std::wstring& road)
+{
+    std::wstring value = ToLower(Trim(road));
+    if (value.empty())
+        return false;
+
+    if (value.size() >= 2 && value[0] == L'm' && iswdigit(value[1]))
+        return true;
+
+    return value.find(L"(m)") != std::wstring::npos;
+}
+
+static bool RoadTokenMatches(const std::wstring& road, const std::wstring& token)
+{
+    std::wstring normalized = ToLower(Trim(token));
+    if (normalized.empty())
+        return false;
+
+    if (normalized == L"*" || normalized == L"all")
+        return true;
+
+    if (normalized == L"motorway" || normalized == L"motorways" ||
+        normalized == L"m*" || normalized == L"m%")
+    {
+        return IsMotorwayRoadName(road);
+    }
+
+    if (normalized.back() == L'*' || normalized.back() == L'%') {
+        normalized.pop_back();
+        return StartsWithNoCase(road, normalized);
+    }
+
+    return ToLower(Trim(road)) == normalized;
+}
+
+static std::wstring ExtractLabeledNotificationField(const std::wstring& description, const wchar_t* label)
+{
+    std::wstring pattern = LR"((?:^|[\r\n])\s*)";
+    pattern += label;
+    pattern += LR"(\s*:\s*([^\r\n]+))";
+
+    std::wsmatch m;
+    std::wregex lineRe(pattern, std::regex_constants::icase);
+    if (std::regex_search(description, m, lineRe) && m.size() > 1)
+        return Trim(m[1].str());
+
+    return L"";
 }
 
 static std::vector<ChatMessage> ParseChatMessages(const json& root)
@@ -546,10 +637,18 @@ private:
             return 0;
 
         case WM_TIMER:
-            if (wParam == 1)
+            if (wParam == kAlertRefreshTimerId)
                 RefreshFeedAsync();
-            else if (wParam == 2)
+            else if (wParam == kServerPollTimerId)
                 PollServerAsync();
+            else if (wParam == kInAppNotificationTimerId) {
+                KillTimer(m_hwnd, kInAppNotificationTimerId);
+                if (m_inAppNotification)
+                    ShowWindow(m_inAppNotification, SW_HIDE);
+            }
+            return 0;
+
+        case WM_APP_NOTIFY_ICON:
             return 0;
 
         case WM_APP_FEED_READY:
@@ -566,8 +665,11 @@ private:
 
         case WM_DESTROY:
             g_appQuitting.store(true);
-            KillTimer(m_hwnd, 1);
-            KillTimer(m_hwnd, 2);
+            SaveSettings();
+            RemoveNotificationIcon();
+            KillTimer(m_hwnd, kAlertRefreshTimerId);
+            KillTimer(m_hwnd, kServerPollTimerId);
+            KillTimer(m_hwnd, kInAppNotificationTimerId);
             if (m_font) {
                 DeleteObject(m_font);
                 m_font = nullptr;
@@ -595,6 +697,7 @@ private:
         m_font = CreateUiFont(10);
         m_headerFont = CreateUiFont(16, FW_SEMIBOLD);
 
+        LoadSettings();
         CreateMainMenu();
 
         m_headerLabel = CreateAutoLabel(m_hwnd, IDC_HEADER_LABEL, L"Traffic England Alerts", 0, 0, m_headerFont);
@@ -700,17 +803,29 @@ private:
             m_hInst,
             nullptr);
 
+        m_inAppNotification = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"STATIC",
+            L"",
+            WS_CHILD | SS_LEFT | SS_NOPREFIX,
+            0, 0, 0, 0,
+            m_hwnd,
+            reinterpret_cast<HMENU>(IDC_INAPP_NOTIFICATION),
+            m_hInst,
+            nullptr);
+
         if (!m_headerLabel || !m_searchLabel || !m_severityLabel ||
-            !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar)
+            !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar || !m_inAppNotification)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
+        for (HWND h : { m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar, m_inAppNotification }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
+        ShowWindow(m_inAppNotification, SW_HIDE);
 
         SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, region, or description"));
         SendMessageW(m_chatEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Message local responders..."));
@@ -769,7 +884,7 @@ private:
         Layout();
         SetStatusText(L"Ready.");
         ApplyRefreshTimer();
-        SetTimer(m_hwnd, 2, 8 * 1000, nullptr);
+        SetTimer(m_hwnd, kServerPollTimerId, 8 * 1000, nullptr);
 
         RefreshFeedAsync();
         PollServerAsync();
@@ -838,12 +953,23 @@ private:
         int mapX = (m_isSidePanelVisible ? leftW + pad : pad);
         int mapY = bodyTop + pad;
         LONG mapW = MaxLong(100L, width - mapX - pad);
-        LONG mapH = MaxLong(100L, height - mapY - statusH - pad - 66);
-
-        MoveWindow(m_map.Hwnd(), mapX, mapY, mapW, mapH, TRUE);
-        int noteY = mapY + mapH + 8;
         const int noteLabelW = AutoLabelWidth(m_noteLabel, static_cast<int>(mapW));
         const int noteLabelH = AutoLabelHeight(m_noteLabel, labelH, noteLabelW);
+        const int noteAreaH = noteLabelH + 2 + controlH + 8;
+        LONG mapH = MaxLong(100L, height - mapY - statusH - pad - noteAreaH);
+
+        MoveWindow(m_map.Hwnd(), mapX, mapY, mapW, mapH, TRUE);
+        if (m_inAppNotification) {
+            const int notificationMargin = 12;
+            MoveWindow(
+                m_inAppNotification,
+                mapX + notificationMargin,
+                mapY + notificationMargin,
+                MaxLong(80L, mapW - notificationMargin * 2),
+                44,
+                TRUE);
+        }
+        int noteY = mapY + mapH + 8;
         MoveLabelToText(m_noteLabel, mapX, noteY, static_cast<int>(mapW));
         MoveWindow(m_noteEdit, mapX, noteY + noteLabelH + 2, MaxLong(180L, mapW - 132), controlH, TRUE);
         MoveWindow(m_noteBtn, mapX + mapW - 122, noteY + noteLabelH + 2, 122, controlH, TRUE);
@@ -956,11 +1082,136 @@ private:
             SendMessageW(m_statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
     }
 
+    void LoadSettings()
+    {
+        std::ifstream in(GetSettingsPath(), std::ios::binary);
+        if (!in)
+            return;
+
+        try {
+            json root = json::parse(in);
+            if (!root.is_object())
+                return;
+
+            const json* settings = &root;
+            auto settingsIt = root.find("settings");
+            if (settingsIt != root.end() && settingsIt->is_object())
+                settings = &(*settingsIt);
+
+            auto readString = [&](const char* key, std::wstring& target) {
+                auto it = settings->find(key);
+                if (it != settings->end() && it->is_string())
+                    target = Utf8ToWide(it->get<std::string>());
+                };
+            auto readBool = [&](const char* key, bool& target) {
+                auto it = settings->find(key);
+                if (it == settings->end())
+                    return;
+                if (it->is_boolean())
+                    target = it->get<bool>();
+                else if (it->is_number_integer())
+                    target = it->get<int>() != 0;
+                };
+            auto readDouble = [&](const char* key, double& target) {
+                auto it = settings->find(key);
+                if (it != settings->end() && it->is_number())
+                    target = it->get<double>();
+                };
+            auto readUInt = [&](const char* key, UINT& target) {
+                auto it = settings->find(key);
+                if (it != settings->end() && it->is_number_unsigned())
+                    target = static_cast<UINT>(it->get<unsigned int>());
+                else if (it != settings->end() && it->is_number_integer() && it->get<int>() >= 0)
+                    target = static_cast<UINT>(it->get<int>());
+                };
+
+            readString("alertsEndpoint", m_alertsEndpoint);
+            m_alertsEndpoint = NormalizeUrl(m_alertsEndpoint);
+            readString("serverBaseUrl", m_serverBaseUrl);
+            m_serverBaseUrl = NormalizeUrl(m_serverBaseUrl);
+            readString("alertOrder", m_alertOrder);
+            readBool("alertFilterUnplannedOnly", m_alertFilterUnplannedOnly);
+            readBool("periodicRefreshEnabled", m_periodicRefreshEnabled);
+            readString("refreshIntervalText", m_refreshIntervalText);
+            readUInt("refreshIntervalMs", m_refreshIntervalMs);
+            UINT parsedRefreshMs = 0;
+            if (TryParseRefreshIntervalMilliseconds(m_refreshIntervalText, parsedRefreshMs))
+                m_refreshIntervalMs = parsedRefreshMs;
+
+            readBool("incidentFilterSevere", m_incidentFilterSevere);
+            readBool("incidentFilterModerate", m_incidentFilterModerate);
+            readBool("incidentFilterMinor", m_incidentFilterMinor);
+            readBool("incidentFilterUnknown", m_incidentFilterUnknown);
+            readBool("incidentFilterUnplanned", m_incidentFilterUnplanned);
+            readBool("incidentFilterPlanned", m_incidentFilterPlanned);
+            readString("incidentNotifyRoads", m_incidentNotifyRoads);
+            readString("incidentNotifyLaneThresholdText", m_incidentNotifyLaneThresholdText);
+            readDouble("incidentNotifyLaneThreshold", m_incidentNotifyLaneThreshold);
+            double parsedThreshold = 0.0;
+            if (TryParsePercentThreshold(m_incidentNotifyLaneThresholdText, parsedThreshold))
+                m_incidentNotifyLaneThreshold = parsedThreshold;
+            readString("incidentNotifyReasonExclusions", m_incidentNotifyReasonExclusions);
+        }
+        catch (...) {
+            OutputDebugStringW(L"Settings file could not be parsed; using defaults.\n");
+        }
+    }
+
+    void SaveSettings() const
+    {
+        try {
+            json root = json::object();
+            {
+                std::ifstream in(GetSettingsPath(), std::ios::binary);
+                if (in) {
+                    try {
+                        root = json::parse(in);
+                        if (!root.is_object())
+                            root = json::object();
+                    }
+                    catch (...) {
+                        root = json::object();
+                    }
+                }
+            }
+
+            root["version"] = 1;
+            json& settings = root["settings"];
+            if (!settings.is_object())
+                settings = json::object();
+
+            settings["alertsEndpoint"] = WideToUtf8(m_alertsEndpoint);
+            settings["serverBaseUrl"] = WideToUtf8(m_serverBaseUrl);
+            settings["alertOrder"] = WideToUtf8(m_alertOrder);
+            settings["alertFilterUnplannedOnly"] = m_alertFilterUnplannedOnly;
+            settings["periodicRefreshEnabled"] = m_periodicRefreshEnabled;
+            settings["refreshIntervalText"] = WideToUtf8(m_refreshIntervalText);
+            settings["refreshIntervalMs"] = m_refreshIntervalMs;
+            settings["incidentFilterSevere"] = m_incidentFilterSevere;
+            settings["incidentFilterModerate"] = m_incidentFilterModerate;
+            settings["incidentFilterMinor"] = m_incidentFilterMinor;
+            settings["incidentFilterUnknown"] = m_incidentFilterUnknown;
+            settings["incidentFilterUnplanned"] = m_incidentFilterUnplanned;
+            settings["incidentFilterPlanned"] = m_incidentFilterPlanned;
+            settings["incidentNotifyRoads"] = WideToUtf8(m_incidentNotifyRoads);
+            settings["incidentNotifyLaneThresholdText"] = WideToUtf8(m_incidentNotifyLaneThresholdText);
+            settings["incidentNotifyLaneThreshold"] = m_incidentNotifyLaneThreshold;
+            settings["incidentNotifyReasonExclusions"] = WideToUtf8(m_incidentNotifyReasonExclusions);
+
+            std::ofstream out(GetSettingsPath(), std::ios::binary | std::ios::trunc);
+            if (out)
+                out << root.dump();
+        }
+        catch (...) {
+            OutputDebugStringW(L"Settings file could not be saved.\n");
+        }
+    }
+
     void ApplyRefreshTimer()
     {
-        KillTimer(m_hwnd, 1);
+        KillTimer(m_hwnd, kAlertRefreshTimerId);
         if (m_periodicRefreshEnabled)
-            SetTimer(m_hwnd, 1, m_refreshIntervalMs, nullptr);
+            SetTimer(m_hwnd, kAlertRefreshTimerId, m_refreshIntervalMs, nullptr);
     }
 
     void RefreshFeedAsync()
@@ -1042,6 +1293,7 @@ private:
         if (!result)
             return;
 
+        const bool feedOk = result->ok;
         m_allAlerts = result->alerts;
         DownloadMissingLaneImagesAsync(m_allAlerts);
         SortAlertsForCurrentOrder();
@@ -1055,6 +1307,230 @@ private:
         else {
             SetStatusText(L"Loaded " + std::to_wstring(visible) + L" alert(s).");
         }
+
+        if (feedOk)
+            NotifyForMatchingIncidents(m_allAlerts);
+    }
+
+    bool SeverityAllowedForIncidentNotification(const TrafficAlert& alert) const
+    {
+        std::wstring bucket = SeverityBucket(alert.severity);
+        if (bucket == L"severe") return m_incidentFilterSevere;
+        if (bucket == L"moderate") return m_incidentFilterModerate;
+        if (bucket == L"minor") return m_incidentFilterMinor;
+        return m_incidentFilterUnknown;
+    }
+
+    bool IsPlannedIncident(const TrafficAlert& alert) const
+    {
+        std::wstring text = ToLower(alert.eventType + L" " + alert.title + L" " + alert.description);
+        return text.find(L"roadworks") != std::wstring::npos ||
+            text.find(L"road works") != std::wstring::npos ||
+            text.find(L"planned") != std::wstring::npos;
+    }
+
+    bool IncidentTypeAllowedForNotification(const TrafficAlert& alert) const
+    {
+        return IsPlannedIncident(alert) ? m_incidentFilterPlanned : m_incidentFilterUnplanned;
+    }
+
+    std::wstring AlertReasonForNotification(const TrafficAlert& alert) const
+    {
+        std::wstring reason = ExtractLabeledNotificationField(alert.description, L"Reason");
+        if (!reason.empty())
+            return reason;
+        return alert.title;
+    }
+
+    bool RoadMatchesIncidentNotification(const TrafficAlert& alert) const
+    {
+        std::vector<std::wstring> roads = SplitCommaSeparatedTokens(m_incidentNotifyRoads);
+        if (roads.empty())
+            return true;
+
+        std::wstring road = alert.road.empty() ? alert.region : alert.road;
+        for (const std::wstring& token : roads) {
+            if (RoadTokenMatches(road, token))
+                return true;
+        }
+        return false;
+    }
+
+    bool ReasonExcludedFromNotification(const TrafficAlert& alert) const
+    {
+        std::wstring reason = ToLower(AlertReasonForNotification(alert));
+        if (reason.empty())
+            return false;
+
+        for (const std::wstring& exclusion : SplitCommaSeparatedTokens(m_incidentNotifyReasonExclusions)) {
+            std::wstring value = ToLower(Trim(exclusion));
+            if (!value.empty() && reason.find(value) != std::wstring::npos)
+                return true;
+        }
+
+        return false;
+    }
+
+    double ClosedLanePercentage(const TrafficAlert& alert) const
+    {
+        if (alert.lanesClosed <= 0 || alert.lanesTotal <= 0)
+            return 0.0;
+        return (static_cast<double>(alert.lanesClosed) * 100.0) / static_cast<double>(alert.lanesTotal);
+    }
+
+    bool LaneThresholdMatchesIncidentNotification(const TrafficAlert& alert) const
+    {
+        if (m_incidentNotifyLaneThreshold <= 0.0)
+            return true;
+        if (alert.lanesClosed <= 0 || alert.lanesTotal <= 0)
+            return false;
+        return ClosedLanePercentage(alert) + 0.0001 >= m_incidentNotifyLaneThreshold;
+    }
+
+    bool AlertMatchesIncidentNotification(const TrafficAlert& alert) const
+    {
+        return RoadMatchesIncidentNotification(alert) &&
+            SeverityAllowedForIncidentNotification(alert) &&
+            IncidentTypeAllowedForNotification(alert) &&
+            LaneThresholdMatchesIncidentNotification(alert) &&
+            !ReasonExcludedFromNotification(alert);
+    }
+
+    std::wstring IncidentNotificationKey(const TrafficAlert& alert) const
+    {
+        std::wstring key = alert.id.empty() ? BuildAlertSummary(alert) : alert.id;
+        key += L"|";
+        key += alert.updatedText;
+        key += L"|";
+        key += std::to_wstring(alert.lanesClosed);
+        key += L"/";
+        key += std::to_wstring(alert.lanesTotal);
+        return key;
+    }
+
+    std::wstring IncidentNotificationLine(const TrafficAlert& alert) const
+    {
+        std::wstring road = alert.road.empty() ? L"Unknown road" : alert.road;
+        std::wstring reason = AlertReasonForNotification(alert);
+        std::wstring line = road;
+        if (!reason.empty()) {
+            line += L" - ";
+            line += reason;
+        }
+        if (alert.lanesTotal > 0) {
+            line += L" (";
+            line += std::to_wstring(alert.lanesClosed);
+            line += L" of ";
+            line += std::to_wstring(alert.lanesTotal);
+            line += L" lanes closed)";
+        }
+        return line;
+    }
+
+    void NotifyForMatchingIncidents(const std::vector<TrafficAlert>& alerts)
+    {
+        std::vector<const TrafficAlert*> matches;
+        for (const TrafficAlert& alert : alerts) {
+            if (!AlertMatchesIncidentNotification(alert))
+                continue;
+
+            std::wstring key = IncidentNotificationKey(alert);
+            if (m_notifiedIncidentKeys.insert(key).second)
+                matches.push_back(&alert);
+        }
+
+        if (matches.empty())
+            return;
+
+        std::wstring title;
+        std::wstring body;
+        if (matches.size() == 1) {
+            const TrafficAlert& alert = *matches.front();
+            title = alert.road.empty() ? L"Incident notification" : alert.road + L" incident notification";
+            body = IncidentNotificationLine(alert);
+        }
+        else {
+            title = std::to_wstring(matches.size()) + L" matching incident notifications";
+            const size_t displayCount = MinValue<size_t>(matches.size(), 3);
+            for (size_t i = 0; i < displayCount; ++i) {
+                if (!body.empty())
+                    body += L"\r\n";
+                body += IncidentNotificationLine(*matches[i]);
+            }
+            if (matches.size() > displayCount)
+                body += L"\r\n...";
+        }
+
+        ShowWindowsIncidentNotification(title, body);
+        ShowInAppIncidentNotification(title, body);
+    }
+
+    void EnsureNotificationIcon()
+    {
+        if (m_notificationIconAdded || !m_hwnd)
+            return;
+
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_hwnd;
+        nid.uID = kNotificationIconId;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.uCallbackMessage = WM_APP_NOTIFY_ICON;
+        nid.hIcon = LoadIconW(nullptr, IDI_INFORMATION);
+        wcsncpy_s(nid.szTip, L"Traffic England Alerts Map", _TRUNCATE);
+
+        if (Shell_NotifyIconW(NIM_ADD, &nid)) {
+            nid.uVersion = NOTIFYICON_VERSION_4;
+            Shell_NotifyIconW(NIM_SETVERSION, &nid);
+            m_notificationIconAdded = true;
+        }
+    }
+
+    void RemoveNotificationIcon()
+    {
+        if (!m_notificationIconAdded)
+            return;
+
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_hwnd;
+        nid.uID = kNotificationIconId;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        m_notificationIconAdded = false;
+    }
+
+    void ShowWindowsIncidentNotification(const std::wstring& title, const std::wstring& body)
+    {
+        EnsureNotificationIcon();
+        if (!m_notificationIconAdded)
+            return;
+
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_hwnd;
+        nid.uID = kNotificationIconId;
+        nid.uFlags = NIF_INFO;
+        nid.dwInfoFlags = NIIF_WARNING;
+        wcsncpy_s(nid.szInfoTitle, title.c_str(), _TRUNCATE);
+        wcsncpy_s(nid.szInfo, body.c_str(), _TRUNCATE);
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+
+    void ShowInAppIncidentNotification(const std::wstring& title, const std::wstring& body)
+    {
+        if (!m_inAppNotification)
+            return;
+
+        std::wstring text = title;
+        if (!body.empty()) {
+            text += L"\r\n";
+            text += body;
+        }
+        SetWindowTextSafe(m_inAppNotification, text);
+        ShowWindow(m_inAppNotification, SW_SHOW);
+        SetWindowPos(m_inAppNotification, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        KillTimer(m_hwnd, kInAppNotificationTimerId);
+        SetTimer(m_hwnd, kInAppNotificationTimerId, 10 * 1000, nullptr);
     }
 
     void DownloadMissingLaneImagesAsync(const std::vector<TrafficAlert>& alerts)
@@ -1101,7 +1577,7 @@ private:
 
         std::wstring hay =
             ToLower(a.id + L" " + a.title + L" " + a.description + L" " +
-                a.road + L" " + a.region + L" " + a.severity);
+                a.road + L" " + a.region + L" " + a.severity + L" " + a.eventType);
 
         return hay.find(q) != std::wstring::npos;
     }
@@ -1625,6 +2101,7 @@ private:
 
     void SyncIncidentFilterControls()
     {
+        m_syncingControls = true;
         if (m_incidentSevereCheck)
             SendMessageW(m_incidentSevereCheck, BM_SETCHECK, m_incidentFilterSevere ? BST_CHECKED : BST_UNCHECKED, 0);
         if (m_incidentModerateCheck)
@@ -1637,10 +2114,14 @@ private:
             SendMessageW(m_incidentUnplannedCheck, BM_SETCHECK, m_incidentFilterUnplanned ? BST_CHECKED : BST_UNCHECKED, 0);
         if (m_incidentPlannedCheck)
             SendMessageW(m_incidentPlannedCheck, BM_SETCHECK, m_incidentFilterPlanned ? BST_CHECKED : BST_UNCHECKED, 0);
+        m_syncingControls = false;
     }
 
     void OnIncidentFiltersCommand(int id, int code)
     {
+        if (m_syncingControls)
+            return;
+
         if (code == BN_CLICKED) {
             if (id == IDC_INCIDENT_FILTERS_CLOSE_BTN) {
                 ShowWindow(m_incidentFiltersWnd, SW_HIDE);
@@ -1661,6 +2142,7 @@ private:
                 m_incidentFilterPlanned = SendMessageW(m_incidentPlannedCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
 
             SetStatusText(L"Incident filter selections updated.");
+            SaveSettings();
         }
     }
 
@@ -1767,7 +2249,7 @@ private:
             ApplyExplorerTheme(h);
         }
 
-        SendMessageW(m_incidentNotifyRoadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"A1(M), A2, A15, A16, A17, A20, A4, A52"));
+        SendMessageW(m_incidentNotifyRoadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M*, A1(M), A2, A15, A16, A17, A20, A4, A52"));
         SendMessageW(m_incidentNotifyLaneThresholdEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"50%"));
         SendMessageW(m_incidentNotifyReasonExclusionsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Road Management"));
         SyncIncidentNotificationControls();
@@ -1775,16 +2257,21 @@ private:
 
     void SyncIncidentNotificationControls()
     {
+        m_syncingControls = true;
         if (m_incidentNotifyRoadsEdit)
             SetWindowTextSafe(m_incidentNotifyRoadsEdit, m_incidentNotifyRoads);
         if (m_incidentNotifyLaneThresholdEdit)
             SetWindowTextSafe(m_incidentNotifyLaneThresholdEdit, m_incidentNotifyLaneThresholdText);
         if (m_incidentNotifyReasonExclusionsEdit)
             SetWindowTextSafe(m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyReasonExclusions);
+        m_syncingControls = false;
     }
 
     void OnIncidentNotificationsCommand(int id, int code)
     {
+        if (m_syncingControls)
+            return;
+
         if (id == IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN && code == BN_CLICKED) {
             ShowWindow(m_incidentNotificationsWnd, SW_HIDE);
             return;
@@ -1795,9 +2282,11 @@ private:
 
         if (id == IDC_INCIDENT_NOTIFICATIONS_ROADS_EDIT) {
             m_incidentNotifyRoads = GetWindowTextString(m_incidentNotifyRoadsEdit);
+            SaveSettings();
         }
         else if (id == IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT) {
             m_incidentNotifyReasonExclusions = GetWindowTextString(m_incidentNotifyReasonExclusionsEdit);
+            SaveSettings();
         }
         else if (id == IDC_INCIDENT_NOTIFICATIONS_LANES_EDIT) {
             std::wstring thresholdText = Trim(GetWindowTextString(m_incidentNotifyLaneThresholdEdit));
@@ -1805,6 +2294,7 @@ private:
             if (TryParsePercentThreshold(thresholdText, parsed)) {
                 m_incidentNotifyLaneThresholdText = thresholdText;
                 m_incidentNotifyLaneThreshold = parsed;
+                SaveSettings();
             }
             else if (code == EN_KILLFOCUS) {
                 SetWindowTextSafe(m_incidentNotifyLaneThresholdEdit, m_incidentNotifyLaneThresholdText);
@@ -1990,6 +2480,7 @@ private:
 
     void SyncSettingsControls()
     {
+        m_syncingControls = true;
         if (m_urlEdit)
             SetWindowTextSafe(m_urlEdit, m_alertsEndpoint);
         if (m_serverEdit)
@@ -2012,20 +2503,27 @@ private:
             else if (order == L"title") idx = 3;
             SendMessageW(m_settingsOrderCombo, CB_SETCURSEL, idx, 0);
         }
+        m_syncingControls = false;
     }
 
     void OnSettingsCommand(int id, int code)
     {
+        if (m_syncingControls)
+            return;
+
         if (id == IDC_URL_EDIT && code == EN_CHANGE) {
             m_alertsEndpoint = NormalizeUrl(GetWindowTextString(m_urlEdit));
+            SaveSettings();
         }
         else if (id == IDC_SERVER_EDIT && code == EN_CHANGE) {
             m_serverBaseUrl = NormalizeUrl(GetWindowTextString(m_serverEdit));
+            SaveSettings();
         }
         else if (id == IDC_SETTINGS_REFRESH_OFF_RADIO && code == BN_CLICKED) {
             m_periodicRefreshEnabled = false;
             ApplyRefreshTimer();
             SyncSettingsControls();
+            SaveSettings();
         }
         else if (id == IDC_SETTINGS_REFRESH_ON_RADIO && code == BN_CLICKED) {
             m_periodicRefreshEnabled = true;
@@ -2036,6 +2534,7 @@ private:
             }
             ApplyRefreshTimer();
             SyncSettingsControls();
+            SaveSettings();
         }
         else if (id == IDC_SETTINGS_REFRESH_INTERVAL_EDIT && (code == EN_CHANGE || code == EN_KILLFOCUS)) {
             UINT parsedMs = 0;
@@ -2045,6 +2544,7 @@ private:
                 m_refreshIntervalMs = parsedMs;
                 if (m_periodicRefreshEnabled)
                     ApplyRefreshTimer();
+                SaveSettings();
             }
             else if (code == EN_KILLFOCUS) {
                 SetWindowTextSafe(m_settingsRefreshIntervalEdit, m_refreshIntervalText);
@@ -2053,6 +2553,7 @@ private:
         }
         else if (id == IDC_SETTINGS_ALERT_FILTER && code == CBN_SELCHANGE) {
             m_alertFilterUnplannedOnly = SendMessageW(m_settingsFilterCombo, CB_GETCURSEL, 0, 0) == 0;
+            SaveSettings();
             RefreshFeedAsync();
         }
         else if (id == IDC_SETTINGS_ALERT_ORDER && code == CBN_SELCHANGE) {
@@ -2061,6 +2562,7 @@ private:
             m_alertOrder = orders[ClampValue(idx, 0, 3)];
             SortAlertsForCurrentOrder();
             ApplyFilters(true);
+            SaveSettings();
         }
         else if (id == IDC_SETTINGS_BOUNDARY_BTN && code == BN_CLICKED) {
             DownloadBoundaryFromGitHubAsync();
@@ -2112,6 +2614,7 @@ private:
     HWND m_chatSendBtn = nullptr;
     HWND m_noteEdit = nullptr;
     HWND m_noteBtn = nullptr;
+    HWND m_inAppNotification = nullptr;
 
     MapView m_map;
 
@@ -2121,6 +2624,7 @@ private:
     std::vector<MapNote> m_notes;
     std::wstring m_selectedId;
     bool m_programmaticSelection = false;
+    bool m_syncingControls = false;
     bool m_isSidePanelVisible = true;
     bool m_alertFilterUnplannedOnly = true;
     bool m_incidentFilterSevere = true;
@@ -2129,7 +2633,7 @@ private:
     bool m_incidentFilterUnknown = true;
     bool m_incidentFilterUnplanned = true;
     bool m_incidentFilterPlanned = true;
-    std::wstring m_incidentNotifyRoads = L"A1(M), A2, A15, A16, A17, A20, A4, A52";
+    std::wstring m_incidentNotifyRoads = L"M*, A1(M), A2, A15, A16, A17, A20, A4, A52";
     std::wstring m_incidentNotifyLaneThresholdText = L"50%";
     double m_incidentNotifyLaneThreshold = 50.0;
     std::wstring m_incidentNotifyReasonExclusions = L"Road Management";
@@ -2140,6 +2644,8 @@ private:
     std::wstring m_refreshIntervalText = L"300s";
     UINT m_refreshIntervalMs = 5 * 60 * 1000;
     std::atomic_bool m_serverRequestInProgress{ false };
+    bool m_notificationIconAdded = false;
+    std::unordered_set<std::wstring> m_notifiedIncidentKeys;
     bool m_hasPendingNoteLocation = false;
     double m_pendingNoteLat = 0.0;
     double m_pendingNoteLon = 0.0;
