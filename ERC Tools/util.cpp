@@ -395,6 +395,25 @@ std::wstring SeverityBucket(const std::wstring& severity)
     return L"unknown";
 }
 
+
+static std::wstring BuildLaneClosureDisplay(const TrafficAlert& a)
+{
+    if (a.lanesClosed <= 0 && a.lanesTotal <= 0 && a.laneImageUrls.empty())
+        return L"";
+
+    int total = a.lanesTotal > 0 ? a.lanesTotal : static_cast<int>(a.laneImageUrls.size());
+    int closed = a.lanesClosed;
+    if (total <= 0)
+        total = MaxValue(1, closed);
+    closed = ClampValue(closed, 0, total);
+
+    std::wstring text = L"Lanes Closed: ";
+    text += std::to_wstring(closed);
+    text += L" of ";
+    text += std::to_wstring(total);
+    return text;
+}
+
 std::wstring BuildAlertSummary(const TrafficAlert& a)
 {
     std::wstring s;
@@ -436,6 +455,12 @@ std::wstring BuildAlertDetails(const TrafficAlert& a)
     s += L"Updated: ";
     s += a.updatedText.empty() ? L"" : a.updatedText;
     s += L"\r\n";
+
+    std::wstring laneClosure = BuildLaneClosureDisplay(a);
+    if (!laneClosure.empty()) {
+        s += laneClosure;
+        s += L"\r\n";
+    }
 
     s += L"Coordinates: ";
     if (a.hasLocation) {

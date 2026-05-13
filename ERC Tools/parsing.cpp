@@ -167,6 +167,53 @@ static std::wstring MakeTrafficEnglandAbsoluteUrl(std::wstring url)
     return L"https://www.trafficengland.com" + url;
 }
 
+
+static std::wstring ExtractHtmlAttribute(const std::wstring& tag, const wchar_t* attributeName)
+{
+    std::wstring pattern = attributeName;
+    pattern += LR"(\s*=\s*(['\"])(.*?)\1)";
+    std::wregex attrRe(pattern, std::regex_constants::icase);
+    std::wsmatch m;
+    if (std::regex_search(tag, m, attrRe) && m.size() > 2)
+        return HtmlDecode(m[2].str());
+
+    pattern = attributeName;
+    pattern += LR"(\s*=\s*([^\s>]+))";
+    std::wregex unquotedAttrRe(pattern, std::regex_constants::icase);
+    if (std::regex_search(tag, m, unquotedAttrRe) && m.size() > 1)
+        return HtmlDecode(m[1].str());
+
+    return L"";
+}
+
+static bool ExtractLaneClosureCountsFromImages(const std::wstring& html, int& closedOut, int& totalOut)
+{
+    closedOut = 0;
+    totalOut = 0;
+    if (html.find(L'<') == std::wstring::npos)
+        return false;
+
+    std::wregex imgTagRe(LR"(<\s*img\b[^>]*>)", std::regex_constants::icase);
+    for (std::wsregex_iterator it(html.begin(), html.end(), imgTagRe), end; it != end; ++it) {
+        std::wstring tag = (*it)[0].str();
+        std::wstring alt = ToLower(ExtractHtmlAttribute(tag, L"alt"));
+        std::wstring src = ToLower(ExtractHtmlAttribute(tag, L"src"));
+        const bool looksLikeLaneImage =
+            alt.find(L"lane") != std::wstring::npos ||
+            src.find(L"normal-closed") != std::wstring::npos ||
+            src.find(L"normal-open") != std::wstring::npos ||
+            src.find(L"lane") != std::wstring::npos;
+        if (!looksLikeLaneImage)
+            continue;
+
+        ++totalOut;
+        if (alt.find(L"closed") != std::wstring::npos || src.find(L"closed") != std::wstring::npos)
+            ++closedOut;
+    }
+
+    return totalOut > 0;
+}
+
 static std::vector<std::wstring> ExtractImageUrls(const std::wstring& html)
 {
     std::vector<std::wstring> urls;
@@ -535,8 +582,15 @@ std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
         TrafficAlert a;
         if (BuildHtmlAlertFromCells(cells, idCounter, a)) {
             a.laneImageUrls = ExtractImageUrls(rowHtml);
-            if (a.lanesTotal == 0 && !a.laneImageUrls.empty())
+            int imageClosed = 0;
+            int imageTotal = 0;
+            if (ExtractLaneClosureCountsFromImages(rowHtml, imageClosed, imageTotal)) {
+                a.lanesClosed = imageClosed;
+                a.lanesTotal = imageTotal;
+            }
+            else if (a.lanesTotal == 0 && !a.laneImageUrls.empty()) {
                 a.lanesTotal = static_cast<int>(a.laneImageUrls.size());
+            }
             out.push_back(std::move(a));
         }
     }
@@ -553,8 +607,15 @@ std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
         TrafficAlert a;
         if (BuildHtmlAlertFromCells(cells, idCounter, a)) {
             a.laneImageUrls = ExtractImageUrls(html);
-            if (a.lanesTotal == 0 && !a.laneImageUrls.empty())
+            int imageClosed = 0;
+            int imageTotal = 0;
+            if (ExtractLaneClosureCountsFromImages(html, imageClosed, imageTotal)) {
+                a.lanesClosed = imageClosed;
+                a.lanesTotal = imageTotal;
+            }
+            else if (a.lanesTotal == 0 && !a.laneImageUrls.empty()) {
                 a.lanesTotal = static_cast<int>(a.laneImageUrls.size());
+            }
             out.push_back(std::move(a));
         }
     }
@@ -717,6 +778,9 @@ TrafficAlert ParseAlertObject(const json& obj)
             "gdp", "popup", "popupContent", "popup content", "content", "html", "info", "information"
             });
     a.laneImageUrls = ExtractImageUrls(rawDescription);
+    int rawImageClosed = 0;
+    int rawImageTotal = 0;
+    const bool hasRawImageLaneCounts = ExtractLaneClosureCountsFromImages(rawDescription, rawImageClosed, rawImageTotal);
     a.description = NormalizeAlertDescription(rawDescription);
     if (a.description.empty())
         a.description = BuildTrafficEnglandDescriptionFromFields(*props, obj);
@@ -797,8 +861,13 @@ TrafficAlert ParseAlertObject(const json& obj)
         a.severity = L"Unknown";
 
     ExtractLaneClosureCounts(a.description, a.lanesClosed, a.lanesTotal);
-    if (a.lanesTotal == 0 && !a.laneImageUrls.empty())
+    if (hasRawImageLaneCounts) {
+        a.lanesClosed = rawImageClosed;
+        a.lanesTotal = rawImageTotal;
+    }
+    else if (a.lanesTotal == 0 && !a.laneImageUrls.empty()) {
         a.lanesTotal = static_cast<int>(a.laneImageUrls.size());
+    }
 
     return a;
 }
