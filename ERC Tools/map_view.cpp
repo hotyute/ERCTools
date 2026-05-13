@@ -43,8 +43,41 @@ struct TileEntry
     ComPtr<ID2D1Bitmap> bitmap;
 };
 
+struct BoundarySegment
+{
+    GeoPoint a;
+    GeoPoint b;
+    double minLat = 0.0;
+    double maxLat = 0.0;
+    double minLon = 0.0;
+    double maxLon = 0.0;
+};
+
+struct BoundaryRing
+{
+    std::vector<GeoPoint> points;
+    std::vector<BoundarySegment> segmentsByMinLat;
+    double minLat = 0.0;
+    double maxLat = 0.0;
+    double minLon = 0.0;
+    double maxLon = 0.0;
+};
+
 constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
+constexpr UINT_PTR kInteractionIdleTimer = 1;
+constexpr UINT kInteractionIdleMs = 120;
+constexpr float kMapWaterR = 0.80f;
+constexpr float kMapWaterG = 0.91f;
+constexpr float kMapWaterB = 0.98f;
+constexpr int kMaxFallbackTileZoomDelta = 5;
+constexpr double kBoundaryDrawMarginPixels = 512.0;
+// Reuse the cached scene for panning only. Scaling the cached composite during
+// wheel zoom subtly changes translucent fill colours, especially at very close
+// zoom levels, so zoom frames are rendered live while still using lightweight
+// tile loading/fallbacks.
+constexpr double kMinCachedSceneScale = 1.0;
+constexpr double kMaxCachedSceneScale = 1.0;
 std::atomic<int> g_activeTileDownloads{ 0 };
 
 // ============================================================
@@ -94,6 +127,7 @@ public:
     void SetAlerts(const std::vector<TrafficAlert>& alerts)
     {
         m_alerts = alerts;
+        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -103,12 +137,14 @@ public:
             return;
 
         m_notes = notes;
+        InvalidateSceneCache();
         Invalidate();
     }
 
     void SetSelectedId(const std::wstring& id)
     {
         m_selectedId = id;
+        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -226,7 +262,41 @@ public:
             return false;
         }
 
-        m_ukBoundaryRings = std::move(rings);
+        m_ukBoundaryRings.clear();
+        m_ukBoundaryRings.reserve(rings.size());
+        for (auto& ring : rings) {
+            if (ring.empty())
+                continue;
+
+            BoundaryRing cached;
+            cached.minLat = cached.maxLat = ring[0].lat;
+            cached.minLon = cached.maxLon = ring[0].lon;
+            for (const GeoPoint& pt : ring) {
+                cached.minLat = MinValue(cached.minLat, pt.lat);
+                cached.maxLat = MaxValue(cached.maxLat, pt.lat);
+                cached.minLon = MinValue(cached.minLon, pt.lon);
+                cached.maxLon = MaxValue(cached.maxLon, pt.lon);
+            }
+            cached.segmentsByMinLat.reserve(ring.size());
+            for (size_t i = 0; i < ring.size(); ++i) {
+                BoundarySegment segment;
+                segment.a = ring[i];
+                segment.b = ring[(i + 1) % ring.size()];
+                segment.minLat = MinValue(segment.a.lat, segment.b.lat);
+                segment.maxLat = MaxValue(segment.a.lat, segment.b.lat);
+                segment.minLon = MinValue(segment.a.lon, segment.b.lon);
+                segment.maxLon = MaxValue(segment.a.lon, segment.b.lon);
+                cached.segmentsByMinLat.push_back(segment);
+            }
+            std::sort(cached.segmentsByMinLat.begin(), cached.segmentsByMinLat.end(), [](const auto& a, const auto& b) {
+                return a.minLat < b.minLat;
+                });
+
+            cached.points = std::move(ring);
+            m_ukBoundaryRings.push_back(std::move(cached));
+        }
+
+        InvalidateSceneCache();
         Invalidate();
         return true;
     }
@@ -305,12 +375,22 @@ private:
                 UINT w = static_cast<UINT>(std::max<LONG>(1L, LOWORD(lParam)));
                 UINT h = static_cast<UINT>(std::max<LONG>(1L, HIWORD(lParam)));
                 m_rt->Resize(D2D1::SizeU(w, h));
+                InvalidateSceneCache();
             }
             return 0;
 
         case WM_PAINT:
             OnPaint();
             return 0;
+
+        case WM_TIMER:
+            if (wParam == kInteractionIdleTimer) {
+                KillTimer(m_hwnd, kInteractionIdleTimer);
+                m_interactivePan = false;
+                Invalidate();
+                return 0;
+            }
+            break;
 
         case WM_ERASEBKGND:
             return 1;
@@ -321,6 +401,8 @@ private:
             m_mouseDown.y = GET_Y_LPARAM(lParam);
             m_lastMouse = m_mouseDown;
             m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
             return 0;
 
         case WM_MOUSEMOVE:
@@ -390,21 +472,90 @@ private:
         return WorldToGeo(worldX, worldY, m_zoom);
     }
 
-    D2D1_POINT_2F GeoToScreen(double lat, double lon) const
+    struct ViewState
+    {
+        int width = 1;
+        int height = 1;
+        WorldPoint centerWorld{};
+        double minLat = -kMaxMercatorLat;
+        double maxLat = kMaxMercatorLat;
+        double minLon = -180.0;
+        double maxLon = 180.0;
+        bool wrapsLongitude = false;
+        bool allLongitudes = true;
+    };
+
+    static double NormalizeLongitude(double lon)
+    {
+        while (lon < -180.0) lon += 360.0;
+        while (lon > 180.0) lon -= 360.0;
+        return lon;
+    }
+
+    ViewState BuildViewState(double marginPixels = 0.0) const
     {
         RECT rc{};
         GetClientRect(m_hwnd, &rc);
 
-        LONG width = std::max<LONG>(1L, rc.right - rc.left);
-        LONG height = std::max<LONG>(1L, rc.bottom - rc.top);
+        ViewState view;
+        view.width = std::max(1, static_cast<int>(rc.right - rc.left));
+        view.height = std::max(1, static_cast<int>(rc.bottom - rc.top));
+        view.centerWorld = GeoToWorld(m_centerLat, m_centerLon, m_zoom);
 
-        WorldPoint center = GeoToWorld(m_centerLat, m_centerLon, m_zoom);
+        const double left = view.centerWorld.x - view.width * 0.5 - marginPixels;
+        const double right = view.centerWorld.x + view.width * 0.5 + marginPixels;
+        const double top = view.centerWorld.y - view.height * 0.5 - marginPixels;
+        const double bottom = view.centerWorld.y + view.height * 0.5 + marginPixels;
+
+        GeoPoint nw = WorldToGeo(left, top, m_zoom);
+        GeoPoint se = WorldToGeo(right, bottom, m_zoom);
+
+        view.minLat = ClampValue(MinValue(nw.lat, se.lat), -kMaxMercatorLat, kMaxMercatorLat);
+        view.maxLat = ClampValue(MaxValue(nw.lat, se.lat), -kMaxMercatorLat, kMaxMercatorLat);
+
+        // Longitude can wrap when the viewport crosses the antimeridian. Keep this
+        // explicit so high-zoom culling remains cheap without hiding wrapped points.
+        const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
+        view.allLongitudes = (right - left) >= worldSize;
+        view.minLon = NormalizeLongitude(nw.lon);
+        view.maxLon = NormalizeLongitude(se.lon);
+        view.wrapsLongitude = !view.allLongitudes && view.minLon > view.maxLon;
+
+        return view;
+    }
+
+    D2D1_POINT_2F GeoToScreen(const ViewState& view, double lat, double lon) const
+    {
         WorldPoint p = GeoToWorld(lat, lon, m_zoom);
 
-        float x = static_cast<float>((p.x - center.x) + width * 0.5);
-        float y = static_cast<float>((p.y - center.y) + height * 0.5);
+        float x = static_cast<float>((p.x - view.centerWorld.x) + view.width * 0.5);
+        float y = static_cast<float>((p.y - view.centerWorld.y) + view.height * 0.5);
 
         return D2D1::Point2F(x, y);
+    }
+
+    D2D1_POINT_2F GeoToScreen(double lat, double lon) const
+    {
+        return GeoToScreen(BuildViewState(), lat, lon);
+    }
+
+    static bool IsGeoPointInView(const ViewState& view, double lat, double lon)
+    {
+        if (!std::isfinite(lat) || !std::isfinite(lon))
+            return false;
+
+        if (lat < view.minLat || lat > view.maxLat)
+            return false;
+
+        if (view.allLongitudes)
+            return true;
+
+        lon = NormalizeLongitude(lon);
+
+        if (view.wrapsLongitude)
+            return lon >= view.minLon || lon <= view.maxLon;
+
+        return lon >= view.minLon && lon <= view.maxLon;
     }
 
     void NormalizeCenter()
@@ -419,6 +570,13 @@ private:
     {
         if (m_hwnd)
             InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+
+    void InvalidateSceneCache()
+    {
+        m_sceneBitmap.Reset();
+        m_sceneBitmapWidth = 0;
+        m_sceneBitmapHeight = 0;
     }
 
     void MoveCenterByPixels(int dx, int dy)
@@ -437,12 +595,16 @@ private:
     {
         std::wstring bestId;
         double bestDist = 14.0;
+        const ViewState view = BuildViewState(bestDist + 8.0);
 
         for (size_t i = 0; i < m_alerts.size(); ++i) {
-            if (!m_alerts[i].hasLocation)
+            if (!m_alerts[i].hasLocation ||
+                !IsGeoPointInView(view, m_alerts[i].latitude, m_alerts[i].longitude))
+            {
                 continue;
+            }
 
-            D2D1_POINT_2F pt = GeoToScreen(m_alerts[i].latitude, m_alerts[i].longitude);
+            D2D1_POINT_2F pt = GeoToScreen(view, m_alerts[i].latitude, m_alerts[i].longitude);
             double dx = pt.x - x;
             double dy = pt.y - y;
             double d = std::sqrt(dx * dx + dy * dy);
@@ -471,6 +633,7 @@ private:
             }
 
             if (m_dragging && (dx != 0 || dy != 0)) {
+                m_interactivePan = true;
                 MoveCenterByPixels(-dx, -dy);
                 m_lastMouse = pt;
                 Invalidate();
@@ -490,6 +653,9 @@ private:
         }
 
         m_dragging = false;
+        m_interactivePan = false;
+        KillTimer(m_hwnd, kInteractionIdleTimer);
+        Invalidate();
     }
 
     void OnDoubleClick(int x, int y)
@@ -512,6 +678,9 @@ private:
             return;
 
         GeoPoint geoUnderCursor = ScreenToGeo(pt.x, pt.y);
+
+        m_interactivePan = true;
+        SetTimer(m_hwnd, kInteractionIdleTimer, kInteractionIdleMs, nullptr);
 
         m_zoom = newZoom;
 
@@ -565,7 +734,7 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.15f, 0.52f, 0.90f, 0.95f), &m_minorBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.20f, 0.70f, 0.55f, 0.95f), &m_unknownBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.92f, 0.2f, 0.55f), &m_selectedBrush);
-        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.88f, 0.92f, 0.96f), &m_placeholderBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(kMapWaterR, kMapWaterG, kMapWaterB), &m_placeholderBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.35f, 0.35f, 0.35f), &m_borderBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.55f, 0.25f, 0.18f), &m_outlineFillBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.28f, 0.12f, 0.92f), &m_outlineStrokeBrush);
@@ -606,6 +775,7 @@ private:
         m_textBrush.Reset();
         m_noteBrush.Reset();
         m_noteTextFormat.Reset();
+        InvalidateSceneCache();
     }
 
     void ClearTileCache()
@@ -628,6 +798,56 @@ private:
         if (!entry)
             entry = std::make_shared<TileEntry>();
         return entry;
+    }
+
+    std::shared_ptr<TileEntry> FindTile(const TileKey& key)
+    {
+        std::lock_guard<std::mutex> lk(m_tileMutex);
+        auto it = m_tiles.find(key);
+        if (it == m_tiles.end())
+            return {};
+        return it->second;
+    }
+
+    ComPtr<ID2D1Bitmap> GetCachedTileBitmap(const TileKey& key)
+    {
+        auto entry = FindTile(key);
+        if (!entry)
+            return {};
+
+        std::lock_guard<std::mutex> lk(entry->mutex);
+        entry->lastUsedMs = GetTickCount64();
+        return entry->bitmap;
+    }
+
+    bool TryDrawFallbackTile(const TileKey& key, const D2D1_RECT_F& dest)
+    {
+        if (!m_rt || key.z <= kMinZoom)
+            return false;
+
+        const int maxDelta = MinValue(kMaxFallbackTileZoomDelta, key.z - kMinZoom);
+        for (int delta = 1; delta <= maxDelta; ++delta) {
+            const int parentZ = key.z - delta;
+            const int scale = 1 << delta;
+            TileKey parentKey{ parentZ, key.x / scale, key.y / scale };
+            ComPtr<ID2D1Bitmap> parentBmp = GetCachedTileBitmap(parentKey);
+            if (!parentBmp)
+                continue;
+
+            const int subX = key.x % scale;
+            const int subY = key.y % scale;
+            const float srcSize = 256.0f / static_cast<float>(scale);
+            const D2D1_RECT_F src = D2D1::RectF(
+                subX * srcSize,
+                subY * srcSize,
+                (subX + 1) * srcSize,
+                (subY + 1) * srcSize);
+
+            m_rt->DrawBitmap(parentBmp.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, src);
+            return true;
+        }
+
+        return false;
     }
 
     void RequestTile(const TileKey& key)
@@ -767,21 +987,23 @@ private:
 
     void DrawMarkers()
     {
-        RECT rc{};
-        GetClientRect(m_hwnd, &rc);
-
-        int width = static_cast<int>(rc.right - rc.left);
-        int height = static_cast<int>(rc.bottom - rc.top);
+        const ViewState view = BuildViewState(32.0);
+        const int width = view.width;
+        const int height = view.height;
 
         for (size_t i = 0; i < m_alerts.size(); ++i) {
-            if (!m_alerts[i].hasLocation)
-                continue;
+            const bool selected = (m_alerts[i].id == m_selectedId);
 
-            D2D1_POINT_2F p = GeoToScreen(m_alerts[i].latitude, m_alerts[i].longitude);
+            if (!m_alerts[i].hasLocation ||
+                !IsGeoPointInView(view, m_alerts[i].latitude, m_alerts[i].longitude))
+            {
+                continue;
+            }
+
+            D2D1_POINT_2F p = GeoToScreen(view, m_alerts[i].latitude, m_alerts[i].longitude);
             if (p.x < -20.0f || p.y < -20.0f || p.x > width + 20.0f || p.y > height + 20.0f)
                 continue;
 
-            bool selected = (m_alerts[i].id == m_selectedId);
             ID2D1SolidColorBrush* sevBrush = BrushForSeverity(m_alerts[i].severity);
 
             float outerR = selected ? 15.0f : 11.0f;
@@ -815,7 +1037,7 @@ private:
         }
     }
 
-    void DrawTiles()
+    void DrawTiles(bool interactive)
     {
         RECT rc{};
         GetClientRect(m_hwnd, &rc);
@@ -844,8 +1066,8 @@ private:
                 while (wrappedX >= tilesPerAxis) wrappedX -= tilesPerAxis;
 
                 TileKey key{ m_zoom, wrappedX, ty };
-                auto entry = GetOrCreateTile(key);
-                {
+                auto entry = interactive ? FindTile(key) : GetOrCreateTile(key);
+                if (entry) {
                     std::lock_guard<std::mutex> lk(entry->mutex);
                     entry->lastUsedMs = GetTickCount64();
                 }
@@ -859,17 +1081,17 @@ private:
                 ComPtr<ID2D1Bitmap> bmp;
                 std::vector<BYTE> bytesCopy;
 
-                {
+                if (entry) {
                     std::lock_guard<std::mutex> lk(entry->mutex);
                     if (entry->bitmap) {
                         bmp = entry->bitmap;
                     }
-                    else if (entry->ready && !entry->bytes.empty()) {
+                    else if (!interactive && entry->ready && !entry->bytes.empty()) {
                         bytesCopy = entry->bytes;
                     }
                 }
 
-                if (!bmp && !bytesCopy.empty()) {
+                if (!interactive && entry && !bmp && !bytesCopy.empty()) {
                     bmp = CreateBitmapFromBytes(bytesCopy);
                     if (bmp) {
                         std::lock_guard<std::mutex> lk(entry->mutex);
@@ -882,14 +1104,23 @@ private:
                     m_rt->DrawBitmap(bmp.Get(), dest);
                 }
                 else {
-                    RequestTile(key);
-                    m_rt->FillRectangle(dest, m_placeholderBrush.Get());
+                    const bool drewFallback = TryDrawFallbackTile(key, dest);
+                    if (!interactive)
+                        RequestTile(key);
+
+                    if (!drewFallback)
+                        m_rt->FillRectangle(dest, m_placeholderBrush.Get());
+
+                    // Keep the unloaded-tile grid stable during interaction too;
+                    // otherwise placeholder/fallback tile boundaries visibly blink
+                    // off while panning or zooming.
                     m_rt->DrawRectangle(dest, m_borderBrush.Get(), 0.5f);
                 }
             }
         }
 
-        PruneTileCache();
+        if (!interactive)
+            PruneTileCache();
     }
 
 
@@ -902,13 +1133,15 @@ private:
             { 50.8198, -1.0880 }, { 54.9783, -1.6178 }
         };
 
-        RECT rc{};
-        GetClientRect(m_hwnd, &rc);
-        const int width = static_cast<int>(rc.right - rc.left);
-        const int height = static_cast<int>(rc.bottom - rc.top);
+        const ViewState view = BuildViewState(16.0);
+        const int width = view.width;
+        const int height = view.height;
 
         for (const GeoPoint& city : cities) {
-            D2D1_POINT_2F p = GeoToScreen(city.lat, city.lon);
+            if (!IsGeoPointInView(view, city.lat, city.lon))
+                continue;
+
+            D2D1_POINT_2F p = GeoToScreen(view, city.lat, city.lon);
             if (p.x < -16.0f || p.y < -16.0f || p.x > width + 16.0f || p.y > height + 16.0f)
                 continue;
 
@@ -922,16 +1155,15 @@ private:
         if (!m_rt)
             return;
 
-        RECT rc{};
-        GetClientRect(m_hwnd, &rc);
-        int width = static_cast<int>(rc.right - rc.left);
-        int height = static_cast<int>(rc.bottom - rc.top);
+        const ViewState view = BuildViewState(220.0);
+        int width = view.width;
+        int height = view.height;
 
         for (const auto& note : m_notes) {
-            if (!std::isfinite(note.latitude) || !std::isfinite(note.longitude))
+            if (!IsGeoPointInView(view, note.latitude, note.longitude))
                 continue;
 
-            D2D1_POINT_2F p = GeoToScreen(note.latitude, note.longitude);
+            D2D1_POINT_2F p = GeoToScreen(view, note.latitude, note.longitude);
             if (p.x < -80.0f || p.y < -80.0f || p.x > width + 80.0f || p.y > height + 80.0f)
                 continue;
 
@@ -978,6 +1210,127 @@ private:
         m_rt->DrawLine(a, b, m_textBrush.Get(), 2.0f);
     }
 
+
+    void UpdateSceneCache(const ViewState& view)
+    {
+        if (!m_rt)
+            return;
+
+        const D2D1_SIZE_U pixelSize = m_rt->GetPixelSize();
+        if (pixelSize.width == 0 || pixelSize.height == 0)
+            return;
+
+        if (!m_sceneBitmap ||
+            m_sceneBitmapWidth != static_cast<int>(pixelSize.width) ||
+            m_sceneBitmapHeight != static_cast<int>(pixelSize.height))
+        {
+            m_sceneBitmap.Reset();
+            D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(m_rt->GetPixelFormat());
+            if (FAILED(m_rt->CreateBitmap(pixelSize, nullptr, 0, &props, &m_sceneBitmap)))
+                return;
+
+            m_sceneBitmapWidth = static_cast<int>(pixelSize.width);
+            m_sceneBitmapHeight = static_cast<int>(pixelSize.height);
+        }
+
+        D2D1_POINT_2U destPoint = D2D1::Point2U(0, 0);
+        D2D1_RECT_U srcRect = D2D1::RectU(0, 0, pixelSize.width, pixelSize.height);
+        if (FAILED(m_sceneBitmap->CopyFromRenderTarget(&destPoint, m_rt.Get(), &srcRect))) {
+            InvalidateSceneCache();
+            return;
+        }
+
+        m_sceneBitmapZoom = m_zoom;
+        m_sceneBitmapCenterWorld = view.centerWorld;
+    }
+
+    bool DrawCachedScene(const ViewState& view, D2D1_RECT_F* destOut = nullptr)
+    {
+        if (!m_rt || !m_sceneBitmap || m_sceneBitmapWidth <= 0 || m_sceneBitmapHeight <= 0)
+            return false;
+
+        const int zoomDelta = m_zoom - m_sceneBitmapZoom;
+        if (zoomDelta != 0)
+            return false;
+
+        const double scale = 1.0;
+        if (scale < kMinCachedSceneScale || scale > kMaxCachedSceneScale)
+            return false;
+
+        const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
+        double dx = m_sceneBitmapCenterWorld.x * scale - view.centerWorld.x;
+        if (dx > worldSize * 0.5)
+            dx -= worldSize;
+        else if (dx < -worldSize * 0.5)
+            dx += worldSize;
+
+        const double dy = m_sceneBitmapCenterWorld.y * scale - view.centerWorld.y;
+        if (std::abs(dx) > view.width * 0.75 || std::abs(dy) > view.height * 0.75)
+            return false;
+
+        const float scaledWidth = static_cast<float>(m_sceneBitmapWidth * scale);
+        const float scaledHeight = static_cast<float>(m_sceneBitmapHeight * scale);
+        const float centerX = static_cast<float>(view.width * 0.5 + dx);
+        const float centerY = static_cast<float>(view.height * 0.5 + dy);
+        const D2D1_RECT_F dest = D2D1::RectF(
+            centerX - scaledWidth * 0.5f,
+            centerY - scaledHeight * 0.5f,
+            centerX + scaledWidth * 0.5f,
+            centerY + scaledHeight * 0.5f);
+
+        m_rt->DrawBitmap(m_sceneBitmap.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+        if (destOut)
+            *destOut = dest;
+        return true;
+    }
+
+    void DrawSceneOverlays()
+    {
+        DrawUkBoundary();
+        DrawCityAnchors();
+        DrawNotes();
+        DrawMarkers();
+    }
+
+    void DrawSceneOverlaysInClip(const D2D1_RECT_F& clip)
+    {
+        if (!m_rt || clip.right <= clip.left || clip.bottom <= clip.top)
+            return;
+
+        const bool hadClip = m_hasOverlayClip;
+        const D2D1_RECT_F previousClip = m_overlayClip;
+        m_hasOverlayClip = true;
+        m_overlayClip = clip;
+
+        m_rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        DrawSceneOverlays();
+        m_rt->PopAxisAlignedClip();
+
+        m_hasOverlayClip = hadClip;
+        m_overlayClip = previousClip;
+    }
+
+    void DrawExposedCachedSceneEdges(const ViewState& view, const D2D1_RECT_F& cachedDest)
+    {
+        if (!m_rt)
+            return;
+
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float left = ClampValue(cachedDest.left, 0.0f, width);
+        const float top = ClampValue(cachedDest.top, 0.0f, height);
+        const float right = ClampValue(cachedDest.right, 0.0f, width);
+        const float bottom = ClampValue(cachedDest.bottom, 0.0f, height);
+
+        // The cached scene is only the previous viewport. Draw full overlays just
+        // into newly exposed strips so panning reveals boundary/fill/markers ahead
+        // of the cursor without paying to redraw the whole map each frame.
+        DrawSceneOverlaysInClip(D2D1::RectF(0.0f, 0.0f, left, height));
+        DrawSceneOverlaysInClip(D2D1::RectF(right, 0.0f, width, height));
+        DrawSceneOverlaysInClip(D2D1::RectF(left, 0.0f, right, top));
+        DrawSceneOverlaysInClip(D2D1::RectF(left, bottom, right, height));
+    }
+
     void OnPaint()
     {
         PAINTSTRUCT ps{};
@@ -986,13 +1339,30 @@ private:
         EnsureDeviceResources();
         if (m_rt) {
             m_rt->BeginDraw();
-            m_rt->Clear(D2D1::ColorF(0.80f, 0.91f, 0.98f, 1.0f));
+            m_rt->Clear(D2D1::ColorF(kMapWaterR, kMapWaterG, kMapWaterB, 1.0f));
 
-            DrawTiles();
-            DrawUkBoundary();
-            DrawCityAnchors();
-            DrawNotes();
-            DrawMarkers();
+            const bool interactive = m_interactivePan;
+            const ViewState view = BuildViewState();
+            bool drewCachedScene = false;
+            D2D1_RECT_F cachedSceneDest{};
+
+            if (interactive && m_sceneBitmap && m_zoom == m_sceneBitmapZoom) {
+                DrawTiles(true);
+                drewCachedScene = DrawCachedScene(view, &cachedSceneDest);
+                if (drewCachedScene)
+                    DrawExposedCachedSceneEdges(view, cachedSceneDest);
+            }
+
+            if (!drewCachedScene) {
+                DrawTiles(interactive);
+                DrawSceneOverlays();
+
+                if (!interactive) {
+                    m_rt->Flush();
+                    UpdateSceneCache(view);
+                }
+            }
+
             DrawMapChrome();
 
             HRESULT hr = m_rt->EndDraw();
@@ -1062,9 +1432,134 @@ private:
         DrawClosedPolygon(northernIreland, _countof(northernIreland));
     }
 
-    void DrawBoundaryRing(const std::vector<GeoPoint>& ring)
+    static bool LongitudeRangesIntersect(const ViewState& view, double minLon, double maxLon)
     {
-        if (!m_rt || ring.size() < 3)
+        if (view.allLongitudes)
+            return true;
+
+        minLon = NormalizeLongitude(minLon);
+        maxLon = NormalizeLongitude(maxLon);
+
+        if (view.wrapsLongitude)
+            return maxLon >= view.minLon || minLon <= view.maxLon;
+
+        return maxLon >= view.minLon && minLon <= view.maxLon;
+    }
+
+    static bool RingIntersectsView(const BoundaryRing& ring, const ViewState& view)
+    {
+        if (ring.points.size() < 3)
+            return false;
+
+        if (ring.maxLat < view.minLat || ring.minLat > view.maxLat)
+            return false;
+
+        return LongitudeRangesIntersect(view, ring.minLon, ring.maxLon);
+    }
+
+    static bool IsGeoPointInRing(const BoundaryRing& ring, double lat, double lon)
+    {
+        if (ring.segmentsByMinLat.empty() ||
+            lat < ring.minLat || lat > ring.maxLat ||
+            lon < ring.minLon || lon > ring.maxLon)
+        {
+            return false;
+        }
+
+        bool inside = false;
+        for (const BoundarySegment& segment : ring.segmentsByMinLat) {
+            if (segment.minLat > lat)
+                break;
+            if (segment.maxLat <= lat || segment.maxLon < lon)
+                continue;
+
+            const GeoPoint& a = segment.a;
+            const GeoPoint& b = segment.b;
+            if (((a.lat > lat) != (b.lat > lat)) &&
+                (lon < (b.lon - a.lon) * (lat - a.lat) / (b.lat - a.lat) + a.lon))
+            {
+                inside = !inside;
+            }
+        }
+
+        return inside;
+    }
+
+    void DrawHighZoomBoundaryFill(const ViewState& view)
+    {
+        if (!m_rt || !m_outlineFillBrush)
+            return;
+
+        // At close zoom levels, filling the whole viewport when the centre is on
+        // land paints nearby sea green. Instead, fill scanline spans inside the
+        // visible boundary. Respect clipped edge renders too, so panning can draw
+        // newly exposed strips without reprocessing or repainting the whole map.
+        const float clipLeft = m_hasOverlayClip ? ClampValue(m_overlayClip.left, 0.0f, static_cast<float>(view.width)) : 0.0f;
+        const float clipRight = m_hasOverlayClip ? ClampValue(m_overlayClip.right, 0.0f, static_cast<float>(view.width)) : static_cast<float>(view.width);
+        const int yStart = m_hasOverlayClip ? ClampValue(static_cast<int>(std::floor(m_overlayClip.top)), 0, view.height) : 0;
+        const int yEnd = m_hasOverlayClip ? ClampValue(static_cast<int>(std::ceil(m_overlayClip.bottom)), 0, view.height) : view.height;
+        if (clipRight <= clipLeft || yEnd <= yStart)
+            return;
+
+        std::vector<float> intersections;
+        intersections.reserve(16);
+        const double centerLon = NormalizeLongitude(m_centerLon);
+
+        for (int y = yStart; y < yEnd; ++y) {
+            const double sampleY = static_cast<double>(y) + 0.5;
+            const double worldY = view.centerWorld.y + (sampleY - view.height * 0.5);
+            const GeoPoint sampleGeo = WorldToGeo(view.centerWorld.x, worldY, m_zoom);
+            const double lat = sampleGeo.lat;
+
+            intersections.clear();
+            bool centreInsideRing = false;
+
+            for (const BoundaryRing& ring : m_ukBoundaryRings) {
+                if (ring.segmentsByMinLat.empty() || lat < ring.minLat || lat > ring.maxLat)
+                    continue;
+
+                if (!centreInsideRing && IsGeoPointInRing(ring, lat, centerLon))
+                    centreInsideRing = true;
+
+                for (const BoundarySegment& segment : ring.segmentsByMinLat) {
+                    if (segment.minLat > lat)
+                        break;
+                    if (segment.maxLat <= lat || std::abs(segment.b.lat - segment.a.lat) < 1e-12)
+                        continue;
+
+                    const double t = (lat - segment.a.lat) / (segment.b.lat - segment.a.lat);
+                    const double lon = segment.a.lon + (segment.b.lon - segment.a.lon) * t;
+                    intersections.push_back(GeoToScreen(view, lat, lon).x);
+                }
+            }
+
+            if (intersections.empty()) {
+                if (centreInsideRing) {
+                    m_rt->FillRectangle(
+                        D2D1::RectF(clipLeft, static_cast<float>(y), clipRight, static_cast<float>(y + 1)),
+                        m_outlineFillBrush.Get());
+                }
+                continue;
+            }
+
+            std::sort(intersections.begin(), intersections.end());
+
+            for (size_t i = 0; i + 1 < intersections.size(); i += 2) {
+                float left = MaxValue(intersections[i], clipLeft);
+                float right = MinValue(intersections[i + 1], clipRight);
+                if (right <= left)
+                    continue;
+
+                m_rt->FillRectangle(
+                    D2D1::RectF(left, static_cast<float>(y), right, static_cast<float>(y + 1)),
+                    m_outlineFillBrush.Get());
+            }
+        }
+    }
+
+    void DrawBoundaryRingFull(const BoundaryRing& ring)
+    {
+        if (!m_rt || ring.points.size() < 3)
             return;
 
         ComPtr<ID2D1PathGeometry> geom;
@@ -1078,11 +1573,11 @@ private:
         sink->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
 
         sink->BeginFigure(
-            GeoToScreen(ring[0].lat, ring[0].lon),
+            GeoToScreen(ring.points[0].lat, ring.points[0].lon),
             D2D1_FIGURE_BEGIN_FILLED);
 
-        for (size_t i = 1; i < ring.size(); ++i)
-            sink->AddLine(GeoToScreen(ring[i].lat, ring[i].lon));
+        for (size_t i = 1; i < ring.points.size(); ++i)
+            sink->AddLine(GeoToScreen(ring.points[i].lat, ring.points[i].lon));
 
         sink->EndFigure(D2D1_FIGURE_END_CLOSED);
 
@@ -1096,15 +1591,76 @@ private:
             m_rt->DrawGeometry(geom.Get(), m_outlineStrokeBrush.Get(), 2.0f);
     }
 
-    void DrawUkBoundary()
+    void DrawBoundaryRingVisibleStroke(const BoundaryRing& ring, const ViewState& view)
     {
-        // Detailed UK boundary files can contain very large rings. At street-level
-        // zoom they are mostly off-screen and add input latency without useful context.
-        if (m_zoom >= 12)
+        if (!m_rt || !m_outlineStrokeBrush || ring.segmentsByMinLat.empty())
             return;
 
-        for (const auto& ring : m_ukBoundaryRings)
-            DrawBoundaryRing(ring);
+        ComPtr<ID2D1PathGeometry> geom;
+        if (FAILED(g_d2dFactory->CreatePathGeometry(&geom)))
+            return;
+
+        ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(geom->Open(&sink)))
+            return;
+
+        bool hasFigure = false;
+        for (const BoundarySegment& segment : ring.segmentsByMinLat) {
+            if (segment.minLat > view.maxLat)
+                break;
+            if (segment.maxLat < view.minLat)
+                continue;
+
+            if (!LongitudeRangesIntersect(view, segment.minLon, segment.maxLon))
+                continue;
+
+            sink->BeginFigure(GeoToScreen(view, segment.a.lat, segment.a.lon), D2D1_FIGURE_BEGIN_HOLLOW);
+            sink->AddLine(GeoToScreen(view, segment.b.lat, segment.b.lon));
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+            hasFigure = true;
+        }
+
+        HRESULT closeHr = sink->Close();
+        if (FAILED(closeHr) || !hasFigure)
+            return;
+
+        m_rt->DrawGeometry(geom.Get(), m_outlineStrokeBrush.Get(), 2.0f);
+    }
+
+    void DrawUkBoundary()
+    {
+        if (m_ukBoundaryRings.empty())
+            return;
+
+        const ViewState view = BuildViewState(kBoundaryDrawMarginPixels);
+        // Keep the boundary fill path stable while panning/zooming. Switching from
+        // full polygon fill to viewport fill solely because the user is interacting
+        // changes the apparent tint and causes obvious flicker at mid zoom levels.
+        const bool fullBoundary = m_zoom < 10;
+
+        if (!fullBoundary) {
+            // At close zoom levels the fill renderer is already clipped to the
+            // actual visible boundary spans. Run it whenever a high-zoom boundary
+            // is visible rather than gating on the viewport centre; otherwise
+            // panning over coastline can randomly drop all land tint as soon as
+            // the centre point crosses water.
+            for (const auto& ring : m_ukBoundaryRings) {
+                if (RingIntersectsView(ring, view)) {
+                    DrawHighZoomBoundaryFill(view);
+                    break;
+                }
+            }
+        }
+
+        for (const auto& ring : m_ukBoundaryRings) {
+            if (!RingIntersectsView(ring, view))
+                continue;
+
+            if (fullBoundary)
+                DrawBoundaryRingFull(ring);
+            else
+                DrawBoundaryRingVisibleStroke(ring, view);
+        }
     }
 
     HWND m_hwnd = nullptr;
@@ -1121,6 +1677,7 @@ private:
     POINT m_mouseDown{};
     POINT m_lastMouse{};
     bool m_dragging = false;
+    bool m_interactivePan = false;
 
     ComPtr<ID2D1HwndRenderTarget> m_rt;
     ComPtr<ID2D1SolidColorBrush> m_severeBrush;
@@ -1136,7 +1693,14 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_textBrush;
     ComPtr<ID2D1SolidColorBrush> m_noteBrush;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
-    std::vector<std::vector<GeoPoint>> m_ukBoundaryRings;
+    ComPtr<ID2D1Bitmap> m_sceneBitmap;
+    int m_sceneBitmapWidth = 0;
+    int m_sceneBitmapHeight = 0;
+    int m_sceneBitmapZoom = kDefaultZoom;
+    WorldPoint m_sceneBitmapCenterWorld{};
+    bool m_hasOverlayClip = false;
+    D2D1_RECT_F m_overlayClip{};
+    std::vector<BoundaryRing> m_ukBoundaryRings;
 
     std::mutex m_tileMutex;
     std::unordered_map<TileKey, std::shared_ptr<TileEntry>, TileKeyHash> m_tiles;
