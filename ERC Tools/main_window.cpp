@@ -40,6 +40,11 @@ constexpr int IDC_SETTINGS_FILTER_LABEL = 2105;
 constexpr int IDC_SETTINGS_ORDER_LABEL = 2106;
 constexpr int IDC_SETTINGS_ENDPOINT_LABEL = 2107;
 constexpr int IDC_SETTINGS_SERVER_LABEL = 2108;
+constexpr int IDC_SETTINGS_REFRESH_OFF_RADIO = 2109;
+constexpr int IDC_SETTINGS_REFRESH_ON_RADIO = 2110;
+constexpr int IDC_SETTINGS_REFRESH_INTERVAL_EDIT = 2111;
+constexpr int IDC_SETTINGS_REFRESH_LABEL = 2112;
+constexpr int IDC_SETTINGS_REFRESH_INTERVAL_LABEL = 2113;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 
 struct FeedResult
@@ -80,6 +85,40 @@ static std::wstring AppendPath(std::wstring base, const wchar_t* path)
     while (!base.empty() && base.back() == L'/')
         base.pop_back();
     return base + path;
+}
+
+static bool TryParseRefreshIntervalMilliseconds(const std::wstring& text, UINT& millisecondsOut)
+{
+    std::wstring value = ToLower(Trim(text));
+    if (value.empty())
+        return false;
+
+    wchar_t* end = nullptr;
+    double amount = std::wcstod(value.c_str(), &end);
+    if (end == value.c_str() || !std::isfinite(amount) || amount <= 0.0)
+        return false;
+
+    std::wstring unit = ToLower(Trim(end ? end : L""));
+    double multiplier = 1000.0;
+    if (unit.empty() || unit == L"s" || unit == L"sec" || unit == L"secs" || unit == L"second" || unit == L"seconds") {
+        multiplier = 1000.0;
+    }
+    else if (unit == L"m" || unit == L"min" || unit == L"mins" || unit == L"minute" || unit == L"minutes") {
+        multiplier = 60.0 * 1000.0;
+    }
+    else if (unit == L"ms" || unit == L"millisecond" || unit == L"milliseconds") {
+        multiplier = 1.0;
+    }
+    else {
+        return false;
+    }
+
+    double milliseconds = amount * multiplier;
+    if (milliseconds < 1000.0 || milliseconds > static_cast<double>(USER_TIMER_MAXIMUM))
+        return false;
+
+    millisecondsOut = static_cast<UINT>(milliseconds);
+    return true;
 }
 
 static std::vector<ChatMessage> ParseChatMessages(const json& root)
@@ -615,7 +654,7 @@ private:
 
         Layout();
         SetStatusText(L"Ready.");
-        SetTimer(m_hwnd, 1, 5 * 60 * 1000, nullptr);
+        ApplyRefreshTimer();
         SetTimer(m_hwnd, 2, 8 * 1000, nullptr);
 
         RefreshFeedAsync();
@@ -633,7 +672,7 @@ private:
         const int pad = 16;
         const int labelH = 22;
         const int controlH = 32;
-        const int topBarH = 92;
+        const int topBarH = 44;
         const int statusH = 24;
 
         MoveWindow(m_headerLabel, pad, 12, std::max<LONG>(200L, width - pad * 2 - 148), 28, TRUE);
@@ -784,6 +823,13 @@ private:
         SetWindowTextW(m_hwnd, title.c_str());
         if (m_statusBar)
             SendMessageW(m_statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
+    }
+
+    void ApplyRefreshTimer()
+    {
+        KillTimer(m_hwnd, 1);
+        if (m_periodicRefreshEnabled)
+            SetTimer(m_hwnd, 1, m_refreshIntervalMs, nullptr);
     }
 
     void RefreshFeedAsync()
@@ -1403,7 +1449,7 @@ private:
 
         if (!m_settingsWnd || !IsWindow(m_settingsWnd)) {
             m_settingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClassName, L"Settings", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                CW_USEDEFAULT, CW_USEDEFAULT, 470, 365, m_hwnd, nullptr, m_hInst, this);
+                CW_USEDEFAULT, CW_USEDEFAULT, 470, 465, m_hwnd, nullptr, m_hInst, this);
         }
         SyncSettingsControls();
         ShowWindow(m_settingsWnd, SW_SHOW);
@@ -1416,20 +1462,26 @@ private:
         m_urlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 44, 410, 26, parent, reinterpret_cast<HMENU>(IDC_URL_EDIT), m_hInst, nullptr);
         m_serverLabel = CreateWindowExW(0, L"STATIC", L"Collaboration server", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 84, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_SERVER_LABEL), m_hInst, nullptr);
         m_serverEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 110, 410, 26, parent, reinterpret_cast<HMENU>(IDC_SERVER_EDIT), m_hInst, nullptr);
-        HWND filterLabel = CreateWindowExW(0, L"STATIC", L"Traffic England alert filter", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 150, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_FILTER_LABEL), m_hInst, nullptr);
-        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 176, 410, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
-        HWND orderLabel = CreateWindowExW(0, L"STATIC", L"Traffic England order", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 214, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ORDER_LABEL), m_hInst, nullptr);
-        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 240, 410, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
-        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 286, 260, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 286, 102, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+        HWND refreshLabel = CreateWindowExW(0, L"STATIC", L"Periodic alert refresh", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 150, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_LABEL), m_hInst, nullptr);
+        m_settingsRefreshOffRadio = CreateWindowExW(0, L"BUTTON", L"Manual refresh only", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 176, 145, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_OFF_RADIO), m_hInst, nullptr);
+        m_settingsRefreshOnRadio = CreateWindowExW(0, L"BUTTON", L"Refresh every", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 176, 120, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_ON_RADIO), m_hInst, nullptr);
+        HWND intervalLabel = CreateWindowExW(0, L"STATIC", L"Interval", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 214, 120, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_INTERVAL_LABEL), m_hInst, nullptr);
+        m_settingsRefreshIntervalEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 178, 208, 120, 26, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_INTERVAL_EDIT), m_hInst, nullptr);
+        HWND filterLabel = CreateWindowExW(0, L"STATIC", L"Traffic England alert filter", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 252, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_FILTER_LABEL), m_hInst, nullptr);
+        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 278, 410, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
+        HWND orderLabel = CreateWindowExW(0, L"STATIC", L"Traffic England order", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 316, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ORDER_LABEL), m_hInst, nullptr);
+        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 342, 410, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
+        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 388, 260, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 388, 102, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_urlLabel, m_urlEdit, m_serverLabel, m_serverEdit, filterLabel, m_settingsFilterCombo, orderLabel, m_settingsOrderCombo, boundary, close }) {
+        for (HWND h : { m_urlLabel, m_urlEdit, m_serverLabel, m_serverEdit, refreshLabel, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, intervalLabel, m_settingsRefreshIntervalEdit, filterLabel, m_settingsFilterCombo, orderLabel, m_settingsOrderCombo, boundary, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
 
         SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"https://www.trafficengland.com/traffic-alerts"));
         SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"http://localhost:8080"));
+        SendMessageW(m_settingsRefreshIntervalEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"5s, 3s, 10s"));
 
         SendMessageW(m_settingsFilterCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Unplanned only"));
         SendMessageW(m_settingsFilterCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All alerts"));
@@ -1446,6 +1498,14 @@ private:
             SetWindowTextSafe(m_urlEdit, m_alertsEndpoint);
         if (m_serverEdit)
             SetWindowTextSafe(m_serverEdit, m_serverBaseUrl);
+        if (m_settingsRefreshOffRadio)
+            SendMessageW(m_settingsRefreshOffRadio, BM_SETCHECK, m_periodicRefreshEnabled ? BST_UNCHECKED : BST_CHECKED, 0);
+        if (m_settingsRefreshOnRadio)
+            SendMessageW(m_settingsRefreshOnRadio, BM_SETCHECK, m_periodicRefreshEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_settingsRefreshIntervalEdit) {
+            SetWindowTextSafe(m_settingsRefreshIntervalEdit, m_refreshIntervalText);
+            EnableWindow(m_settingsRefreshIntervalEdit, m_periodicRefreshEnabled);
+        }
         if (m_settingsFilterCombo)
             SendMessageW(m_settingsFilterCombo, CB_SETCURSEL, m_alertFilterUnplannedOnly ? 0 : 1, 0);
         if (m_settingsOrderCombo) {
@@ -1465,6 +1525,35 @@ private:
         }
         else if (id == IDC_SERVER_EDIT && code == EN_CHANGE) {
             m_serverBaseUrl = NormalizeUrl(GetWindowTextString(m_serverEdit));
+        }
+        else if (id == IDC_SETTINGS_REFRESH_OFF_RADIO && code == BN_CLICKED) {
+            m_periodicRefreshEnabled = false;
+            ApplyRefreshTimer();
+            SyncSettingsControls();
+        }
+        else if (id == IDC_SETTINGS_REFRESH_ON_RADIO && code == BN_CLICKED) {
+            m_periodicRefreshEnabled = true;
+            UINT parsedMs = 0;
+            if (TryParseRefreshIntervalMilliseconds(GetWindowTextString(m_settingsRefreshIntervalEdit), parsedMs)) {
+                m_refreshIntervalText = Trim(GetWindowTextString(m_settingsRefreshIntervalEdit));
+                m_refreshIntervalMs = parsedMs;
+            }
+            ApplyRefreshTimer();
+            SyncSettingsControls();
+        }
+        else if (id == IDC_SETTINGS_REFRESH_INTERVAL_EDIT && (code == EN_CHANGE || code == EN_KILLFOCUS)) {
+            UINT parsedMs = 0;
+            std::wstring intervalText = Trim(GetWindowTextString(m_settingsRefreshIntervalEdit));
+            if (TryParseRefreshIntervalMilliseconds(intervalText, parsedMs)) {
+                m_refreshIntervalText = intervalText;
+                m_refreshIntervalMs = parsedMs;
+                if (m_periodicRefreshEnabled)
+                    ApplyRefreshTimer();
+            }
+            else if (code == EN_KILLFOCUS) {
+                SetWindowTextSafe(m_settingsRefreshIntervalEdit, m_refreshIntervalText);
+                SetStatusText(L"Refresh interval must be at least 1 second, e.g. 5s, 3s, or 10s.");
+            }
         }
         else if (id == IDC_SETTINGS_ALERT_FILTER && code == CBN_SELCHANGE) {
             m_alertFilterUnplannedOnly = SendMessageW(m_settingsFilterCombo, CB_GETCURSEL, 0, 0) == 0;
@@ -1508,6 +1597,9 @@ private:
     HWND m_settingsWnd = nullptr;
     HWND m_settingsFilterCombo = nullptr;
     HWND m_settingsOrderCombo = nullptr;
+    HWND m_settingsRefreshOffRadio = nullptr;
+    HWND m_settingsRefreshOnRadio = nullptr;
+    HWND m_settingsRefreshIntervalEdit = nullptr;
     HWND m_chatHistory = nullptr;
     HWND m_chatEdit = nullptr;
     HWND m_chatSendBtn = nullptr;
@@ -1527,6 +1619,9 @@ private:
     std::wstring m_alertOrder = L"Road";
     std::wstring m_alertsEndpoint = L"https://www.trafficengland.com/traffic-alerts";
     std::wstring m_serverBaseUrl = L"http://localhost:8080";
+    bool m_periodicRefreshEnabled = true;
+    std::wstring m_refreshIntervalText = L"300s";
+    UINT m_refreshIntervalMs = 5 * 60 * 1000;
     std::atomic_bool m_serverRequestInProgress{ false };
     bool m_hasPendingNoteLocation = false;
     double m_pendingNoteLat = 0.0;
