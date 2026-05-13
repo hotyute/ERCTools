@@ -1040,7 +1040,8 @@ private:
 
     static bool HasLaneClosureOverlay(const TrafficAlert& alert)
     {
-        return alert.lanesClosed > 0 || alert.lanesTotal > 0 || !alert.laneImageUrls.empty();
+        return alert.lanesClosed > 0 || alert.lanesTotal > 0 ||
+            !alert.laneImageUrls.empty() || !alert.laneClosedStates.empty();
     }
 
     ComPtr<ID2D1Bitmap> LoadCachedLaneBitmap(const std::wstring& url)
@@ -1091,6 +1092,8 @@ private:
 
         D2D1_POINT_2F marker = GeoToScreen(view, alert->latitude, alert->longitude);
         int total = alert->lanesTotal > 0 ? alert->lanesTotal : static_cast<int>(alert->laneImageUrls.size());
+        if (total == 0)
+            total = static_cast<int>(alert->laneClosedStates.size());
         total = ClampValue(total, 1, 8);
         int closed = ClampValue(alert->lanesClosed, 0, total);
         if (closed == 0 && alert->lanesTotal == 0 && !alert->laneImageUrls.empty())
@@ -1135,8 +1138,12 @@ private:
                     drewBitmap = true;
                 }
             }
-            if (!drewBitmap)
-                DrawFallbackLaneIcon(x, y, icon, i < closed);
+            if (!drewBitmap) {
+                bool laneClosed = i < closed;
+                if (i < static_cast<int>(alert->laneClosedStates.size()))
+                    laneClosed = alert->laneClosedStates[static_cast<size_t>(i)];
+                DrawFallbackLaneIcon(x, y, icon, laneClosed);
+            }
             x += icon + gap;
         }
     }

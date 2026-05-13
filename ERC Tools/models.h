@@ -28,6 +28,7 @@ struct TrafficAlert
     std::wstring severity;
     std::wstring updatedText;
     std::vector<std::wstring> laneImageUrls;
+    std::vector<bool> laneClosedStates;
     int lanesClosed = 0;
     int lanesTotal = 0;
     double latitude = 0.0;

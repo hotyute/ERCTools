@@ -120,6 +120,9 @@ static std::wstring NormalizeAlertDescription(const std::wstring& description)
     return Trim(description);
 }
 
+static json::const_iterator FindJsonKeyInsensitive(const json& obj, const char* key);
+static bool TryGetArrayByKeys(const json& obj, std::initializer_list<const char*> keys, const json*& arrOut);
+
 static std::wstring ExtractLabeledAlertField(const std::wstring& description, const wchar_t* label)
 {
     std::wstring normalized = NormalizeAlertDescription(description);
@@ -207,8 +210,14 @@ static bool ExtractLaneClosureCountsFromImages(const std::wstring& html, int& cl
             continue;
 
         ++totalOut;
-        if (alt.find(L"closed") != std::wstring::npos || src.find(L"closed") != std::wstring::npos)
+        if (alt.find(L"closed") != std::wstring::npos ||
+            src.find(L"closed") != std::wstring::npos ||
+            src.find(L"redx") != std::wstring::npos ||
+            src.find(L"red_x") != std::wstring::npos ||
+            src.find(L"red-x") != std::wstring::npos)
+        {
             ++closedOut;
+        }
     }
 
     return totalOut > 0;
@@ -276,12 +285,12 @@ static void ApplyLaneImageMetadata(TrafficAlert& alert, const std::wstring& html
 
     int imageClosed = 0;
     int imageTotal = 0;
-    if (ExtractLaneClosureCountsFromImages(html, imageClosed, imageTotal)) {
+    if (ExtractLaneClosureCountsFromImages(html, imageClosed, imageTotal) && imageClosed > 0) {
         alert.lanesClosed = imageClosed;
         alert.lanesTotal = imageTotal;
         AppendLaneClosureLineIfMissing(alert);
     }
-    else if (alert.lanesTotal == 0 && !alert.laneImageUrls.empty()) {
+    else if (alert.lanesTotal == 0 && alert.lanesClosed > 0 && !alert.laneImageUrls.empty()) {
         alert.lanesTotal = static_cast<int>(alert.laneImageUrls.size());
         AppendLaneClosureLineIfMissing(alert);
     }
@@ -324,6 +333,123 @@ static bool ExtractLaneClosureCounts(const std::wstring& text, int& closedOut, i
     }
 
     return false;
+}
+
+static bool IsClosedLaneStatus(const std::wstring& status)
+{
+    std::wstring lower = ToLower(Trim(status));
+    return lower.find(L"closed") != std::wstring::npos ||
+        lower.find(L"blocked") != std::wstring::npos ||
+        lower.find(L"closure") != std::wstring::npos;
+}
+
+static bool TryGetBoolByKeys(const json& obj, std::initializer_list<const char*> keys, bool& out)
+{
+    if (!obj.is_object())
+        return false;
+
+    for (const char* key : keys) {
+        auto it = FindJsonKeyInsensitive(obj, key);
+        if (it == obj.end())
+            continue;
+
+        if (it->is_boolean()) {
+            out = it->get<bool>();
+            return true;
+        }
+
+        if (it->is_number_integer()) {
+            out = it->get<int>() != 0;
+            return true;
+        }
+
+        std::wstring text = ToLower(Trim(JsonValueToText(*it)));
+        if (text == L"true" || text == L"yes" || text == L"1") {
+            out = true;
+            return true;
+        }
+        if (text == L"false" || text == L"no" || text == L"0") {
+            out = false;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void ApplyLaneClosureTextMetadata(TrafficAlert& alert, const std::wstring& text)
+{
+    int textClosed = 0;
+    int textTotal = 0;
+    if (ExtractLaneClosureCounts(text, textClosed, textTotal)) {
+        alert.lanesClosed = textClosed;
+        alert.lanesTotal = textTotal;
+        alert.laneClosedStates.clear();
+        AppendLaneClosureLineIfMissing(alert);
+    }
+}
+
+static void ApplyStructuredLaneMetadata(TrafficAlert& alert, const json& props, const json& obj)
+{
+    std::wstring laneDescription = PickString(props, {
+        "laneClosureDescription", "lane closure description", "lanesClosed", "lanes closed",
+        "closedLanes", "closed lanes", "laneClosures", "lane closures"
+        });
+    if (laneDescription.empty())
+        laneDescription = PickString(obj, {
+            "laneClosureDescription", "lane closure description", "lanesClosed", "lanes closed",
+            "closedLanes", "closed lanes", "laneClosures", "lane closures"
+            });
+
+    if (!laneDescription.empty())
+        ApplyLaneClosureTextMetadata(alert, laneDescription);
+
+    bool fullClosure = false;
+    bool hasFullClosure = TryGetBoolByKeys(props, { "fullClosure", "full closure" }, fullClosure) ||
+        TryGetBoolByKeys(obj, { "fullClosure", "full closure" }, fullClosure);
+
+    const json* lanes = nullptr;
+    if (!TryGetArrayByKeys(props, { "eventLanes", "event lanes", "lanes", "laneStates", "lane states" }, lanes))
+        TryGetArrayByKeys(obj, { "eventLanes", "event lanes", "lanes", "laneStates", "lane states" }, lanes);
+
+    if (lanes && !lanes->empty()) {
+        std::vector<bool> laneClosedStates;
+        int closed = 0;
+
+        for (const json& lane : *lanes) {
+            std::wstring status = PickString(lane, {
+                "laneStatus", "lane status", "status", "state", "closureStatus", "closure status"
+                });
+            std::wstring name = PickString(lane, {
+                "laneName", "lane name", "name", "label", "displayName", "display name"
+                });
+
+            if (status.empty() && lane.is_string())
+                status = JsonValueToText(lane);
+            if (status.empty() && name.empty())
+                continue;
+
+            bool isClosed = IsClosedLaneStatus(status);
+            laneClosedStates.push_back(isClosed);
+            if (isClosed)
+                ++closed;
+        }
+
+        if (!laneClosedStates.empty() && (closed > 0 || (hasFullClosure && fullClosure))) {
+            alert.laneClosedStates = std::move(laneClosedStates);
+            alert.lanesTotal = static_cast<int>(alert.laneClosedStates.size());
+            alert.lanesClosed = fullClosure ? alert.lanesTotal : closed;
+        }
+    }
+
+    if (hasFullClosure) {
+        if (fullClosure && alert.lanesTotal > 0) {
+            alert.lanesClosed = alert.lanesTotal;
+            alert.laneClosedStates.assign(static_cast<size_t>(alert.lanesTotal), true);
+        }
+    }
+
+    AppendLaneClosureLineIfMissing(alert);
 }
 
 static bool LooksLikeTrafficEnglandDescription(const std::wstring& text)
@@ -398,7 +524,8 @@ static std::wstring BuildTrafficEnglandDescriptionFromFields(const json& props, 
         "normalTime", "normal time"
         })));
     AppendDescriptionLine(description, BuildLabeledLine(L"Lanes Closed", pick({
-        "lanesClosed", "lanes closed", "closedLanes", "closed lanes", "laneClosures", "lane closures"
+        "laneClosureDescription", "lane closure description", "lanesClosed", "lanes closed",
+        "closedLanes", "closed lanes", "laneClosures", "lane closures"
         })));
 
     return description;
@@ -797,14 +924,20 @@ TrafficAlert ParseAlertObject(const json& obj)
         "description", "details", "detail", "message", "fullText", "full text",
         "eventDescription", "event_description", "event description", "comment", "comments",
         "disseminationText", "dissemination text", "publicDescription", "public description",
-        "gdp", "popup", "popupContent", "popup content", "content", "html", "info", "information"
+        "gdp", "gdpFormatted", "formatDesc", "formattedDescription", "formatted description",
+        "additionalDescription", "additional description", "additionalDescriptionFormatted",
+        "additional description formatted", "popup", "popupContent", "popup content",
+        "content", "html", "info", "information"
         });
     if (rawDescription.empty())
         rawDescription = PickString(obj, {
             "description", "details", "detail", "message", "fullText", "full text",
             "eventDescription", "event_description", "event description", "comment", "comments",
             "disseminationText", "dissemination text", "publicDescription", "public description",
-            "gdp", "popup", "popupContent", "popup content", "content", "html", "info", "information"
+            "gdp", "gdpFormatted", "formatDesc", "formattedDescription", "formatted description",
+            "additionalDescription", "additional description", "additionalDescriptionFormatted",
+            "additional description formatted", "popup", "popupContent", "popup content",
+            "content", "html", "info", "information"
             });
     a.description = NormalizeAlertDescription(rawDescription);
     if (a.description.empty())
@@ -887,6 +1020,7 @@ TrafficAlert ParseAlertObject(const json& obj)
 
     ExtractLaneClosureCounts(a.description, a.lanesClosed, a.lanesTotal);
     ApplyLaneImageMetadata(a, rawDescription);
+    ApplyStructuredLaneMetadata(a, *props, obj);
     AppendLaneClosureLineIfMissing(a);
 
     return a;
