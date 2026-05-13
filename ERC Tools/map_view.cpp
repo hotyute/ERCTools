@@ -998,9 +998,8 @@ private:
         return m_unknownBrush.Get();
     }
 
-    void DrawMarkers()
+    void DrawMarkers(const ViewState& view)
     {
-        const ViewState view = BuildViewState(32.0);
         const int width = view.width;
         const int height = view.height;
 
@@ -1152,7 +1151,7 @@ private:
 
 
 
-    void DrawCityAnchors()
+    void DrawCityAnchors(const ViewState& view)
     {
         static const GeoPoint cities[] = {
             { 51.5074, -0.1278 }, { 52.4862, -1.8904 }, { 53.4808, -2.2426 },
@@ -1160,7 +1159,6 @@ private:
             { 50.8198, -1.0880 }, { 54.9783, -1.6178 }
         };
 
-        const ViewState view = BuildViewState(16.0);
         const int width = view.width;
         const int height = view.height;
 
@@ -1177,12 +1175,11 @@ private:
         }
     }
 
-    void DrawNotes()
+    void DrawNotes(const ViewState& view)
     {
         if (!m_rt)
             return;
 
-        const ViewState view = BuildViewState(220.0);
         int width = view.width;
         int height = view.height;
 
@@ -1311,12 +1308,12 @@ private:
         return true;
     }
 
-    void DrawSceneOverlays()
+    void DrawSceneOverlays(const ViewState& overlayView, const ViewState& boundaryView)
     {
-        DrawUkBoundary();
-        DrawCityAnchors();
-        DrawNotes();
-        DrawMarkers();
+        DrawUkBoundary(boundaryView);
+        DrawCityAnchors(overlayView);
+        DrawNotes(overlayView);
+        DrawMarkers(overlayView);
     }
 
     std::vector<D2D1_RECT_F> BuildExposedSceneStrips(const ViewState& view, const D2D1_RECT_F& cachedDest) const
@@ -1360,7 +1357,7 @@ private:
             DrawTilesInClip(strip);
     }
 
-    void DrawSceneOverlaysInClip(const D2D1_RECT_F& clip)
+    void DrawSceneOverlaysInClip(const D2D1_RECT_F& clip, const ViewState& overlayView, const ViewState& boundaryView)
     {
         if (!m_rt || clip.right <= clip.left || clip.bottom <= clip.top)
             return;
@@ -1371,20 +1368,20 @@ private:
         m_overlayClip = clip;
 
         m_rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        DrawSceneOverlays();
+        DrawSceneOverlays(overlayView, boundaryView);
         m_rt->PopAxisAlignedClip();
 
         m_hasOverlayClip = hadClip;
         m_overlayClip = previousClip;
     }
 
-    void DrawExposedCachedSceneEdges(const std::vector<D2D1_RECT_F>& strips)
+    void DrawExposedCachedSceneEdges(const std::vector<D2D1_RECT_F>& strips, const ViewState& overlayView, const ViewState& boundaryView)
     {
         // The cached scene is only the previous viewport. Draw full overlays just
         // into newly exposed strips so panning reveals boundary/fill/markers ahead
         // of the cursor without paying to redraw the whole map each frame.
         for (const D2D1_RECT_F& strip : strips)
-            DrawSceneOverlaysInClip(strip);
+            DrawSceneOverlaysInClip(strip, overlayView, boundaryView);
     }
 
     void OnPaint()
@@ -1400,6 +1397,8 @@ private:
             const bool interactive = m_interactivePan;
             m_interactiveTileRequestsThisFrame = 0;
             const ViewState view = BuildViewState();
+            const ViewState overlayView = BuildViewState(220.0);
+            const ViewState boundaryView = BuildViewState(kBoundaryDrawMarginPixels);
             bool drewCachedScene = false;
             D2D1_RECT_F cachedSceneDest{};
 
@@ -1408,13 +1407,13 @@ private:
                 if (drewCachedScene) {
                     const std::vector<D2D1_RECT_F> exposedStrips = BuildExposedSceneStrips(view, cachedSceneDest);
                     DrawExposedCachedSceneTiles(exposedStrips);
-                    DrawExposedCachedSceneEdges(exposedStrips);
+                    DrawExposedCachedSceneEdges(exposedStrips, overlayView, boundaryView);
                 }
             }
 
             if (!drewCachedScene) {
                 DrawTiles(interactive);
-                DrawSceneOverlays();
+                DrawSceneOverlays(overlayView, boundaryView);
 
                 if (!interactive) {
                     m_rt->Flush();
@@ -1686,12 +1685,11 @@ private:
         m_rt->DrawGeometry(geom.Get(), m_outlineStrokeBrush.Get(), 2.0f);
     }
 
-    void DrawUkBoundary()
+    void DrawUkBoundary(const ViewState& view)
     {
         if (m_ukBoundaryRings.empty())
             return;
 
-        const ViewState view = BuildViewState(kBoundaryDrawMarginPixels);
         // Keep the boundary fill path stable while panning/zooming. Switching from
         // full polygon fill to viewport fill solely because the user is interacting
         // changes the apparent tint and causes obvious flicker at mid zoom levels.
