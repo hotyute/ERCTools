@@ -1244,7 +1244,7 @@ private:
         m_sceneBitmapCenterWorld = view.centerWorld;
     }
 
-    bool DrawCachedScene(const ViewState& view)
+    bool DrawCachedScene(const ViewState& view, D2D1_RECT_F* destOut = nullptr)
     {
         if (!m_rt || !m_sceneBitmap || m_sceneBitmapWidth <= 0 || m_sceneBitmapHeight <= 0)
             return false;
@@ -1279,7 +1279,48 @@ private:
             centerY + scaledHeight * 0.5f);
 
         m_rt->DrawBitmap(m_sceneBitmap.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        if (destOut)
+            *destOut = dest;
         return true;
+    }
+
+    void DrawSceneOverlays()
+    {
+        DrawUkBoundary();
+        DrawCityAnchors();
+        DrawNotes();
+        DrawMarkers();
+    }
+
+    void DrawSceneOverlaysInClip(const D2D1_RECT_F& clip)
+    {
+        if (!m_rt || clip.right <= clip.left || clip.bottom <= clip.top)
+            return;
+
+        m_rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        DrawSceneOverlays();
+        m_rt->PopAxisAlignedClip();
+    }
+
+    void DrawExposedCachedSceneEdges(const ViewState& view, const D2D1_RECT_F& cachedDest)
+    {
+        if (!m_rt)
+            return;
+
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float left = ClampValue(cachedDest.left, 0.0f, width);
+        const float top = ClampValue(cachedDest.top, 0.0f, height);
+        const float right = ClampValue(cachedDest.right, 0.0f, width);
+        const float bottom = ClampValue(cachedDest.bottom, 0.0f, height);
+
+        // The cached scene is only the previous viewport. Draw full overlays just
+        // into newly exposed strips so panning reveals boundary/fill/markers ahead
+        // of the cursor without paying to redraw the whole map each frame.
+        DrawSceneOverlaysInClip(D2D1::RectF(0.0f, 0.0f, left, height));
+        DrawSceneOverlaysInClip(D2D1::RectF(right, 0.0f, width, height));
+        DrawSceneOverlaysInClip(D2D1::RectF(left, 0.0f, right, top));
+        DrawSceneOverlaysInClip(D2D1::RectF(left, bottom, right, height));
     }
 
     void OnPaint()
@@ -1295,18 +1336,18 @@ private:
             const bool interactive = m_interactivePan;
             const ViewState view = BuildViewState();
             bool drewCachedScene = false;
+            D2D1_RECT_F cachedSceneDest{};
 
             if (interactive && m_sceneBitmap && m_zoom == m_sceneBitmapZoom) {
                 DrawTiles(true);
-                drewCachedScene = DrawCachedScene(view);
+                drewCachedScene = DrawCachedScene(view, &cachedSceneDest);
+                if (drewCachedScene)
+                    DrawExposedCachedSceneEdges(view, cachedSceneDest);
             }
 
             if (!drewCachedScene) {
                 DrawTiles(interactive);
-                DrawUkBoundary();
-                DrawCityAnchors();
-                DrawNotes();
-                DrawMarkers();
+                DrawSceneOverlays();
 
                 if (!interactive) {
                     m_rt->Flush();
