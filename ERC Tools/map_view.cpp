@@ -278,10 +278,10 @@ public:
                 cached.maxLon = MaxValue(cached.maxLon, pt.lon);
             }
             cached.segmentsByMinLat.reserve(ring.size());
-            for (size_t i = 1; i < ring.size(); ++i) {
+            for (size_t i = 0; i < ring.size(); ++i) {
                 BoundarySegment segment;
-                segment.a = ring[i - 1];
-                segment.b = ring[i];
+                segment.a = ring[i];
+                segment.b = ring[(i + 1) % ring.size()];
                 segment.minLat = MinValue(segment.a.lat, segment.b.lat);
                 segment.maxLat = MaxValue(segment.a.lat, segment.b.lat);
                 segment.minLon = MinValue(segment.a.lon, segment.b.lon);
@@ -1441,9 +1441,65 @@ private:
         if (!m_rt || !m_outlineFillBrush)
             return;
 
-        m_rt->FillRectangle(
-            D2D1::RectF(0.0f, 0.0f, static_cast<float>(view.width), static_cast<float>(view.height)),
-            m_outlineFillBrush.Get());
+        // At close zoom levels, filling the whole viewport when the centre is on
+        // land paints nearby sea green. Instead, fill scanline spans inside the
+        // visible boundary. This keeps the stable high-zoom tint without leaking
+        // it outside the coastline.
+        constexpr int kFillBandHeight = 6;
+        std::vector<float> intersections;
+        intersections.reserve(16);
+
+        for (int y = 0; y < view.height; y += kFillBandHeight) {
+            const int bandBottom = MinValue(y + kFillBandHeight, view.height);
+            const double sampleY = (static_cast<double>(y) + bandBottom) * 0.5;
+            const double worldY = view.centerWorld.y + (sampleY - view.height * 0.5);
+            const GeoPoint sampleGeo = WorldToGeo(view.centerWorld.x, worldY, m_zoom);
+            const double lat = sampleGeo.lat;
+
+            intersections.clear();
+            bool centreInsideRing = false;
+
+            for (const BoundaryRing& ring : m_ukBoundaryRings) {
+                if (ring.segmentsByMinLat.empty() || lat < ring.minLat || lat > ring.maxLat)
+                    continue;
+
+                if (!centreInsideRing && IsGeoPointInRing(ring, lat, NormalizeLongitude(m_centerLon)))
+                    centreInsideRing = true;
+
+                for (const BoundarySegment& segment : ring.segmentsByMinLat) {
+                    if (segment.minLat > lat)
+                        break;
+                    if (segment.maxLat <= lat || std::abs(segment.b.lat - segment.a.lat) < 1e-12)
+                        continue;
+
+                    const double t = (lat - segment.a.lat) / (segment.b.lat - segment.a.lat);
+                    const double lon = segment.a.lon + (segment.b.lon - segment.a.lon) * t;
+                    intersections.push_back(GeoToScreen(view, lat, lon).x);
+                }
+            }
+
+            if (intersections.empty()) {
+                if (centreInsideRing) {
+                    m_rt->FillRectangle(
+                        D2D1::RectF(0.0f, static_cast<float>(y), static_cast<float>(view.width), static_cast<float>(bandBottom)),
+                        m_outlineFillBrush.Get());
+                }
+                continue;
+            }
+
+            std::sort(intersections.begin(), intersections.end());
+
+            for (size_t i = 0; i + 1 < intersections.size(); i += 2) {
+                float left = MaxValue(intersections[i], 0.0f);
+                float right = MinValue(intersections[i + 1], static_cast<float>(view.width));
+                if (right <= left)
+                    continue;
+
+                m_rt->FillRectangle(
+                    D2D1::RectF(left, static_cast<float>(y), right, static_cast<float>(bandBottom)),
+                    m_outlineFillBrush.Get());
+            }
+        }
     }
 
     void DrawBoundaryRingFull(const BoundaryRing& ring)
