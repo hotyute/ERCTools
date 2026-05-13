@@ -72,6 +72,8 @@ constexpr float kMapWaterG = 0.91f;
 constexpr float kMapWaterB = 0.98f;
 constexpr int kMaxFallbackTileZoomDelta = 5;
 constexpr double kBoundaryDrawMarginPixels = 512.0;
+constexpr double kMinCachedSceneScale = 0.25;
+constexpr double kMaxCachedSceneScale = 4.0;
 std::atomic<int> g_activeTileDownloads{ 0 };
 
 // ============================================================
@@ -121,6 +123,7 @@ public:
     void SetAlerts(const std::vector<TrafficAlert>& alerts)
     {
         m_alerts = alerts;
+        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -130,12 +133,14 @@ public:
             return;
 
         m_notes = notes;
+        InvalidateSceneCache();
         Invalidate();
     }
 
     void SetSelectedId(const std::wstring& id)
     {
         m_selectedId = id;
+        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -287,6 +292,7 @@ public:
             m_ukBoundaryRings.push_back(std::move(cached));
         }
 
+        InvalidateSceneCache();
         Invalidate();
         return true;
     }
@@ -365,6 +371,7 @@ private:
                 UINT w = static_cast<UINT>(std::max<LONG>(1L, LOWORD(lParam)));
                 UINT h = static_cast<UINT>(std::max<LONG>(1L, HIWORD(lParam)));
                 m_rt->Resize(D2D1::SizeU(w, h));
+                InvalidateSceneCache();
             }
             return 0;
 
@@ -559,6 +566,13 @@ private:
     {
         if (m_hwnd)
             InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+
+    void InvalidateSceneCache()
+    {
+        m_sceneBitmap.Reset();
+        m_sceneBitmapWidth = 0;
+        m_sceneBitmapHeight = 0;
     }
 
     void MoveCenterByPixels(int dx, int dy)
@@ -757,6 +771,7 @@ private:
         m_textBrush.Reset();
         m_noteBrush.Reset();
         m_noteTextFormat.Reset();
+        InvalidateSceneCache();
     }
 
     void ClearTileCache()
@@ -1191,6 +1206,75 @@ private:
         m_rt->DrawLine(a, b, m_textBrush.Get(), 2.0f);
     }
 
+
+    void UpdateSceneCache(const ViewState& view)
+    {
+        if (!m_rt)
+            return;
+
+        const D2D1_SIZE_U pixelSize = m_rt->GetPixelSize();
+        if (pixelSize.width == 0 || pixelSize.height == 0)
+            return;
+
+        if (!m_sceneBitmap ||
+            m_sceneBitmapWidth != static_cast<int>(pixelSize.width) ||
+            m_sceneBitmapHeight != static_cast<int>(pixelSize.height))
+        {
+            m_sceneBitmap.Reset();
+            D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(m_rt->GetPixelFormat());
+            if (FAILED(m_rt->CreateBitmap(pixelSize, nullptr, 0, &props, &m_sceneBitmap)))
+                return;
+
+            m_sceneBitmapWidth = static_cast<int>(pixelSize.width);
+            m_sceneBitmapHeight = static_cast<int>(pixelSize.height);
+        }
+
+        D2D1_POINT_2U destPoint = D2D1::Point2U(0, 0);
+        D2D1_RECT_U srcRect = D2D1::RectU(0, 0, pixelSize.width, pixelSize.height);
+        if (FAILED(m_sceneBitmap->CopyFromRenderTarget(&destPoint, m_rt.Get(), &srcRect))) {
+            InvalidateSceneCache();
+            return;
+        }
+
+        m_sceneBitmapZoom = m_zoom;
+        m_sceneBitmapCenterWorld = view.centerWorld;
+    }
+
+    bool DrawCachedScene(const ViewState& view)
+    {
+        if (!m_rt || !m_sceneBitmap || m_sceneBitmapWidth <= 0 || m_sceneBitmapHeight <= 0)
+            return false;
+
+        const int zoomDelta = m_zoom - m_sceneBitmapZoom;
+        const double scale = std::ldexp(1.0, zoomDelta);
+        if (scale < kMinCachedSceneScale || scale > kMaxCachedSceneScale)
+            return false;
+
+        const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
+        double dx = m_sceneBitmapCenterWorld.x * scale - view.centerWorld.x;
+        if (dx > worldSize * 0.5)
+            dx -= worldSize;
+        else if (dx < -worldSize * 0.5)
+            dx += worldSize;
+
+        const double dy = m_sceneBitmapCenterWorld.y * scale - view.centerWorld.y;
+        if (std::abs(dx) > view.width * 0.75 || std::abs(dy) > view.height * 0.75)
+            return false;
+
+        const float scaledWidth = static_cast<float>(m_sceneBitmapWidth * scale);
+        const float scaledHeight = static_cast<float>(m_sceneBitmapHeight * scale);
+        const float centerX = static_cast<float>(view.width * 0.5 + dx);
+        const float centerY = static_cast<float>(view.height * 0.5 + dy);
+        const D2D1_RECT_F dest = D2D1::RectF(
+            centerX - scaledWidth * 0.5f,
+            centerY - scaledHeight * 0.5f,
+            centerX + scaledWidth * 0.5f,
+            centerY + scaledHeight * 0.5f);
+
+        m_rt->DrawBitmap(m_sceneBitmap.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        return true;
+    }
+
     void OnPaint()
     {
         PAINTSTRUCT ps{};
@@ -1202,12 +1286,27 @@ private:
             m_rt->Clear(D2D1::ColorF(kMapWaterR, kMapWaterG, kMapWaterB, 1.0f));
 
             const bool interactive = m_interactivePan;
+            const ViewState view = BuildViewState();
+            bool drewCachedScene = false;
 
-            DrawTiles(interactive);
-            DrawUkBoundary();
-            DrawCityAnchors();
-            DrawNotes();
-            DrawMarkers();
+            if (interactive) {
+                DrawTiles(true);
+                drewCachedScene = DrawCachedScene(view);
+            }
+
+            if (!drewCachedScene) {
+                DrawTiles(interactive);
+                DrawUkBoundary();
+                DrawCityAnchors();
+                DrawNotes();
+                DrawMarkers();
+
+                if (!interactive) {
+                    m_rt->Flush();
+                    UpdateSceneCache(view);
+                }
+            }
+
             DrawMapChrome();
 
             HRESULT hr = m_rt->EndDraw();
@@ -1476,6 +1575,11 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_textBrush;
     ComPtr<ID2D1SolidColorBrush> m_noteBrush;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
+    ComPtr<ID2D1Bitmap> m_sceneBitmap;
+    int m_sceneBitmapWidth = 0;
+    int m_sceneBitmapHeight = 0;
+    int m_sceneBitmapZoom = kDefaultZoom;
+    WorldPoint m_sceneBitmapCenterWorld{};
     std::vector<BoundaryRing> m_ukBoundaryRings;
 
     std::mutex m_tileMutex;
