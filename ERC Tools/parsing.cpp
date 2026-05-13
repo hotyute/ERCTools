@@ -241,6 +241,52 @@ static std::vector<std::wstring> ExtractImageUrls(const std::wstring& html)
     return laneUrls.empty() ? urls : laneUrls;
 }
 
+
+static std::wstring BuildLaneClosureLine(int closed, int total)
+{
+    if (total <= 0)
+        return L"";
+    closed = ClampValue(closed, 0, total);
+    return L"Lanes Closed : " + std::to_wstring(closed) + L" of " + std::to_wstring(total);
+}
+
+static void AppendLaneClosureLineIfMissing(TrafficAlert& alert)
+{
+    std::wstring line = BuildLaneClosureLine(alert.lanesClosed, alert.lanesTotal);
+    if (line.empty())
+        return;
+
+    std::wstring lowerDescription = ToLower(alert.description);
+    if (lowerDescription.find(L"lanes closed") != std::wstring::npos &&
+        lowerDescription.find(L" of ") != std::wstring::npos)
+    {
+        return;
+    }
+
+    if (!alert.description.empty())
+        alert.description += L"\r\n";
+    alert.description += line;
+}
+
+static void ApplyLaneImageMetadata(TrafficAlert& alert, const std::wstring& html)
+{
+    std::vector<std::wstring> imageUrls = ExtractImageUrls(html);
+    if (!imageUrls.empty())
+        alert.laneImageUrls = std::move(imageUrls);
+
+    int imageClosed = 0;
+    int imageTotal = 0;
+    if (ExtractLaneClosureCountsFromImages(html, imageClosed, imageTotal)) {
+        alert.lanesClosed = imageClosed;
+        alert.lanesTotal = imageTotal;
+        AppendLaneClosureLineIfMissing(alert);
+    }
+    else if (alert.lanesTotal == 0 && !alert.laneImageUrls.empty()) {
+        alert.lanesTotal = static_cast<int>(alert.laneImageUrls.size());
+        AppendLaneClosureLineIfMissing(alert);
+    }
+}
+
 static bool ExtractLaneClosureCounts(const std::wstring& text, int& closedOut, int& totalOut)
 {
     closedOut = 0;
@@ -551,6 +597,7 @@ static bool BuildHtmlAlertFromCells(const std::vector<std::wstring>& cells, size
     a.region = L"";
     a.hasLocation = false;
     ExtractLaneClosureCounts(a.description, a.lanesClosed, a.lanesTotal);
+    AppendLaneClosureLineIfMissing(a);
 
     alertOut = std::move(a);
     return true;
@@ -581,16 +628,7 @@ std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
 
         TrafficAlert a;
         if (BuildHtmlAlertFromCells(cells, idCounter, a)) {
-            a.laneImageUrls = ExtractImageUrls(rowHtml);
-            int imageClosed = 0;
-            int imageTotal = 0;
-            if (ExtractLaneClosureCountsFromImages(rowHtml, imageClosed, imageTotal)) {
-                a.lanesClosed = imageClosed;
-                a.lanesTotal = imageTotal;
-            }
-            else if (a.lanesTotal == 0 && !a.laneImageUrls.empty()) {
-                a.lanesTotal = static_cast<int>(a.laneImageUrls.size());
-            }
+            ApplyLaneImageMetadata(a, rowHtml);
             out.push_back(std::move(a));
         }
     }
@@ -606,16 +644,7 @@ std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
 
         TrafficAlert a;
         if (BuildHtmlAlertFromCells(cells, idCounter, a)) {
-            a.laneImageUrls = ExtractImageUrls(html);
-            int imageClosed = 0;
-            int imageTotal = 0;
-            if (ExtractLaneClosureCountsFromImages(html, imageClosed, imageTotal)) {
-                a.lanesClosed = imageClosed;
-                a.lanesTotal = imageTotal;
-            }
-            else if (a.lanesTotal == 0 && !a.laneImageUrls.empty()) {
-                a.lanesTotal = static_cast<int>(a.laneImageUrls.size());
-            }
+            ApplyLaneImageMetadata(a, html);
             out.push_back(std::move(a));
         }
     }
@@ -777,10 +806,6 @@ TrafficAlert ParseAlertObject(const json& obj)
             "disseminationText", "dissemination text", "publicDescription", "public description",
             "gdp", "popup", "popupContent", "popup content", "content", "html", "info", "information"
             });
-    a.laneImageUrls = ExtractImageUrls(rawDescription);
-    int rawImageClosed = 0;
-    int rawImageTotal = 0;
-    const bool hasRawImageLaneCounts = ExtractLaneClosureCountsFromImages(rawDescription, rawImageClosed, rawImageTotal);
     a.description = NormalizeAlertDescription(rawDescription);
     if (a.description.empty())
         a.description = BuildTrafficEnglandDescriptionFromFields(*props, obj);
@@ -861,13 +886,8 @@ TrafficAlert ParseAlertObject(const json& obj)
         a.severity = L"Unknown";
 
     ExtractLaneClosureCounts(a.description, a.lanesClosed, a.lanesTotal);
-    if (hasRawImageLaneCounts) {
-        a.lanesClosed = rawImageClosed;
-        a.lanesTotal = rawImageTotal;
-    }
-    else if (a.lanesTotal == 0 && !a.laneImageUrls.empty()) {
-        a.lanesTotal = static_cast<int>(a.laneImageUrls.size());
-    }
+    ApplyLaneImageMetadata(a, rawDescription);
+    AppendLaneClosureLineIfMissing(a);
 
     return a;
 }
@@ -945,15 +965,25 @@ std::vector<TrafficAlert> ParseTrafficAlerts(const std::string& text, std::wstri
 
                 if (item.is_array()) {
                     std::vector<std::wstring> cells;
+                    std::wstring rawRowHtml;
                     for (const auto& cell : item) {
-                        std::wstring value = NormalizeAlertDescription(JsonValueToAlertCellText(cell));
+                        std::wstring rawValue = JsonValueToAlertCellText(cell);
+                        if (!rawValue.empty()) {
+                            if (!rawRowHtml.empty())
+                                rawRowHtml += L" ";
+                            rawRowHtml += rawValue;
+                        }
+
+                        std::wstring value = NormalizeAlertDescription(rawValue);
                         if (!value.empty())
                             cells.push_back(value);
                     }
 
                     TrafficAlert a;
-                    if (BuildHtmlAlertFromCells(cells, jsonRowIdCounter, a))
+                    if (BuildHtmlAlertFromCells(cells, jsonRowIdCounter, a)) {
+                        ApplyLaneImageMetadata(a, rawRowHtml);
                         out.push_back(std::move(a));
+                    }
                 }
             };
 

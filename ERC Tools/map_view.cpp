@@ -618,7 +618,7 @@ private:
     std::wstring HitTestAlert(int x, int y) const
     {
         std::wstring bestId;
-        double bestDist = 14.0;
+        double bestDist = 28.0;
         const ViewState view = BuildViewState(bestDist + 8.0);
 
         for (size_t i = 0; i < m_alerts.size(); ++i) {
