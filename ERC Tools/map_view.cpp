@@ -72,8 +72,12 @@ constexpr float kMapWaterG = 0.91f;
 constexpr float kMapWaterB = 0.98f;
 constexpr int kMaxFallbackTileZoomDelta = 5;
 constexpr double kBoundaryDrawMarginPixels = 512.0;
-constexpr double kMinCachedSceneScale = 0.25;
-constexpr double kMaxCachedSceneScale = 4.0;
+// Reuse the cached scene for panning only. Scaling the cached composite during
+// wheel zoom subtly changes translucent fill colours, especially at very close
+// zoom levels, so zoom frames are rendered live while still using lightweight
+// tile loading/fallbacks.
+constexpr double kMinCachedSceneScale = 1.0;
+constexpr double kMaxCachedSceneScale = 1.0;
 std::atomic<int> g_activeTileDownloads{ 0 };
 
 // ============================================================
@@ -1246,7 +1250,10 @@ private:
             return false;
 
         const int zoomDelta = m_zoom - m_sceneBitmapZoom;
-        const double scale = std::ldexp(1.0, zoomDelta);
+        if (zoomDelta != 0)
+            return false;
+
+        const double scale = 1.0;
         if (scale < kMinCachedSceneScale || scale > kMaxCachedSceneScale)
             return false;
 
@@ -1289,7 +1296,7 @@ private:
             const ViewState view = BuildViewState();
             bool drewCachedScene = false;
 
-            if (interactive) {
+            if (interactive && m_sceneBitmap && m_zoom == m_sceneBitmapZoom) {
                 DrawTiles(true);
                 drewCachedScene = DrawCachedScene(view);
             }
