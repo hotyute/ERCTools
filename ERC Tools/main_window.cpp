@@ -32,6 +32,7 @@ constexpr int IDC_PANEL_TAB_BTN = 1021;
 constexpr int IDM_FILE_SETTINGS = 2001;
 constexpr int IDM_FILE_EXIT = 2002;
 constexpr int IDM_ABOUT = 2003;
+constexpr int IDM_ROADS_INCIDENT_FILTERS = 2004;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -45,7 +46,19 @@ constexpr int IDC_SETTINGS_REFRESH_ON_RADIO = 2110;
 constexpr int IDC_SETTINGS_REFRESH_INTERVAL_EDIT = 2111;
 constexpr int IDC_SETTINGS_REFRESH_LABEL = 2112;
 constexpr int IDC_SETTINGS_REFRESH_INTERVAL_LABEL = 2113;
+constexpr int IDC_INCIDENT_FILTERS_TITLE_LABEL = 2201;
+constexpr int IDC_INCIDENT_FILTERS_DESC_LABEL = 2202;
+constexpr int IDC_INCIDENT_FILTERS_SEVERITY_LABEL = 2203;
+constexpr int IDC_INCIDENT_FILTERS_SEVERE_CHECK = 2204;
+constexpr int IDC_INCIDENT_FILTERS_MODERATE_CHECK = 2205;
+constexpr int IDC_INCIDENT_FILTERS_MINOR_CHECK = 2206;
+constexpr int IDC_INCIDENT_FILTERS_UNKNOWN_CHECK = 2207;
+constexpr int IDC_INCIDENT_FILTERS_TYPE_LABEL = 2208;
+constexpr int IDC_INCIDENT_FILTERS_UNPLANNED_CHECK = 2209;
+constexpr int IDC_INCIDENT_FILTERS_PLANNED_CHECK = 2210;
+constexpr int IDC_INCIDENT_FILTERS_CLOSE_BTN = 2211;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
+constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
 
 struct FeedResult
 {
@@ -87,7 +100,22 @@ static std::wstring AppendPath(std::wstring base, const wchar_t* path)
     return base + path;
 }
 
-static SIZE MeasureControlText(HWND hwnd)
+static int MaxInt(int a, int b)
+{
+    return a > b ? a : b;
+}
+
+static int MinInt(int a, int b)
+{
+    return a < b ? a : b;
+}
+
+static LONG MaxLong(LONG a, LONG b)
+{
+    return a > b ? a : b;
+}
+
+static SIZE MeasureControlText(HWND hwnd, int wrapWidth = 0)
 {
     SIZE size{};
     if (!hwnd)
@@ -103,7 +131,17 @@ static SIZE MeasureControlText(HWND hwnd)
 
     HFONT font = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
     HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
-    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
+
+    if (wrapWidth > 0) {
+        RECT textRect{ 0, 0, wrapWidth, 0 };
+        DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &textRect, DT_CALCRECT | DT_LEFT | DT_WORDBREAK);
+        size.cx = textRect.right - textRect.left;
+        size.cy = textRect.bottom - textRect.top;
+    }
+    else {
+        GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
+    }
+
     if (oldFont)
         SelectObject(dc, oldFont);
     ReleaseDC(hwnd, dc);
@@ -113,16 +151,16 @@ static SIZE MeasureControlText(HWND hwnd)
 static int PreferredControlWidth(HWND hwnd, int padding, int minimum = 0, int maximum = 0)
 {
     SIZE textSize = MeasureControlText(hwnd);
-    int width = std::max(minimum, textSize.cx + padding);
+    int width = MaxInt(minimum, static_cast<int>(textSize.cx) + padding);
     if (maximum > 0)
-        width = std::min(width, maximum);
+        width = MinInt(width, maximum);
     return width;
 }
 
-static int PreferredControlHeight(HWND hwnd, int padding, int minimum = 0)
+static int PreferredControlHeight(HWND hwnd, int padding, int minimum = 0, int wrapWidth = 0)
 {
-    SIZE textSize = MeasureControlText(hwnd);
-    return std::max(minimum, textSize.cy + padding);
+    SIZE textSize = MeasureControlText(hwnd, wrapWidth > padding ? wrapWidth - padding : 0);
+    return MaxInt(minimum, static_cast<int>(textSize.cy) + padding);
 }
 
 static void SizeControlToText(HWND hwnd, int horizontalPadding, int verticalPadding, int minimumWidth = 0, int maximumWidth = 0, int minimumHeight = 0)
@@ -130,14 +168,36 @@ static void SizeControlToText(HWND hwnd, int horizontalPadding, int verticalPadd
     if (!hwnd)
         return;
 
+    const int width = PreferredControlWidth(hwnd, horizontalPadding, minimumWidth, maximumWidth);
     SetWindowPos(
         hwnd,
         nullptr,
         0,
         0,
-        PreferredControlWidth(hwnd, horizontalPadding, minimumWidth, maximumWidth),
-        PreferredControlHeight(hwnd, verticalPadding, minimumHeight),
+        width,
+        PreferredControlHeight(hwnd, verticalPadding, minimumHeight, width),
         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static int AutoLabelWidth(HWND hwnd, int maximumWidth = 0)
+{
+    return PreferredControlWidth(hwnd, 4, 0, maximumWidth);
+}
+
+static int AutoLabelHeight(HWND hwnd, int minimumHeight = 22, int wrapWidth = 0)
+{
+    return PreferredControlHeight(hwnd, 6, minimumHeight, wrapWidth);
+}
+
+static void SizeLabelToText(HWND hwnd, int maximumWidth = 0)
+{
+    SizeControlToText(hwnd, 4, 6, 0, maximumWidth, 22);
+}
+
+static void MoveLabelToText(HWND hwnd, int x, int y, int maximumWidth = 0)
+{
+    const int width = AutoLabelWidth(hwnd, maximumWidth);
+    MoveWindow(hwnd, x, y, width, AutoLabelHeight(hwnd, 22, width), TRUE);
 }
 
 static bool TryParseRefreshIntervalMilliseconds(const std::wstring& text, UINT& millisecondsOut)
@@ -409,6 +469,29 @@ private:
         return true;
     }
 
+    HWND CreateAutoLabel(HWND parent, int id, const wchar_t* text, int x = 0, int y = 0, HFONT font = nullptr, int maximumWidth = 0)
+    {
+        // Static text in this UI should size itself from its current font/text by default.
+        // Pass maximumWidth when a label is constrained by layout so the preferred height wraps.
+        HWND label = CreateWindowExW(
+            0,
+            L"STATIC",
+            text,
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            x, y, 0, 0,
+            parent,
+            reinterpret_cast<HMENU>(id),
+            m_hInst,
+            nullptr);
+        if (!label)
+            return nullptr;
+
+        SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font ? font : m_font), TRUE);
+        ApplyExplorerTheme(label);
+        SizeLabelToText(label, maximumWidth);
+        return label;
+    }
+
     static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         MainWindow* self = nullptr;
@@ -503,42 +586,10 @@ private:
 
         CreateMainMenu();
 
-        m_headerLabel = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"Traffic England Alerts",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            0, 0, 0, 0,
-            m_hwnd,
-            reinterpret_cast<HMENU>(IDC_HEADER_LABEL),
-            m_hInst,
-            nullptr);
-
-        m_searchLabel = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"Search",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            0, 0, 0, 0,
-            m_hwnd,
-            reinterpret_cast<HMENU>(IDC_SEARCH_LABEL),
-            m_hInst,
-            nullptr);
-
-        m_severityLabel = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"Severity",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            0, 0, 0, 0,
-            m_hwnd,
-            reinterpret_cast<HMENU>(IDC_SEVERITY_LABEL),
-            m_hInst,
-            nullptr);
-
-        m_noteLabel = CreateWindowExW(
-            0, L"STATIC", L"Map note (double-click map to choose a location)", WS_CHILD | WS_VISIBLE | SS_LEFT,
-            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_NOTE_LABEL), m_hInst, nullptr);
+        m_headerLabel = CreateAutoLabel(m_hwnd, IDC_HEADER_LABEL, L"Traffic England Alerts", 0, 0, m_headerFont);
+        m_searchLabel = CreateAutoLabel(m_hwnd, IDC_SEARCH_LABEL, L"Search");
+        m_severityLabel = CreateAutoLabel(m_hwnd, IDC_SEVERITY_LABEL, L"Severity");
+        m_noteLabel = CreateAutoLabel(m_hwnd, IDC_NOTE_LABEL, L"Map note (double-click map to choose a location)");
 
         m_panelTabBtn = CreateWindowExW(
             0,
@@ -645,11 +696,10 @@ private:
             return;
         }
 
-        for (HWND h : { m_searchLabel, m_severityLabel, m_noteLabel, m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
+        for (HWND h : { m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
-        SendMessageW(m_headerLabel, WM_SETFONT, reinterpret_cast<WPARAM>(m_headerFont), TRUE);
 
         SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, region, or description"));
         SendMessageW(m_chatEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Message local responders..."));
@@ -719,8 +769,8 @@ private:
         RECT rc{};
         GetClientRect(m_hwnd, &rc);
 
-        LONG width = std::max<LONG>(1L, rc.right - rc.left);
-        LONG height = std::max<LONG>(1L, rc.bottom - rc.top);
+        LONG width = MaxLong(1L, rc.right - rc.left);
+        LONG height = MaxLong(1L, rc.bottom - rc.top);
 
         const int pad = 16;
         const int labelH = 22;
@@ -729,13 +779,13 @@ private:
 
         const LONG refreshW = 132;
         const int topY = 12;
-        const int headerH = PreferredControlHeight(m_headerLabel, 8, 28);
-        const LONG headerMaxW = std::max<LONG>(200L, width - refreshW - pad * 3);
+        const LONG headerMaxW = MaxLong(200L, width - refreshW - static_cast<LONG>(pad * 3));
         const LONG headerW = PreferredControlWidth(m_headerLabel, 8, 200, static_cast<int>(headerMaxW));
+        const int headerH = PreferredControlHeight(m_headerLabel, 8, 28, static_cast<int>(headerW));
         MoveWindow(m_headerLabel, pad, topY, headerW, headerH, TRUE);
         MoveWindow(m_refreshBtn, width - refreshW - pad, topY, refreshW, controlH, TRUE);
 
-        const int topBarH = topY + std::max(headerH, controlH) + 4;
+        const int topBarH = topY + MaxInt(headerH, controlH) + 4;
         int bodyTop = topBarH;
         int leftW = m_isSidePanelVisible ? 440 : 0;
         int detailsH = 185;
@@ -743,56 +793,62 @@ private:
 
         int leftX = pad;
         int leftY = bodyTop + pad;
-        int leftInnerW = std::max(10, leftW - pad * 2);
+        int leftInnerW = MaxInt(10, leftW - pad * 2);
 
         const int panelShow = m_isSidePanelVisible ? SW_SHOW : SW_HIDE;
         for (HWND h : { m_searchLabel, m_searchEdit, m_severityLabel, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn })
             ShowWindow(h, panelShow);
 
         if (m_isSidePanelVisible) {
-            MoveWindow(m_searchLabel, leftX, leftY, leftInnerW, labelH, TRUE);
-        MoveWindow(m_searchEdit, leftX, leftY + labelH + 2, leftInnerW, controlH, TRUE);
+            const int searchLabelW = AutoLabelWidth(m_searchLabel, leftInnerW);
+            const int searchLabelH = AutoLabelHeight(m_searchLabel, labelH, searchLabelW);
+            MoveLabelToText(m_searchLabel, leftX, leftY, leftInnerW);
+            MoveWindow(m_searchEdit, leftX, leftY + searchLabelH + 2, leftInnerW, controlH, TRUE);
 
-        const int severityY = leftY + labelH + controlH + 12;
-        MoveWindow(m_severityLabel, leftX, severityY, leftInnerW, labelH, TRUE);
-        MoveWindow(m_severityCombo, leftX, severityY + labelH + 2, leftInnerW, 180, TRUE);
+            const int severityY = leftY + searchLabelH + controlH + 12;
+            const int severityLabelW = AutoLabelWidth(m_severityLabel, leftInnerW);
+            const int severityLabelH = AutoLabelHeight(m_severityLabel, labelH, severityLabelW);
+            MoveLabelToText(m_severityLabel, leftX, severityY, leftInnerW);
+            MoveWindow(m_severityCombo, leftX, severityY + severityLabelH + 2, leftInnerW, 180, TRUE);
 
-        int listTop = severityY + labelH + controlH + 18;
-        int bodyHeight = height - bodyTop - statusH - pad * 2;
-        int listHeight = std::max(110, bodyHeight - (listTop - leftY) - detailsH - chatH - 58);
+            int listTop = severityY + severityLabelH + controlH + 18;
+            int bodyHeight = static_cast<int>(height) - bodyTop - statusH - pad * 2;
+            int listHeight = MaxInt(110, bodyHeight - (listTop - leftY) - detailsH - chatH - 58);
 
-        MoveWindow(m_listView, leftX, listTop, leftInnerW, listHeight, TRUE);
-        int detailsTop = listTop + listHeight + 10;
-        MoveWindow(m_detailsEdit, leftX, detailsTop, leftInnerW, detailsH, TRUE);
-        int chatTop = detailsTop + detailsH + 10;
-        MoveWindow(m_chatHistory, leftX, chatTop, leftInnerW, chatH - controlH - 8, TRUE);
-        MoveWindow(m_chatEdit, leftX, chatTop + chatH - controlH, leftInnerW - 72, controlH, TRUE);
-        MoveWindow(m_chatSendBtn, leftX + leftInnerW - 66, chatTop + chatH - controlH, 66, controlH, TRUE);
+            MoveWindow(m_listView, leftX, listTop, leftInnerW, listHeight, TRUE);
+            int detailsTop = listTop + listHeight + 10;
+            MoveWindow(m_detailsEdit, leftX, detailsTop, leftInnerW, detailsH, TRUE);
+            int chatTop = detailsTop + detailsH + 10;
+            MoveWindow(m_chatHistory, leftX, chatTop, leftInnerW, chatH - controlH - 8, TRUE);
+            MoveWindow(m_chatEdit, leftX, chatTop + chatH - controlH, leftInnerW - 72, controlH, TRUE);
+            MoveWindow(m_chatSendBtn, leftX + leftInnerW - 66, chatTop + chatH - controlH, 66, controlH, TRUE);
         }
 
         int mapX = (m_isSidePanelVisible ? leftW + pad : pad);
         int mapY = bodyTop + pad;
-        LONG mapW = std::max<LONG>(100L, width - mapX - pad);
-        LONG mapH = std::max<LONG>(100L, height - mapY - statusH - pad - 66);
+        LONG mapW = MaxLong(100L, width - mapX - pad);
+        LONG mapH = MaxLong(100L, height - mapY - statusH - pad - 66);
 
         MoveWindow(m_map.Hwnd(), mapX, mapY, mapW, mapH, TRUE);
         int noteY = mapY + mapH + 8;
-        MoveWindow(m_noteLabel, mapX, noteY, mapW, labelH, TRUE);
-        MoveWindow(m_noteEdit, mapX, noteY + labelH + 2, std::max<LONG>(180L, mapW - 132), controlH, TRUE);
-        MoveWindow(m_noteBtn, mapX + mapW - 122, noteY + labelH + 2, 122, controlH, TRUE);
+        const int noteLabelW = AutoLabelWidth(m_noteLabel, static_cast<int>(mapW));
+        const int noteLabelH = AutoLabelHeight(m_noteLabel, labelH, noteLabelW);
+        MoveLabelToText(m_noteLabel, mapX, noteY, static_cast<int>(mapW));
+        MoveWindow(m_noteEdit, mapX, noteY + noteLabelH + 2, MaxLong(180L, mapW - 132), controlH, TRUE);
+        MoveWindow(m_noteBtn, mapX + mapW - 122, noteY + noteLabelH + 2, 122, controlH, TRUE);
 
         const int tabW = 24;
         const int tabH = 72;
         int tabX = m_isSidePanelVisible ? (leftW - tabW / 2) : 0;
-        int tabY = bodyTop + std::max<INT>(60, (height - bodyTop - statusH) / 2 - tabH / 2);
+        int tabY = bodyTop + MaxInt(60, static_cast<int>((height - bodyTop - statusH) / 2 - tabH / 2));
         MoveWindow(m_panelTabBtn, tabX, tabY, tabW, tabH, TRUE);
 
         SendMessageW(m_statusBar, WM_SIZE, 0, 0);
 
         if (m_isSidePanelVisible) {
-        SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 0, 94);
-        SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 1, std::max(120, leftInnerW - 264));
-        SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 2, 160);
+            SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 0, 94);
+            SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 1, MaxInt(120, leftInnerW - 264));
+            SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 2, 160);
         }
     }
 
@@ -831,6 +887,10 @@ private:
 
         case IDM_FILE_EXIT:
             DestroyWindow(m_hwnd);
+            break;
+
+        case IDM_ROADS_INCIDENT_FILTERS:
+            ShowIncidentFiltersWindow();
             break;
 
         case IDM_ABOUT:
@@ -1386,10 +1446,13 @@ private:
     {
         HMENU menu = CreateMenu();
         HMENU fileMenu = CreatePopupMenu();
+        HMENU roadsMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_SETTINGS, L"Settings...");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
+        AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_FILTERS, L"Incident Filters...");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
         AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"About");
         SetMenu(m_hwnd, menu);
     }
@@ -1401,6 +1464,151 @@ private:
             L"Traffic England Alerts Map\n\nView Traffic England alerts on a UK map, collaborate with local responders, and share map notes.",
             L"About Traffic England Alerts Map",
             MB_OK | MB_ICONINFORMATION);
+    }
+
+    static LRESULT CALLBACK IncidentFiltersWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleIncidentFiltersMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleIncidentFiltersMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateIncidentFiltersControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnIncidentFiltersCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowIncidentFiltersWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = IncidentFiltersWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.lpszClassName = kIncidentFiltersClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_incidentFiltersWnd || !IsWindow(m_incidentFiltersWnd)) {
+            m_incidentFiltersWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kIncidentFiltersClassName,
+                L"Incident Filters",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                470,
+                360,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+        SyncIncidentFilterControls();
+        ShowWindow(m_incidentFiltersWnd, SW_SHOW);
+        SetForegroundWindow(m_incidentFiltersWnd);
+    }
+
+    void CreateIncidentFiltersControls(HWND parent)
+    {
+        CreateAutoLabel(parent, IDC_INCIDENT_FILTERS_TITLE_LABEL, L"Incident Filters", 18, 18, m_headerFont);
+        HWND descLabel = CreateAutoLabel(
+            parent,
+            IDC_INCIDENT_FILTERS_DESC_LABEL,
+            L"Choose which road incident categories should be available for filtering. These controls are ready for the next filtering step.",
+            18,
+            54,
+            nullptr,
+            416);
+        const int descH = AutoLabelHeight(descLabel, 44, 416);
+
+        CreateAutoLabel(parent, IDC_INCIDENT_FILTERS_SEVERITY_LABEL, L"Severity", 18, 54 + descH + 18);
+        const int severityY = 54 + descH + 46;
+        m_incidentSevereCheck = CreateWindowExW(0, L"BUTTON", L"Severe", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, severityY, 120, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_SEVERE_CHECK), m_hInst, nullptr);
+        m_incidentModerateCheck = CreateWindowExW(0, L"BUTTON", L"Moderate", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 148, severityY, 130, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_MODERATE_CHECK), m_hInst, nullptr);
+        m_incidentMinorCheck = CreateWindowExW(0, L"BUTTON", L"Minor", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 288, severityY, 110, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_MINOR_CHECK), m_hInst, nullptr);
+        m_incidentUnknownCheck = CreateWindowExW(0, L"BUTTON", L"Unknown", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, severityY + 32, 130, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_UNKNOWN_CHECK), m_hInst, nullptr);
+
+        CreateAutoLabel(parent, IDC_INCIDENT_FILTERS_TYPE_LABEL, L"Incident type", 18, severityY + 78);
+        const int typeY = severityY + 106;
+        m_incidentUnplannedCheck = CreateWindowExW(0, L"BUTTON", L"Unplanned incidents", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY, 180, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_UNPLANNED_CHECK), m_hInst, nullptr);
+        m_incidentPlannedCheck = CreateWindowExW(0, L"BUTTON", L"Planned roadworks", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 218, typeY, 170, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_PLANNED_CHECK), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 280, 102, 32, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_CLOSE_BTN), m_hInst, nullptr);
+
+        for (HWND h : { m_incidentSevereCheck, m_incidentModerateCheck, m_incidentMinorCheck, m_incidentUnknownCheck, m_incidentUnplannedCheck, m_incidentPlannedCheck, close }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+
+        SizeControlToText(m_incidentSevereCheck, 34, 6, 120, 0, 24);
+        SizeControlToText(m_incidentModerateCheck, 34, 6, 130, 0, 24);
+        SizeControlToText(m_incidentMinorCheck, 34, 6, 110, 0, 24);
+        SizeControlToText(m_incidentUnknownCheck, 34, 6, 130, 0, 24);
+        SizeControlToText(m_incidentUnplannedCheck, 34, 6, 180, 0, 24);
+        SizeControlToText(m_incidentPlannedCheck, 34, 6, 170, 0, 24);
+        SyncIncidentFilterControls();
+    }
+
+    void SyncIncidentFilterControls()
+    {
+        if (m_incidentSevereCheck)
+            SendMessageW(m_incidentSevereCheck, BM_SETCHECK, m_incidentFilterSevere ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_incidentModerateCheck)
+            SendMessageW(m_incidentModerateCheck, BM_SETCHECK, m_incidentFilterModerate ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_incidentMinorCheck)
+            SendMessageW(m_incidentMinorCheck, BM_SETCHECK, m_incidentFilterMinor ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_incidentUnknownCheck)
+            SendMessageW(m_incidentUnknownCheck, BM_SETCHECK, m_incidentFilterUnknown ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_incidentUnplannedCheck)
+            SendMessageW(m_incidentUnplannedCheck, BM_SETCHECK, m_incidentFilterUnplanned ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_incidentPlannedCheck)
+            SendMessageW(m_incidentPlannedCheck, BM_SETCHECK, m_incidentFilterPlanned ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+
+    void OnIncidentFiltersCommand(int id, int code)
+    {
+        if (code == BN_CLICKED) {
+            if (id == IDC_INCIDENT_FILTERS_CLOSE_BTN) {
+                ShowWindow(m_incidentFiltersWnd, SW_HIDE);
+                return;
+            }
+
+            if (id == IDC_INCIDENT_FILTERS_SEVERE_CHECK)
+                m_incidentFilterSevere = SendMessageW(m_incidentSevereCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            else if (id == IDC_INCIDENT_FILTERS_MODERATE_CHECK)
+                m_incidentFilterModerate = SendMessageW(m_incidentModerateCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            else if (id == IDC_INCIDENT_FILTERS_MINOR_CHECK)
+                m_incidentFilterMinor = SendMessageW(m_incidentMinorCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            else if (id == IDC_INCIDENT_FILTERS_UNKNOWN_CHECK)
+                m_incidentFilterUnknown = SendMessageW(m_incidentUnknownCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            else if (id == IDC_INCIDENT_FILTERS_UNPLANNED_CHECK)
+                m_incidentFilterUnplanned = SendMessageW(m_incidentUnplannedCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            else if (id == IDC_INCIDENT_FILTERS_PLANNED_CHECK)
+                m_incidentFilterPlanned = SendMessageW(m_incidentPlannedCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+
+            SetStatusText(L"Incident filter selections updated.");
+        }
     }
 
     void SortAlertsForCurrentOrder()
@@ -1514,41 +1722,36 @@ private:
 
     void CreateSettingsControls(HWND parent)
     {
-        m_urlLabel = CreateWindowExW(0, L"STATIC", L"Alerts endpoint", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 18, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ENDPOINT_LABEL), m_hInst, nullptr);
+        m_urlLabel = CreateAutoLabel(parent, IDC_SETTINGS_ENDPOINT_LABEL, L"Alerts endpoint", 18, 18);
         m_urlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 44, 410, 26, parent, reinterpret_cast<HMENU>(IDC_URL_EDIT), m_hInst, nullptr);
-        m_serverLabel = CreateWindowExW(0, L"STATIC", L"Collaboration server", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 84, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_SERVER_LABEL), m_hInst, nullptr);
+        m_serverLabel = CreateAutoLabel(parent, IDC_SETTINGS_SERVER_LABEL, L"Collaboration server", 18, 84);
         m_serverEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 110, 410, 26, parent, reinterpret_cast<HMENU>(IDC_SERVER_EDIT), m_hInst, nullptr);
-        HWND refreshLabel = CreateWindowExW(0, L"STATIC", L"Periodic alert refresh", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 150, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_LABEL), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_REFRESH_LABEL, L"Periodic alert refresh", 18, 150);
         m_settingsRefreshOffRadio = CreateWindowExW(0, L"BUTTON", L"Manual refresh only", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 176, 145, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_OFF_RADIO), m_hInst, nullptr);
         m_settingsRefreshOnRadio = CreateWindowExW(0, L"BUTTON", L"Refresh every", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 176, 120, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_ON_RADIO), m_hInst, nullptr);
-        HWND intervalLabel = CreateWindowExW(0, L"STATIC", L"Interval", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 214, 120, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_INTERVAL_LABEL), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_REFRESH_INTERVAL_LABEL, L"Interval", 18, 214);
         m_settingsRefreshIntervalEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 178, 208, 120, 26, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_INTERVAL_EDIT), m_hInst, nullptr);
-        HWND filterLabel = CreateWindowExW(0, L"STATIC", L"Traffic England alert filter", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 252, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_FILTER_LABEL), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 252);
         m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 278, 410, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
-        HWND orderLabel = CreateWindowExW(0, L"STATIC", L"Traffic England order", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 316, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ORDER_LABEL), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 316);
         m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 342, 410, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
         HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 388, 260, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
         HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 388, 102, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_urlLabel, m_urlEdit, m_serverLabel, m_serverEdit, refreshLabel, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, intervalLabel, m_settingsRefreshIntervalEdit, filterLabel, m_settingsFilterCombo, orderLabel, m_settingsOrderCombo, boundary, close }) {
+        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsFilterCombo, m_settingsOrderCombo, boundary, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
 
-        SizeControlToText(m_urlLabel, 4, 6);
-        SizeControlToText(m_serverLabel, 4, 6);
-        SizeControlToText(refreshLabel, 4, 6);
-        SizeControlToText(intervalLabel, 4, 6);
-        SizeControlToText(filterLabel, 4, 6);
-        SizeControlToText(orderLabel, 4, 6);
-
         const int radioY = 176;
         const int radioGap = 12;
         const int offRadioW = PreferredControlWidth(m_settingsRefreshOffRadio, 34, 160);
+        const int offRadioH = PreferredControlHeight(m_settingsRefreshOffRadio, 6, 24, offRadioW);
         const int onRadioX = 18 + offRadioW + radioGap;
         const int onRadioW = PreferredControlWidth(m_settingsRefreshOnRadio, 34, 132);
-        MoveWindow(m_settingsRefreshOffRadio, 18, radioY, offRadioW, 24, TRUE);
-        MoveWindow(m_settingsRefreshOnRadio, onRadioX, radioY, onRadioW, 24, TRUE);
+        const int onRadioH = PreferredControlHeight(m_settingsRefreshOnRadio, 6, 24, onRadioW);
+        MoveWindow(m_settingsRefreshOffRadio, 18, radioY, offRadioW, offRadioH, TRUE);
+        MoveWindow(m_settingsRefreshOnRadio, onRadioX, radioY, onRadioW, onRadioH, TRUE);
 
         SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"https://www.trafficengland.com/traffic-alerts"));
         SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"http://localhost:8080"));
@@ -1666,11 +1869,18 @@ private:
     HWND m_listView = nullptr;
     HWND m_detailsEdit = nullptr;
     HWND m_settingsWnd = nullptr;
+    HWND m_incidentFiltersWnd = nullptr;
     HWND m_settingsFilterCombo = nullptr;
     HWND m_settingsOrderCombo = nullptr;
     HWND m_settingsRefreshOffRadio = nullptr;
     HWND m_settingsRefreshOnRadio = nullptr;
     HWND m_settingsRefreshIntervalEdit = nullptr;
+    HWND m_incidentSevereCheck = nullptr;
+    HWND m_incidentModerateCheck = nullptr;
+    HWND m_incidentMinorCheck = nullptr;
+    HWND m_incidentUnknownCheck = nullptr;
+    HWND m_incidentUnplannedCheck = nullptr;
+    HWND m_incidentPlannedCheck = nullptr;
     HWND m_chatHistory = nullptr;
     HWND m_chatEdit = nullptr;
     HWND m_chatSendBtn = nullptr;
@@ -1687,6 +1897,12 @@ private:
     bool m_programmaticSelection = false;
     bool m_isSidePanelVisible = true;
     bool m_alertFilterUnplannedOnly = true;
+    bool m_incidentFilterSevere = true;
+    bool m_incidentFilterModerate = true;
+    bool m_incidentFilterMinor = true;
+    bool m_incidentFilterUnknown = true;
+    bool m_incidentFilterUnplanned = true;
+    bool m_incidentFilterPlanned = true;
     std::wstring m_alertOrder = L"Road";
     std::wstring m_alertsEndpoint = L"https://www.trafficengland.com/traffic-alerts";
     std::wstring m_serverBaseUrl = L"http://localhost:8080";
