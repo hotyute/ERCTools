@@ -72,6 +72,7 @@ constexpr float kMapWaterG = 0.91f;
 constexpr float kMapWaterB = 0.98f;
 constexpr int kMaxFallbackTileZoomDelta = 5;
 constexpr double kBoundaryDrawMarginPixels = 512.0;
+constexpr int kFullBoundaryMaxZoom = 7;
 // Reuse the cached scene for panning only. Scaling the cached composite during
 // wheel zoom subtly changes translucent fill colours, especially at very close
 // zoom levels, so zoom frames are rendered live while still using lightweight
@@ -1690,10 +1691,12 @@ private:
         if (m_ukBoundaryRings.empty())
             return;
 
-        // Keep the boundary fill path stable while panning/zooming. Switching from
-        // full polygon fill to viewport fill solely because the user is interacting
-        // changes the apparent tint and causes obvious flicker at mid zoom levels.
-        const bool fullBoundary = m_zoom < 10;
+        // Full detailed polygon fills are best for broad overview zooms, but become
+        // expensive at the mid/detail zoom where coastline complexity is crowded.
+        // From that point on, use the clipped scanline fill plus visible stroke
+        // path; it preserves the same land/sea result while avoiding full-ring
+        // geometry rebuilds during pan and repaint.
+        const bool fullBoundary = m_zoom <= kFullBoundaryMaxZoom;
 
         if (!fullBoundary) {
             // At close zoom levels the fill renderer is already clipped to the
