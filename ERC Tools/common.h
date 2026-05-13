@@ -32,6 +32,7 @@
 #include <cwctype>
 #include <functional>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <regex>

@@ -33,6 +33,7 @@ constexpr int IDM_FILE_SETTINGS = 2001;
 constexpr int IDM_FILE_EXIT = 2002;
 constexpr int IDM_ABOUT = 2003;
 constexpr int IDM_ROADS_INCIDENT_FILTERS = 2004;
+constexpr int IDM_ROADS_INCIDENT_NOTIFICATIONS = 2005;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -57,8 +58,18 @@ constexpr int IDC_INCIDENT_FILTERS_TYPE_LABEL = 2208;
 constexpr int IDC_INCIDENT_FILTERS_UNPLANNED_CHECK = 2209;
 constexpr int IDC_INCIDENT_FILTERS_PLANNED_CHECK = 2210;
 constexpr int IDC_INCIDENT_FILTERS_CLOSE_BTN = 2211;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_TITLE_LABEL = 2301;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_DESC_LABEL = 2302;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_ROADS_LABEL = 2303;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_ROADS_EDIT = 2304;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_LANES_LABEL = 2305;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_LANES_EDIT = 2306;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_LABEL = 2307;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT = 2308;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN = 2309;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
+constexpr const wchar_t* kIncidentNotificationsClassName = L"TrafficEnglandIncidentNotificationsWindow";
 
 struct FeedResult
 {
@@ -893,6 +904,10 @@ private:
             ShowIncidentFiltersWindow();
             break;
 
+        case IDM_ROADS_INCIDENT_NOTIFICATIONS:
+            ShowIncidentNotificationsWindow();
+            break;
+
         case IDM_ABOUT:
             ShowAboutDialog();
             break;
@@ -1028,6 +1043,7 @@ private:
             return;
 
         m_allAlerts = result->alerts;
+        DownloadMissingLaneImagesAsync(m_allAlerts);
         SortAlertsForCurrentOrder();
         delete result;
 
@@ -1039,6 +1055,42 @@ private:
         else {
             SetStatusText(L"Loaded " + std::to_wstring(visible) + L" alert(s).");
         }
+    }
+
+    void DownloadMissingLaneImagesAsync(const std::vector<TrafficAlert>& alerts)
+    {
+        std::vector<std::wstring> urls;
+        for (const TrafficAlert& alert : alerts) {
+            for (const std::wstring& url : alert.laneImageUrls) {
+                if (url.empty() || std::find(urls.begin(), urls.end(), url) != urls.end())
+                    continue;
+                if (std::filesystem::exists(GetLaneImageCachePath(url)))
+                    continue;
+                urls.push_back(url);
+            }
+        }
+
+        if (urls.empty())
+            return;
+
+        HWND hwnd = m_hwnd;
+        HWND mapHwnd = m_map.Hwnd();
+        std::thread([hwnd, mapHwnd, urls = std::move(urls)]() {
+            for (const std::wstring& url : urls) {
+                if (g_appQuitting.load())
+                    return;
+
+                std::vector<BYTE> bytes;
+                std::wstring error;
+                if (HttpGetBinary(url, bytes, error))
+                    SaveBinaryToFile(GetLaneImageCachePath(url), bytes);
+            }
+
+            if (mapHwnd && !g_appQuitting.load() && IsWindow(mapHwnd))
+                InvalidateRect(mapHwnd, nullptr, FALSE);
+            else if (hwnd && !g_appQuitting.load() && IsWindow(hwnd))
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }).detach();
     }
 
     bool TextFilterMatches(const TrafficAlert& a) const
@@ -1451,6 +1503,7 @@ private:
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_FILTERS, L"Incident Filters...");
+        AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_NOTIFICATIONS, L"Incident Notifications...");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
         AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"About");
@@ -1609,6 +1662,175 @@ private:
 
             SetStatusText(L"Incident filter selections updated.");
         }
+    }
+
+    static LRESULT CALLBACK IncidentNotificationsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleIncidentNotificationsMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleIncidentNotificationsMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateIncidentNotificationsControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnIncidentNotificationsCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowIncidentNotificationsWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = IncidentNotificationsWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.lpszClassName = kIncidentNotificationsClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_incidentNotificationsWnd || !IsWindow(m_incidentNotificationsWnd)) {
+            m_incidentNotificationsWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kIncidentNotificationsClassName,
+                L"Incident Notifications",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                540,
+                430,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+        SyncIncidentNotificationControls();
+        ShowWindow(m_incidentNotificationsWnd, SW_SHOW);
+        SetForegroundWindow(m_incidentNotificationsWnd);
+    }
+
+    void CreateIncidentNotificationsControls(HWND parent)
+    {
+        CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_TITLE_LABEL, L"Incident Notifications", 18, 18, m_headerFont);
+        HWND descLabel = CreateAutoLabel(
+            parent,
+            IDC_INCIDENT_NOTIFICATIONS_DESC_LABEL,
+            L"Define which incidents should trigger a notification. Roads and exclusions are comma separated; lane threshold accepts percentages such as 50%.",
+            18,
+            54,
+            nullptr,
+            476);
+        const int descH = AutoLabelHeight(descLabel, 44, 476);
+
+        const int left = 18;
+        const int editX = 18;
+        const int editW = 476;
+        int y = 54 + descH + 18;
+
+        CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_ROADS_LABEL, L"Roads to notify on", left, y);
+        y += 26;
+        m_incidentNotifyRoadsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_ROADS_EDIT), m_hInst, nullptr);
+        y += 42;
+
+        CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_LANES_LABEL, L"Closed-lane threshold", left, y);
+        y += 26;
+        m_incidentNotifyLaneThresholdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, 120, 26, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_LANES_EDIT), m_hInst, nullptr);
+        y += 42;
+
+        CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_LABEL, L"Reason exclusions", left, y);
+        y += 26;
+        m_incidentNotifyReasonExclusionsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT), m_hInst, nullptr);
+
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 392, 338, 102, 32, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
+
+        for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyReasonExclusionsEdit, close }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+
+        SendMessageW(m_incidentNotifyRoadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"A1(M), A2, A15, A16, A17, A20, A4, A52"));
+        SendMessageW(m_incidentNotifyLaneThresholdEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"50%"));
+        SendMessageW(m_incidentNotifyReasonExclusionsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Road Management"));
+        SyncIncidentNotificationControls();
+    }
+
+    void SyncIncidentNotificationControls()
+    {
+        if (m_incidentNotifyRoadsEdit)
+            SetWindowTextSafe(m_incidentNotifyRoadsEdit, m_incidentNotifyRoads);
+        if (m_incidentNotifyLaneThresholdEdit)
+            SetWindowTextSafe(m_incidentNotifyLaneThresholdEdit, m_incidentNotifyLaneThresholdText);
+        if (m_incidentNotifyReasonExclusionsEdit)
+            SetWindowTextSafe(m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyReasonExclusions);
+    }
+
+    void OnIncidentNotificationsCommand(int id, int code)
+    {
+        if (id == IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_incidentNotificationsWnd, SW_HIDE);
+            return;
+        }
+
+        if (code != EN_CHANGE && code != EN_KILLFOCUS)
+            return;
+
+        if (id == IDC_INCIDENT_NOTIFICATIONS_ROADS_EDIT) {
+            m_incidentNotifyRoads = GetWindowTextString(m_incidentNotifyRoadsEdit);
+        }
+        else if (id == IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT) {
+            m_incidentNotifyReasonExclusions = GetWindowTextString(m_incidentNotifyReasonExclusionsEdit);
+        }
+        else if (id == IDC_INCIDENT_NOTIFICATIONS_LANES_EDIT) {
+            std::wstring thresholdText = Trim(GetWindowTextString(m_incidentNotifyLaneThresholdEdit));
+            double parsed = 0.0;
+            if (TryParsePercentThreshold(thresholdText, parsed)) {
+                m_incidentNotifyLaneThresholdText = thresholdText;
+                m_incidentNotifyLaneThreshold = parsed;
+            }
+            else if (code == EN_KILLFOCUS) {
+                SetWindowTextSafe(m_incidentNotifyLaneThresholdEdit, m_incidentNotifyLaneThresholdText);
+                SetStatusText(L"Lane threshold should be a percentage such as 50%.");
+            }
+        }
+    }
+
+    bool TryParsePercentThreshold(const std::wstring& text, double& valueOut) const
+    {
+        std::wstring value = Trim(text);
+        if (!value.empty() && value.back() == L'%')
+            value.pop_back();
+        value = Trim(value);
+        if (value.empty())
+            return false;
+
+        wchar_t* end = nullptr;
+        double parsed = std::wcstod(value.c_str(), &end);
+        if (end == value.c_str() || !std::isfinite(parsed))
+            return false;
+        if (Trim(end ? end : L"").empty() && parsed >= 0.0 && parsed <= 100.0) {
+            valueOut = parsed;
+            return true;
+        }
+        return false;
     }
 
     void SortAlertsForCurrentOrder()
@@ -1870,6 +2092,7 @@ private:
     HWND m_detailsEdit = nullptr;
     HWND m_settingsWnd = nullptr;
     HWND m_incidentFiltersWnd = nullptr;
+    HWND m_incidentNotificationsWnd = nullptr;
     HWND m_settingsFilterCombo = nullptr;
     HWND m_settingsOrderCombo = nullptr;
     HWND m_settingsRefreshOffRadio = nullptr;
@@ -1881,6 +2104,9 @@ private:
     HWND m_incidentUnknownCheck = nullptr;
     HWND m_incidentUnplannedCheck = nullptr;
     HWND m_incidentPlannedCheck = nullptr;
+    HWND m_incidentNotifyRoadsEdit = nullptr;
+    HWND m_incidentNotifyLaneThresholdEdit = nullptr;
+    HWND m_incidentNotifyReasonExclusionsEdit = nullptr;
     HWND m_chatHistory = nullptr;
     HWND m_chatEdit = nullptr;
     HWND m_chatSendBtn = nullptr;
@@ -1903,6 +2129,10 @@ private:
     bool m_incidentFilterUnknown = true;
     bool m_incidentFilterUnplanned = true;
     bool m_incidentFilterPlanned = true;
+    std::wstring m_incidentNotifyRoads = L"A1(M), A2, A15, A16, A17, A20, A4, A52";
+    std::wstring m_incidentNotifyLaneThresholdText = L"50%";
+    double m_incidentNotifyLaneThreshold = 50.0;
+    std::wstring m_incidentNotifyReasonExclusions = L"Road Management";
     std::wstring m_alertOrder = L"Road";
     std::wstring m_alertsEndpoint = L"https://www.trafficengland.com/traffic-alerts";
     std::wstring m_serverBaseUrl = L"http://localhost:8080";

@@ -413,6 +413,14 @@ private:
             OnMouseMove(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), static_cast<UINT>(wParam));
             return 0;
 
+        case WM_MOUSELEAVE:
+            m_trackingMouseLeave = false;
+            if (!m_hoveredAlertId.empty()) {
+                m_hoveredAlertId.clear();
+                Invalidate();
+            }
+            return 0;
+
         case WM_LBUTTONUP:
             OnLeftButtonUp(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;
@@ -636,6 +644,21 @@ private:
 
     void OnMouseMove(int x, int y, UINT buttons)
     {
+        if (!m_trackingMouseLeave) {
+            TRACKMOUSEEVENT tme{};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = m_hwnd;
+            if (TrackMouseEvent(&tme))
+                m_trackingMouseLeave = true;
+        }
+
+        std::wstring hoveredId = HitTestAlert(x, y);
+        if (hoveredId != m_hoveredAlertId) {
+            m_hoveredAlertId = std::move(hoveredId);
+            Invalidate();
+        }
+
         if ((buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
             POINT pt{ x, y };
             int dx = pt.x - m_lastMouse.x;
@@ -757,6 +780,7 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.05f, 0.10f, 0.18f, 0.72f), &m_panelBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.90f), &m_textBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.20f, 0.95f, 0.95f), &m_noteBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.22f, 0.24f, 0.27f, 0.96f), &m_laneTileBrush);
 
         if (g_dwriteFactory && !m_noteTextFormat) {
             g_dwriteFactory->CreateTextFormat(
@@ -790,6 +814,8 @@ private:
         m_panelBrush.Reset();
         m_textBrush.Reset();
         m_noteBrush.Reset();
+        m_laneTileBrush.Reset();
+        m_laneBitmaps.clear();
         m_noteTextFormat.Reset();
         InvalidateSceneCache();
     }
@@ -999,6 +1025,120 @@ private:
         if (b == L"moderate") return m_moderateBrush.Get();
         if (b == L"minor") return m_minorBrush.Get();
         return m_unknownBrush.Get();
+    }
+
+    const TrafficAlert* FindAlertById(const std::wstring& id) const
+    {
+        if (id.empty())
+            return nullptr;
+        for (const TrafficAlert& alert : m_alerts) {
+            if (alert.id == id)
+                return &alert;
+        }
+        return nullptr;
+    }
+
+    static bool HasLaneClosureOverlay(const TrafficAlert& alert)
+    {
+        return alert.lanesClosed > 0 || alert.lanesTotal > 0 || !alert.laneImageUrls.empty();
+    }
+
+    ComPtr<ID2D1Bitmap> LoadCachedLaneBitmap(const std::wstring& url)
+    {
+        auto cached = m_laneBitmaps.find(url);
+        if (cached != m_laneBitmaps.end())
+            return cached->second;
+
+        ComPtr<ID2D1Bitmap> bitmap;
+        std::filesystem::path path = GetLaneImageCachePath(url);
+        if (std::filesystem::exists(path)) {
+            std::ifstream in(path, std::ios::binary);
+            if (in) {
+                std::vector<BYTE> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                bitmap = CreateBitmapFromBytes(bytes);
+            }
+        }
+
+        if (bitmap)
+            m_laneBitmaps[url] = bitmap;
+        return bitmap;
+    }
+
+    void DrawFallbackLaneIcon(float left, float top, float size, bool closed)
+    {
+        D2D1_ROUNDED_RECT tile = D2D1::RoundedRect(D2D1::RectF(left, top, left + size, top + size), 4.0f, 4.0f);
+        m_rt->FillRoundedRectangle(tile, m_laneTileBrush.Get());
+        m_rt->DrawRoundedRectangle(tile, m_borderBrush.Get(), 1.0f);
+
+        const float cx = left + size * 0.5f;
+        const float cy = top + size * 0.5f;
+        if (closed) {
+            m_rt->DrawLine(D2D1::Point2F(cx - 7.0f, cy - 7.0f), D2D1::Point2F(cx + 7.0f, cy + 7.0f), m_severeBrush.Get(), 3.0f);
+            m_rt->DrawLine(D2D1::Point2F(cx + 7.0f, cy - 7.0f), D2D1::Point2F(cx - 7.0f, cy + 7.0f), m_severeBrush.Get(), 3.0f);
+        }
+        else {
+            m_rt->DrawLine(D2D1::Point2F(cx, cy - 8.0f), D2D1::Point2F(cx, cy + 7.0f), m_textBrush.Get(), 3.0f);
+            m_rt->DrawLine(D2D1::Point2F(cx, cy + 7.0f), D2D1::Point2F(cx - 6.0f, cy + 1.0f), m_textBrush.Get(), 3.0f);
+            m_rt->DrawLine(D2D1::Point2F(cx, cy + 7.0f), D2D1::Point2F(cx + 6.0f, cy + 1.0f), m_textBrush.Get(), 3.0f);
+        }
+    }
+
+    void DrawLaneClosureOverlay(const ViewState& view)
+    {
+        const TrafficAlert* alert = FindAlertById(m_hoveredAlertId);
+        if (!alert || !alert->hasLocation || !HasLaneClosureOverlay(*alert))
+            return;
+
+        D2D1_POINT_2F marker = GeoToScreen(view, alert->latitude, alert->longitude);
+        int total = alert->lanesTotal > 0 ? alert->lanesTotal : static_cast<int>(alert->laneImageUrls.size());
+        total = ClampValue(total, 1, 8);
+        int closed = ClampValue(alert->lanesClosed, 0, total);
+        if (closed == 0 && alert->lanesTotal == 0 && !alert->laneImageUrls.empty())
+            closed = total;
+
+        const float icon = 34.0f;
+        const float gap = 4.0f;
+        const float textH = 22.0f;
+        const float panelPad = 8.0f;
+        const float iconsW = total * icon + (total - 1) * gap;
+        const float panelW = MaxValue(210.0f, iconsW + panelPad * 2.0f);
+        const float panelH = textH + icon + panelPad * 2.0f + 4.0f;
+
+        float left = marker.x + 18.0f;
+        float top = marker.y - panelH - 18.0f;
+        if (left + panelW > view.width - 8.0f)
+            left = marker.x - panelW - 18.0f;
+        if (left < 8.0f)
+            left = 8.0f;
+        if (top < 8.0f)
+            top = marker.y + 22.0f;
+        if (top + panelH > view.height - 8.0f)
+            top = view.height - panelH - 8.0f;
+
+        D2D1_ROUNDED_RECT panel = D2D1::RoundedRect(D2D1::RectF(left, top, left + panelW, top + panelH), 8.0f, 8.0f);
+        m_rt->FillRoundedRectangle(panel, m_panelBrush.Get());
+        m_rt->DrawRoundedRectangle(panel, m_borderBrush.Get(), 1.0f);
+
+        std::wstring title = L"Lanes closed: " + std::to_wstring(closed) + L" of " + std::to_wstring(total);
+        D2D1_RECT_F textRect = D2D1::RectF(left + panelPad, top + panelPad - 1.0f, left + panelW - panelPad, top + panelPad + textH);
+        if (m_noteTextFormat)
+            m_rt->DrawTextW(title.c_str(), static_cast<UINT32>(title.size()), m_noteTextFormat.Get(), textRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+        float x = left + panelPad;
+        const float y = top + panelPad + textH + 4.0f;
+        for (int i = 0; i < total; ++i) {
+            bool drewBitmap = false;
+            if (i < static_cast<int>(alert->laneImageUrls.size())) {
+                ComPtr<ID2D1Bitmap> bmp = LoadCachedLaneBitmap(alert->laneImageUrls[i]);
+                if (bmp) {
+                    m_rt->DrawBitmap(bmp.Get(), D2D1::RectF(x, y, x + icon, y + icon));
+                    drewBitmap = true;
+                }
+            }
+            if (!drewBitmap)
+                DrawFallbackLaneIcon(x, y, icon, i < closed);
+            x += icon + gap;
+        }
     }
 
     void DrawMarkers(const ViewState& view)
@@ -1423,6 +1563,7 @@ private:
             }
 
             DrawMapChrome();
+            DrawLaneClosureOverlay(overlayView);
 
             HRESULT hr = m_rt->EndDraw();
             if (hr == D2DERR_RECREATE_TARGET)
@@ -1738,7 +1879,9 @@ private:
     POINT m_lastMouse{};
     bool m_dragging = false;
     bool m_interactivePan = false;
+    bool m_trackingMouseLeave = false;
     int m_interactiveTileRequestsThisFrame = 0;
+    std::wstring m_hoveredAlertId;
 
     ComPtr<ID2D1HwndRenderTarget> m_rt;
     ComPtr<ID2D1SolidColorBrush> m_severeBrush;
@@ -1753,6 +1896,7 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_panelBrush;
     ComPtr<ID2D1SolidColorBrush> m_textBrush;
     ComPtr<ID2D1SolidColorBrush> m_noteBrush;
+    ComPtr<ID2D1SolidColorBrush> m_laneTileBrush;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
     ComPtr<ID2D1Bitmap> m_sceneBitmap;
     int m_sceneBitmapWidth = 0;
@@ -1765,6 +1909,7 @@ private:
 
     std::mutex m_tileMutex;
     std::unordered_map<TileKey, std::shared_ptr<TileEntry>, TileKeyHash> m_tiles;
+    std::unordered_map<std::wstring, ComPtr<ID2D1Bitmap>> m_laneBitmaps;
 };
 
 MapView::MapView() : m_impl(std::make_unique<Impl>())

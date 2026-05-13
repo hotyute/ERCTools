@@ -27,6 +27,9 @@ struct TrafficAlert
     std::wstring region;
     std::wstring severity;
     std::wstring updatedText;
+    std::vector<std::wstring> laneImageUrls;
+    int lanesClosed = 0;
+    int lanesTotal = 0;
     double latitude = 0.0;
     double longitude = 0.0;
     bool hasLocation = false;

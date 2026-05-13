@@ -151,6 +151,88 @@ static std::wstring ExtractLabeledAlertField(const std::wstring& description, co
     return L"";
 }
 
+
+static std::wstring MakeTrafficEnglandAbsoluteUrl(std::wstring url)
+{
+    url = Trim(HtmlDecode(url));
+    if (url.empty())
+        return L"";
+    if (url.rfind(L"//", 0) == 0)
+        return L"https:" + url;
+    std::wstring lower = ToLower(url);
+    if (lower.rfind(L"http://", 0) == 0 || lower.rfind(L"https://", 0) == 0)
+        return url;
+    if (!url.empty() && url.front() != L'/')
+        url.insert(url.begin(), L'/');
+    return L"https://www.trafficengland.com" + url;
+}
+
+static std::vector<std::wstring> ExtractImageUrls(const std::wstring& html)
+{
+    std::vector<std::wstring> urls;
+    if (html.find(L'<') == std::wstring::npos)
+        return urls;
+
+    std::wregex imgRe(LR"(<\s*img\b[^>]*\bsrc\s*=\s*(['\"]?)([^'\"\s>]+)\1[^>]*>)", std::regex_constants::icase);
+    std::vector<std::wstring> laneUrls;
+    for (std::wsregex_iterator it(html.begin(), html.end(), imgRe), end; it != end; ++it) {
+        std::wstring url = MakeTrafficEnglandAbsoluteUrl((*it)[2].str());
+        if (url.empty() || std::find(urls.begin(), urls.end(), url) != urls.end())
+            continue;
+
+        std::wstring lowerUrl = ToLower(url);
+        if (lowerUrl.find(L"lane") != std::wstring::npos ||
+            lowerUrl.find(L"closed") != std::wstring::npos ||
+            lowerUrl.find(L"arrow") != std::wstring::npos ||
+            lowerUrl.find(L"redx") != std::wstring::npos ||
+            lowerUrl.find(L"red_x") != std::wstring::npos)
+        {
+            laneUrls.push_back(url);
+        }
+        urls.push_back(std::move(url));
+    }
+    return laneUrls.empty() ? urls : laneUrls;
+}
+
+static bool ExtractLaneClosureCounts(const std::wstring& text, int& closedOut, int& totalOut)
+{
+    closedOut = 0;
+    totalOut = 0;
+
+    std::wstring lanesText = ExtractLabeledAlertField(text, L"Lanes Closed");
+    if (lanesText.empty())
+        lanesText = text;
+
+    std::wsmatch m;
+    std::wregex ofRe(LR"((\d+)\s*(?:of|/)\s*(\d+))", std::regex_constants::icase);
+    if (std::regex_search(lanesText, m, ofRe) && m.size() > 2) {
+        closedOut = _wtoi(m[1].str().c_str());
+        totalOut = _wtoi(m[2].str().c_str());
+        return closedOut > 0 && totalOut >= closedOut;
+    }
+
+    std::wregex closedRe(LR"((\d+)\s+lanes?\s+(?:is\s+|are\s+)?closed)", std::regex_constants::icase);
+    if (std::regex_search(lanesText, m, closedRe) && m.size() > 1) {
+        closedOut = _wtoi(m[1].str().c_str());
+        totalOut = MaxValue(4, closedOut);
+        return closedOut > 0;
+    }
+
+    std::wstring lower = ToLower(lanesText);
+    if (lower.find(L"lane") != std::wstring::npos && lower.find(L"closed") != std::wstring::npos) {
+        if (lower.find(L"one") != std::wstring::npos) closedOut = 1;
+        else if (lower.find(L"two") != std::wstring::npos) closedOut = 2;
+        else if (lower.find(L"three") != std::wstring::npos) closedOut = 3;
+        else if (lower.find(L"four") != std::wstring::npos) closedOut = 4;
+        if (closedOut > 0) {
+            totalOut = MaxValue(4, closedOut);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static bool LooksLikeTrafficEnglandDescription(const std::wstring& text)
 {
     std::wstring normalized = NormalizeAlertDescription(text);
@@ -421,6 +503,7 @@ static bool BuildHtmlAlertFromCells(const std::vector<std::wstring>& cells, size
     a.updatedText = L"";
     a.region = L"";
     a.hasLocation = false;
+    ExtractLaneClosureCounts(a.description, a.lanesClosed, a.lanesTotal);
 
     alertOut = std::move(a);
     return true;
@@ -450,8 +533,12 @@ std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
         }
 
         TrafficAlert a;
-        if (BuildHtmlAlertFromCells(cells, idCounter, a))
+        if (BuildHtmlAlertFromCells(cells, idCounter, a)) {
+            a.laneImageUrls = ExtractImageUrls(rowHtml);
+            if (a.lanesTotal == 0 && !a.laneImageUrls.empty())
+                a.lanesTotal = static_cast<int>(a.laneImageUrls.size());
             out.push_back(std::move(a));
+        }
     }
 
     if (out.empty()) {
@@ -464,8 +551,12 @@ std::vector<TrafficAlert> ParseHtmlTrafficAlerts(const std::wstring& html)
         }
 
         TrafficAlert a;
-        if (BuildHtmlAlertFromCells(cells, idCounter, a))
+        if (BuildHtmlAlertFromCells(cells, idCounter, a)) {
+            a.laneImageUrls = ExtractImageUrls(html);
+            if (a.lanesTotal == 0 && !a.laneImageUrls.empty())
+                a.lanesTotal = static_cast<int>(a.laneImageUrls.size());
             out.push_back(std::move(a));
+        }
     }
 
     return out;
@@ -612,20 +703,21 @@ TrafficAlert ParseAlertObject(const json& obj)
     if (!reason.empty() && IsGenericAlertTitle(a.title))
         a.title = reason;
 
-    a.description = PickString(*props, {
+    std::wstring rawDescription = PickString(*props, {
         "description", "details", "detail", "message", "fullText", "full text",
         "eventDescription", "event_description", "event description", "comment", "comments",
         "disseminationText", "dissemination text", "publicDescription", "public description",
         "gdp", "popup", "popupContent", "popup content", "content", "html", "info", "information"
         });
-    if (a.description.empty())
-        a.description = PickString(obj, {
+    if (rawDescription.empty())
+        rawDescription = PickString(obj, {
             "description", "details", "detail", "message", "fullText", "full text",
             "eventDescription", "event_description", "event description", "comment", "comments",
             "disseminationText", "dissemination text", "publicDescription", "public description",
             "gdp", "popup", "popupContent", "popup content", "content", "html", "info", "information"
             });
-    a.description = NormalizeAlertDescription(a.description);
+    a.laneImageUrls = ExtractImageUrls(rawDescription);
+    a.description = NormalizeAlertDescription(rawDescription);
     if (a.description.empty())
         a.description = BuildTrafficEnglandDescriptionFromFields(*props, obj);
     if (a.description.empty() && !reason.empty())
@@ -703,6 +795,10 @@ TrafficAlert ParseAlertObject(const json& obj)
 
     if (a.severity.empty())
         a.severity = L"Unknown";
+
+    ExtractLaneClosureCounts(a.description, a.lanesClosed, a.lanesTotal);
+    if (a.lanesTotal == 0 && !a.laneImageUrls.empty())
+        a.lanesTotal = static_cast<int>(a.laneImageUrls.size());
 
     return a;
 }
@@ -866,38 +962,46 @@ std::vector<TrafficAlert> SampleAlerts()
     std::vector<TrafficAlert> out;
     std::time_t now = std::time(nullptr);
 
-    out.push_back({
-        L"sample-1",
-        L"Queueing traffic on the M1",
-        L"Slow traffic northbound due to congestion.",
-        L"M1",
-        L"East Midlands",
-        L"Moderate",
-        TimeTToText(now - 300),
-        52.0570, -0.7550, true
-        });
+    TrafficAlert a1;
+    a1.id = L"sample-1";
+    a1.title = L"Queueing traffic on the M1";
+    a1.description = L"Slow traffic northbound due to congestion.";
+    a1.road = L"M1";
+    a1.region = L"East Midlands";
+    a1.severity = L"Moderate";
+    a1.updatedText = TimeTToText(now - 300);
+    a1.latitude = 52.0570;
+    a1.longitude = -0.7550;
+    a1.hasLocation = true;
+    out.push_back(std::move(a1));
 
-    out.push_back({
-        L"sample-2",
-        L"Lane closed on the M25",
-        L"One lane is closed for roadworks.",
-        L"M25",
-        L"Greater London",
-        L"Severe",
-        TimeTToText(now - 420),
-        51.6090, -0.4300, true
-        });
+    TrafficAlert a2;
+    a2.id = L"sample-2";
+    a2.title = L"Lane closed on the M25";
+    a2.description = L"Location : The M25 clockwise near junction 16\r\nReason : Broken down vehicle\r\nLanes Closed : 2 of 4";
+    a2.road = L"M25";
+    a2.region = L"Greater London";
+    a2.severity = L"Severe";
+    a2.updatedText = TimeTToText(now - 420);
+    a2.lanesClosed = 2;
+    a2.lanesTotal = 4;
+    a2.latitude = 51.6090;
+    a2.longitude = -0.4300;
+    a2.hasLocation = true;
+    out.push_back(std::move(a2));
 
-    out.push_back({
-        L"sample-3",
-        L"Incident on A1",
-        L"Delays likely near the junction.",
-        L"A1",
-        L"North East",
-        L"Minor",
-        TimeTToText(now - 180),
-        54.9700, -1.6170, true
-        });
+    TrafficAlert a3;
+    a3.id = L"sample-3";
+    a3.title = L"Incident on A1";
+    a3.description = L"Delays likely near the junction.";
+    a3.road = L"A1";
+    a3.region = L"North East";
+    a3.severity = L"Minor";
+    a3.updatedText = TimeTToText(now - 180);
+    a3.latitude = 54.9700;
+    a3.longitude = -1.6170;
+    a3.hasLocation = true;
+    out.push_back(std::move(a3));
 
     return out;
 }

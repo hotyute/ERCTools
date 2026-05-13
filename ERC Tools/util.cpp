@@ -33,7 +33,8 @@ void ConsoleLog(const std::wstring& text)
     WriteConsoleW(h, line.c_str(), static_cast<DWORD>(line.size()), &written, nullptr);
 }
 
-std::filesystem::path GetBoundaryCachePath()
+
+static std::filesystem::path GetTrafficEnglandCacheFolder()
 {
     wchar_t localAppData[MAX_PATH * 4]{};
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, _countof(localAppData));
@@ -47,7 +48,32 @@ std::filesystem::path GetBoundaryCachePath()
     }
 
     CreateDirectoryW(folder.c_str(), nullptr);
-    return folder / L"uk_outline.geojson";
+    return folder;
+}
+
+std::filesystem::path GetBoundaryCachePath()
+{
+    return GetTrafficEnglandCacheFolder() / L"uk_outline.geojson";
+}
+
+std::filesystem::path GetLaneImageCachePath(const std::wstring& imageUrl)
+{
+    std::filesystem::path folder = GetTrafficEnglandCacheFolder() / L"lane_images";
+    CreateDirectoryW(folder.c_str(), nullptr);
+
+    std::wstring extension = L".png";
+    size_t query = imageUrl.find_first_of(L"?#");
+    std::wstring clean = imageUrl.substr(0, query);
+    size_t dot = clean.find_last_of(L'.');
+    size_t slash = clean.find_last_of(L"/\\");
+    if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) {
+        std::wstring candidate = clean.substr(dot);
+        if (!candidate.empty() && candidate.size() <= 8)
+            extension = candidate;
+    }
+
+    std::wstring hash = std::to_wstring(std::hash<std::wstring>{}(imageUrl));
+    return folder / (L"lane_" + hash + extension);
 }
 
 bool SaveBinaryToFile(const std::filesystem::path& path, const std::vector<BYTE>& bytes)
