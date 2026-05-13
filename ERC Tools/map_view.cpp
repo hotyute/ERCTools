@@ -565,6 +565,12 @@ private:
             a.top < b.bottom && a.bottom > b.top;
     }
 
+    static int PositiveModulo(int value, int modulus)
+    {
+        int result = value % modulus;
+        return result < 0 ? result + modulus : result;
+    }
+
     void NormalizeCenter()
     {
         while (m_centerLon < -180.0) m_centerLon += 360.0;
@@ -1056,14 +1062,21 @@ private:
         if (clip && !RectsIntersect(*clip, viewport))
             return;
 
+        const float drawLeft = clip ? ClampValue(clip->left, 0.0f, viewport.right) : viewport.left;
+        const float drawTop = clip ? ClampValue(clip->top, 0.0f, viewport.bottom) : viewport.top;
+        const float drawRight = clip ? ClampValue(clip->right, 0.0f, viewport.right) : viewport.right;
+        const float drawBottom = clip ? ClampValue(clip->bottom, 0.0f, viewport.bottom) : viewport.bottom;
+        if (drawRight <= drawLeft || drawBottom <= drawTop)
+            return;
+
         WorldPoint centerWorld = GeoToWorld(m_centerLat, m_centerLon, m_zoom);
         double originX = centerWorld.x - width * 0.5;
         double originY = centerWorld.y - height * 0.5;
 
-        int startTileX = static_cast<int>(std::floor(originX / 256.0)) - 1;
-        int endTileX = static_cast<int>(std::floor((originX + width) / 256.0)) + 1;
-        int startTileY = static_cast<int>(std::floor(originY / 256.0)) - 1;
-        int endTileY = static_cast<int>(std::floor((originY + height) / 256.0)) + 1;
+        int startTileX = static_cast<int>(std::floor((originX + drawLeft) / 256.0)) - 1;
+        int endTileX = static_cast<int>(std::floor((originX + drawRight) / 256.0)) + 1;
+        int startTileY = static_cast<int>(std::floor((originY + drawTop) / 256.0)) - 1;
+        int endTileY = static_cast<int>(std::floor((originY + drawBottom) / 256.0)) + 1;
 
         int tilesPerAxis = 1 << m_zoom;
 
@@ -1072,17 +1085,6 @@ private:
                 continue;
 
             for (int tx = startTileX; tx <= endTileX; ++tx) {
-                int wrappedX = tx;
-                while (wrappedX < 0) wrappedX += tilesPerAxis;
-                while (wrappedX >= tilesPerAxis) wrappedX -= tilesPerAxis;
-
-                TileKey key{ m_zoom, wrappedX, ty };
-                auto entry = interactive ? FindTile(key) : GetOrCreateTile(key);
-                if (entry) {
-                    std::lock_guard<std::mutex> lk(entry->mutex);
-                    entry->lastUsedMs = GetTickCount64();
-                }
-
                 D2D1_RECT_F dest = D2D1::RectF(
                     static_cast<float>(tx * 256.0 - originX),
                     static_cast<float>(ty * 256.0 - originY),
@@ -1090,6 +1092,13 @@ private:
                     static_cast<float>(ty * 256.0 - originY + 256.0));
                 if (clip && !RectsIntersect(dest, *clip))
                     continue;
+
+                TileKey key{ m_zoom, PositiveModulo(tx, tilesPerAxis), ty };
+                auto entry = interactive ? FindTile(key) : GetOrCreateTile(key);
+                if (entry) {
+                    std::lock_guard<std::mutex> lk(entry->mutex);
+                    entry->lastUsedMs = GetTickCount64();
+                }
 
                 ComPtr<ID2D1Bitmap> bmp;
                 std::vector<BYTE> bytesCopy;
@@ -1310,6 +1319,31 @@ private:
         DrawMarkers();
     }
 
+    std::vector<D2D1_RECT_F> BuildExposedSceneStrips(const ViewState& view, const D2D1_RECT_F& cachedDest) const
+    {
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float left = ClampValue(cachedDest.left, 0.0f, width);
+        const float top = ClampValue(cachedDest.top, 0.0f, height);
+        const float right = ClampValue(cachedDest.right, 0.0f, width);
+        const float bottom = ClampValue(cachedDest.bottom, 0.0f, height);
+
+        std::vector<D2D1_RECT_F> strips;
+        strips.reserve(4);
+
+        auto addStrip = [&strips](const D2D1_RECT_F& strip) {
+            if (strip.right > strip.left && strip.bottom > strip.top)
+                strips.push_back(strip);
+            };
+
+        addStrip(D2D1::RectF(0.0f, 0.0f, left, height));
+        addStrip(D2D1::RectF(right, 0.0f, width, height));
+        addStrip(D2D1::RectF(left, 0.0f, right, top));
+        addStrip(D2D1::RectF(left, bottom, right, height));
+
+        return strips;
+    }
+
     void DrawTilesInClip(const D2D1_RECT_F& clip)
     {
         if (!m_rt || clip.right <= clip.left || clip.bottom <= clip.top)
@@ -1320,22 +1354,10 @@ private:
         m_rt->PopAxisAlignedClip();
     }
 
-    void DrawExposedCachedSceneTiles(const ViewState& view, const D2D1_RECT_F& cachedDest)
+    void DrawExposedCachedSceneTiles(const std::vector<D2D1_RECT_F>& strips)
     {
-        if (!m_rt)
-            return;
-
-        const float width = static_cast<float>(view.width);
-        const float height = static_cast<float>(view.height);
-        const float left = ClampValue(cachedDest.left, 0.0f, width);
-        const float top = ClampValue(cachedDest.top, 0.0f, height);
-        const float right = ClampValue(cachedDest.right, 0.0f, width);
-        const float bottom = ClampValue(cachedDest.bottom, 0.0f, height);
-
-        DrawTilesInClip(D2D1::RectF(0.0f, 0.0f, left, height));
-        DrawTilesInClip(D2D1::RectF(right, 0.0f, width, height));
-        DrawTilesInClip(D2D1::RectF(left, 0.0f, right, top));
-        DrawTilesInClip(D2D1::RectF(left, bottom, right, height));
+        for (const D2D1_RECT_F& strip : strips)
+            DrawTilesInClip(strip);
     }
 
     void DrawSceneOverlaysInClip(const D2D1_RECT_F& clip)
@@ -1356,25 +1378,13 @@ private:
         m_overlayClip = previousClip;
     }
 
-    void DrawExposedCachedSceneEdges(const ViewState& view, const D2D1_RECT_F& cachedDest)
+    void DrawExposedCachedSceneEdges(const std::vector<D2D1_RECT_F>& strips)
     {
-        if (!m_rt)
-            return;
-
-        const float width = static_cast<float>(view.width);
-        const float height = static_cast<float>(view.height);
-        const float left = ClampValue(cachedDest.left, 0.0f, width);
-        const float top = ClampValue(cachedDest.top, 0.0f, height);
-        const float right = ClampValue(cachedDest.right, 0.0f, width);
-        const float bottom = ClampValue(cachedDest.bottom, 0.0f, height);
-
         // The cached scene is only the previous viewport. Draw full overlays just
         // into newly exposed strips so panning reveals boundary/fill/markers ahead
         // of the cursor without paying to redraw the whole map each frame.
-        DrawSceneOverlaysInClip(D2D1::RectF(0.0f, 0.0f, left, height));
-        DrawSceneOverlaysInClip(D2D1::RectF(right, 0.0f, width, height));
-        DrawSceneOverlaysInClip(D2D1::RectF(left, 0.0f, right, top));
-        DrawSceneOverlaysInClip(D2D1::RectF(left, bottom, right, height));
+        for (const D2D1_RECT_F& strip : strips)
+            DrawSceneOverlaysInClip(strip);
     }
 
     void OnPaint()
@@ -1396,8 +1406,9 @@ private:
             if (interactive && m_sceneBitmap && m_zoom == m_sceneBitmapZoom) {
                 drewCachedScene = DrawCachedScene(view, &cachedSceneDest);
                 if (drewCachedScene) {
-                    DrawExposedCachedSceneTiles(view, cachedSceneDest);
-                    DrawExposedCachedSceneEdges(view, cachedSceneDest);
+                    const std::vector<D2D1_RECT_F> exposedStrips = BuildExposedSceneStrips(view, cachedSceneDest);
+                    DrawExposedCachedSceneTiles(exposedStrips);
+                    DrawExposedCachedSceneEdges(exposedStrips);
                 }
             }
 
