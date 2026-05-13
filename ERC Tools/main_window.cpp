@@ -87,6 +87,59 @@ static std::wstring AppendPath(std::wstring base, const wchar_t* path)
     return base + path;
 }
 
+static SIZE MeasureControlText(HWND hwnd)
+{
+    SIZE size{};
+    if (!hwnd)
+        return size;
+
+    std::wstring text = GetWindowTextString(hwnd);
+    if (text.empty())
+        return size;
+
+    HDC dc = GetDC(hwnd);
+    if (!dc)
+        return size;
+
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
+    HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
+    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
+    if (oldFont)
+        SelectObject(dc, oldFont);
+    ReleaseDC(hwnd, dc);
+    return size;
+}
+
+static int PreferredControlWidth(HWND hwnd, int padding, int minimum = 0, int maximum = 0)
+{
+    SIZE textSize = MeasureControlText(hwnd);
+    int width = std::max(minimum, textSize.cx + padding);
+    if (maximum > 0)
+        width = std::min(width, maximum);
+    return width;
+}
+
+static int PreferredControlHeight(HWND hwnd, int padding, int minimum = 0)
+{
+    SIZE textSize = MeasureControlText(hwnd);
+    return std::max(minimum, textSize.cy + padding);
+}
+
+static void SizeControlToText(HWND hwnd, int horizontalPadding, int verticalPadding, int minimumWidth = 0, int maximumWidth = 0, int minimumHeight = 0)
+{
+    if (!hwnd)
+        return;
+
+    SetWindowPos(
+        hwnd,
+        nullptr,
+        0,
+        0,
+        PreferredControlWidth(hwnd, horizontalPadding, minimumWidth, maximumWidth),
+        PreferredControlHeight(hwnd, verticalPadding, minimumHeight),
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 static bool TryParseRefreshIntervalMilliseconds(const std::wstring& text, UINT& millisecondsOut)
 {
     std::wstring value = ToLower(Trim(text));
@@ -672,14 +725,17 @@ private:
         const int pad = 16;
         const int labelH = 22;
         const int controlH = 32;
-        const int topBarH = 44;
         const int statusH = 24;
 
-        MoveWindow(m_headerLabel, pad, 12, std::max<LONG>(200L, width - pad * 2 - 148), 28, TRUE);
-
         const LONG refreshW = 132;
-        MoveWindow(m_refreshBtn, width - refreshW - pad, 12, refreshW, controlH, TRUE);
+        const int topY = 12;
+        const int headerH = PreferredControlHeight(m_headerLabel, 8, 28);
+        const LONG headerMaxW = std::max<LONG>(200L, width - refreshW - pad * 3);
+        const LONG headerW = PreferredControlWidth(m_headerLabel, 8, 200, static_cast<int>(headerMaxW));
+        MoveWindow(m_headerLabel, pad, topY, headerW, headerH, TRUE);
+        MoveWindow(m_refreshBtn, width - refreshW - pad, topY, refreshW, controlH, TRUE);
 
+        const int topBarH = topY + std::max(headerH, controlH) + 4;
         int bodyTop = topBarH;
         int leftW = m_isSidePanelVisible ? 440 : 0;
         int detailsH = 185;
@@ -1478,6 +1534,21 @@ private:
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
+
+        SizeControlToText(m_urlLabel, 4, 6);
+        SizeControlToText(m_serverLabel, 4, 6);
+        SizeControlToText(refreshLabel, 4, 6);
+        SizeControlToText(intervalLabel, 4, 6);
+        SizeControlToText(filterLabel, 4, 6);
+        SizeControlToText(orderLabel, 4, 6);
+
+        const int radioY = 176;
+        const int radioGap = 12;
+        const int offRadioW = PreferredControlWidth(m_settingsRefreshOffRadio, 34, 160);
+        const int onRadioX = 18 + offRadioW + radioGap;
+        const int onRadioW = PreferredControlWidth(m_settingsRefreshOnRadio, 34, 132);
+        MoveWindow(m_settingsRefreshOffRadio, 18, radioY, offRadioW, 24, TRUE);
+        MoveWindow(m_settingsRefreshOnRadio, onRadioX, radioY, onRadioW, 24, TRUE);
 
         SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"https://www.trafficengland.com/traffic-alerts"));
         SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"http://localhost:8080"));
