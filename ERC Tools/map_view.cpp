@@ -63,23 +63,25 @@ struct BoundaryRing
     double maxLon = 0.0;
 };
 
+// Tile/cache tuning.
 constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
+constexpr int kMaxFallbackTileZoomDelta = 5;
+constexpr int kMaxInteractiveTileRequestsPerFrame = 2;
+
+// Interaction timing.
 constexpr UINT_PTR kInteractionIdleTimer = 1;
 constexpr UINT kInteractionIdleMs = 120;
+
+// Map styling.
 constexpr float kMapWaterR = 0.80f;
 constexpr float kMapWaterG = 0.91f;
 constexpr float kMapWaterB = 0.98f;
-constexpr int kMaxFallbackTileZoomDelta = 5;
+
+// Boundary rendering.
 constexpr double kBoundaryDrawMarginPixels = 512.0;
 constexpr int kFullBoundaryMaxZoom = 7;
-// Reuse the cached scene for panning only. Scaling the cached composite during
-// wheel zoom subtly changes translucent fill colours, especially at very close
-// zoom levels, so zoom frames are rendered live while still using lightweight
-// tile loading/fallbacks.
-constexpr double kMinCachedSceneScale = 1.0;
-constexpr double kMaxCachedSceneScale = 1.0;
-constexpr int kMaxInteractiveTileRequestsPerFrame = 2;
+
 std::atomic<int> g_activeTileDownloads{ 0 };
 
 // ============================================================
@@ -1274,27 +1276,25 @@ private:
         if (!m_rt || !m_sceneBitmap || m_sceneBitmapWidth <= 0 || m_sceneBitmapHeight <= 0)
             return false;
 
-        const int zoomDelta = m_zoom - m_sceneBitmapZoom;
-        if (zoomDelta != 0)
-            return false;
-
-        const double scale = 1.0;
-        if (scale < kMinCachedSceneScale || scale > kMaxCachedSceneScale)
+        // Reuse the cached scene for same-zoom panning only. Scaling the cached
+        // composite during wheel zoom changes translucent fill colours, especially
+        // at close zoom levels, so zoom frames are rendered live.
+        if (m_zoom != m_sceneBitmapZoom)
             return false;
 
         const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
-        double dx = m_sceneBitmapCenterWorld.x * scale - view.centerWorld.x;
+        double dx = m_sceneBitmapCenterWorld.x - view.centerWorld.x;
         if (dx > worldSize * 0.5)
             dx -= worldSize;
         else if (dx < -worldSize * 0.5)
             dx += worldSize;
 
-        const double dy = m_sceneBitmapCenterWorld.y * scale - view.centerWorld.y;
+        const double dy = m_sceneBitmapCenterWorld.y - view.centerWorld.y;
         if (std::abs(dx) > view.width * 0.75 || std::abs(dy) > view.height * 0.75)
             return false;
 
-        const float scaledWidth = static_cast<float>(m_sceneBitmapWidth * scale);
-        const float scaledHeight = static_cast<float>(m_sceneBitmapHeight * scale);
+        const float scaledWidth = static_cast<float>(m_sceneBitmapWidth);
+        const float scaledHeight = static_cast<float>(m_sceneBitmapHeight);
         const float centerX = static_cast<float>(view.width * 0.5 + dx);
         const float centerY = static_cast<float>(view.height * 0.5 + dy);
         const D2D1_RECT_F dest = D2D1::RectF(
