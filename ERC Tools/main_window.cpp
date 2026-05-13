@@ -17,14 +17,11 @@ constexpr int IDC_SEARCH_EDIT = 1003;
 constexpr int IDC_SEVERITY_COMBO = 1004;
 constexpr int IDC_LISTVIEW = 1005;
 constexpr int IDC_DETAILS_EDIT = 1006;
-constexpr int IDC_DOWNLOAD_BOUNDARY_BTN = 1007;
 constexpr int IDC_HEADER_LABEL = 1008;
-constexpr int IDC_URL_LABEL = 1009;
 constexpr int IDC_SEARCH_LABEL = 1010;
 constexpr int IDC_SEVERITY_LABEL = 1011;
 constexpr int IDC_STATUS_BAR = 1012;
 constexpr int IDC_SERVER_EDIT = 1013;
-constexpr int IDC_SERVER_LABEL = 1014;
 constexpr int IDC_CHAT_HISTORY = 1015;
 constexpr int IDC_CHAT_EDIT = 1016;
 constexpr int IDC_CHAT_SEND_BTN = 1017;
@@ -34,12 +31,15 @@ constexpr int IDC_NOTE_LABEL = 1020;
 constexpr int IDC_PANEL_TAB_BTN = 1021;
 constexpr int IDM_FILE_SETTINGS = 2001;
 constexpr int IDM_FILE_EXIT = 2002;
+constexpr int IDM_ABOUT = 2003;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
 constexpr int IDC_SETTINGS_CLOSE_BTN = 2104;
 constexpr int IDC_SETTINGS_FILTER_LABEL = 2105;
 constexpr int IDC_SETTINGS_ORDER_LABEL = 2106;
+constexpr int IDC_SETTINGS_ENDPOINT_LABEL = 2107;
+constexpr int IDC_SETTINGS_SERVER_LABEL = 2108;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 
 struct FeedResult
@@ -422,17 +422,6 @@ private:
             m_hInst,
             nullptr);
 
-        m_urlLabel = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"Alerts endpoint",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            0, 0, 0, 0,
-            m_hwnd,
-            reinterpret_cast<HMENU>(IDC_URL_LABEL),
-            m_hInst,
-            nullptr);
-
         m_searchLabel = CreateWindowExW(
             0,
             L"STATIC",
@@ -455,28 +444,9 @@ private:
             m_hInst,
             nullptr);
 
-        m_serverLabel = CreateWindowExW(
-            0, L"STATIC", L"Collaboration server", WS_CHILD | WS_VISIBLE | SS_LEFT,
-            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_SERVER_LABEL), m_hInst, nullptr);
-
         m_noteLabel = CreateWindowExW(
             0, L"STATIC", L"Map note (double-click map to choose a location)", WS_CHILD | WS_VISIBLE | SS_LEFT,
             0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_NOTE_LABEL), m_hInst, nullptr);
-
-        m_urlEdit = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
-            L"EDIT",
-            L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            0, 0, 0, 0,
-            m_hwnd,
-            reinterpret_cast<HMENU>(IDC_URL_EDIT),
-            m_hInst,
-            nullptr);
-
-        m_serverEdit = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_SERVER_EDIT), m_hInst, nullptr);
 
         m_panelTabBtn = CreateWindowExW(
             0,
@@ -576,22 +546,20 @@ private:
             m_hInst,
             nullptr);
 
-        if (!m_headerLabel || !m_urlLabel || !m_searchLabel || !m_severityLabel ||
-            !m_urlEdit || !m_serverLabel || !m_serverEdit || !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar)
+        if (!m_headerLabel || !m_searchLabel || !m_severityLabel ||
+            !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_urlLabel, m_serverLabel, m_searchLabel, m_severityLabel, m_noteLabel, m_urlEdit, m_serverEdit, m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
+        for (HWND h : { m_searchLabel, m_severityLabel, m_noteLabel, m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
         SendMessageW(m_headerLabel, WM_SETFONT, reinterpret_cast<WPARAM>(m_headerFont), TRUE);
 
         SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, region, or description"));
-        SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"https://www.trafficengland.com/traffic-alerts"));
-        SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"http://localhost:8080"));
         SendMessageW(m_chatEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Message local responders..."));
         SendMessageW(m_noteEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Note text for the selected map location"));
 
@@ -645,9 +613,6 @@ private:
             SetFocus(m_noteEdit);
             });
 
-        SetWindowTextW(m_urlEdit, L"https://www.trafficengland.com/traffic-alerts");
-        SetWindowTextW(m_serverEdit, L"http://localhost:8080");
-
         Layout();
         SetStatusText(L"Ready.");
         SetTimer(m_hwnd, 1, 5 * 60 * 1000, nullptr);
@@ -668,21 +633,13 @@ private:
         const int pad = 16;
         const int labelH = 22;
         const int controlH = 32;
-        const int topBarH = 156;
+        const int topBarH = 92;
         const int statusH = 24;
 
-        MoveWindow(m_headerLabel, pad, 12, std::max<LONG>(200L, width - pad * 2), 28, TRUE);
+        MoveWindow(m_headerLabel, pad, 12, std::max<LONG>(200L, width - pad * 2 - 148), 28, TRUE);
 
-        const int endpointY = 52;
         const LONG refreshW = 132;
-        const LONG toggleW = 132;
-        LONG topEditW = std::max<LONG>(220L, (width - refreshW - toggleW - pad * 5) / 2);
-        MoveWindow(m_urlLabel, pad, endpointY, 160, labelH, TRUE);
-        MoveWindow(m_urlEdit, pad, endpointY + labelH + 2, topEditW, controlH, TRUE);
-        MoveWindow(m_serverLabel, pad * 2 + topEditW, endpointY, 180, labelH, TRUE);
-        MoveWindow(m_serverEdit, pad * 2 + topEditW, endpointY + labelH + 2, std::max<LONG>(220L, width - refreshW - toggleW - topEditW - pad * 5), controlH, TRUE);
-        MoveWindow(m_togglePanelBtn, width - refreshW - toggleW - pad * 2, endpointY + labelH + 2, toggleW, controlH, TRUE);
-        MoveWindow(m_refreshBtn, width - refreshW - pad, endpointY + labelH + 2, refreshW, controlH, TRUE);
+        MoveWindow(m_refreshBtn, width - refreshW - pad, 12, refreshW, controlH, TRUE);
 
         int bodyTop = topBarH;
         int leftW = m_isSidePanelVisible ? 440 : 0;
@@ -781,6 +738,10 @@ private:
             DestroyWindow(m_hwnd);
             break;
 
+        case IDM_ABOUT:
+            ShowAboutDialog();
+            break;
+
         case IDC_CHAT_SEND_BTN:
             if (code == BN_CLICKED)
                 SendChatAsync();
@@ -832,7 +793,7 @@ private:
             return;
         }
 
-        std::wstring url = NormalizeUrl(GetWindowTextString(m_urlEdit));
+        std::wstring url = NormalizeUrl(m_alertsEndpoint);
         if (url.empty()) {
             g_fetchInProgress.store(false);
             SetStatusText(L"Please enter a feed URL.");
@@ -1065,7 +1026,7 @@ private:
 
     std::wstring ServerBaseUrl() const
     {
-        return NormalizeUrl(GetWindowTextString(m_serverEdit));
+        return NormalizeUrl(m_serverBaseUrl);
     }
 
     void RenderChatHistory()
@@ -1327,7 +1288,17 @@ private:
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
+        AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"About");
         SetMenu(m_hwnd, menu);
+    }
+
+    void ShowAboutDialog()
+    {
+        MessageBoxW(
+            m_hwnd,
+            L"Traffic England Alerts Map\n\nView Traffic England alerts on a UK map, collaborate with local responders, and share map notes.",
+            L"About Traffic England Alerts Map",
+            MB_OK | MB_ICONINFORMATION);
     }
 
     void SortAlertsForCurrentOrder()
@@ -1432,7 +1403,7 @@ private:
 
         if (!m_settingsWnd || !IsWindow(m_settingsWnd)) {
             m_settingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClassName, L"Settings", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                CW_USEDEFAULT, CW_USEDEFAULT, 430, 255, m_hwnd, nullptr, m_hInst, this);
+                CW_USEDEFAULT, CW_USEDEFAULT, 470, 365, m_hwnd, nullptr, m_hInst, this);
         }
         SyncSettingsControls();
         ShowWindow(m_settingsWnd, SW_SHOW);
@@ -1441,17 +1412,24 @@ private:
 
     void CreateSettingsControls(HWND parent)
     {
-        HWND filterLabel = CreateWindowExW(0, L"STATIC", L"Traffic England alert filter", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 18, 360, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_FILTER_LABEL), m_hInst, nullptr);
-        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 44, 370, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
-        HWND orderLabel = CreateWindowExW(0, L"STATIC", L"Traffic England order", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 82, 360, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ORDER_LABEL), m_hInst, nullptr);
-        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 108, 370, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
-        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 154, 250, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 286, 154, 102, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+        m_urlLabel = CreateWindowExW(0, L"STATIC", L"Alerts endpoint", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 18, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ENDPOINT_LABEL), m_hInst, nullptr);
+        m_urlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 44, 410, 26, parent, reinterpret_cast<HMENU>(IDC_URL_EDIT), m_hInst, nullptr);
+        m_serverLabel = CreateWindowExW(0, L"STATIC", L"Collaboration server", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 84, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_SERVER_LABEL), m_hInst, nullptr);
+        m_serverEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 110, 410, 26, parent, reinterpret_cast<HMENU>(IDC_SERVER_EDIT), m_hInst, nullptr);
+        HWND filterLabel = CreateWindowExW(0, L"STATIC", L"Traffic England alert filter", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 150, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_FILTER_LABEL), m_hInst, nullptr);
+        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 176, 410, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
+        HWND orderLabel = CreateWindowExW(0, L"STATIC", L"Traffic England order", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 214, 410, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ORDER_LABEL), m_hInst, nullptr);
+        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 240, 410, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
+        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 286, 260, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 286, 102, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { filterLabel, m_settingsFilterCombo, orderLabel, m_settingsOrderCombo, boundary, close }) {
+        for (HWND h : { m_urlLabel, m_urlEdit, m_serverLabel, m_serverEdit, filterLabel, m_settingsFilterCombo, orderLabel, m_settingsOrderCombo, boundary, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
+
+        SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"https://www.trafficengland.com/traffic-alerts"));
+        SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"http://localhost:8080"));
 
         SendMessageW(m_settingsFilterCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Unplanned only"));
         SendMessageW(m_settingsFilterCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All alerts"));
@@ -1464,6 +1442,10 @@ private:
 
     void SyncSettingsControls()
     {
+        if (m_urlEdit)
+            SetWindowTextSafe(m_urlEdit, m_alertsEndpoint);
+        if (m_serverEdit)
+            SetWindowTextSafe(m_serverEdit, m_serverBaseUrl);
         if (m_settingsFilterCombo)
             SendMessageW(m_settingsFilterCombo, CB_SETCURSEL, m_alertFilterUnplannedOnly ? 0 : 1, 0);
         if (m_settingsOrderCombo) {
@@ -1478,7 +1460,13 @@ private:
 
     void OnSettingsCommand(int id, int code)
     {
-        if (id == IDC_SETTINGS_ALERT_FILTER && code == CBN_SELCHANGE) {
+        if (id == IDC_URL_EDIT && code == EN_CHANGE) {
+            m_alertsEndpoint = NormalizeUrl(GetWindowTextString(m_urlEdit));
+        }
+        else if (id == IDC_SERVER_EDIT && code == EN_CHANGE) {
+            m_serverBaseUrl = NormalizeUrl(GetWindowTextString(m_serverEdit));
+        }
+        else if (id == IDC_SETTINGS_ALERT_FILTER && code == CBN_SELCHANGE) {
             m_alertFilterUnplannedOnly = SendMessageW(m_settingsFilterCombo, CB_GETCURSEL, 0, 0) == 0;
             RefreshFeedAsync();
         }
@@ -1512,7 +1500,6 @@ private:
     HWND m_panelTabBtn = nullptr;
     HWND m_urlEdit = nullptr;
     HWND m_serverEdit = nullptr;
-    HWND  m_togglePanelBtn = nullptr;
     HWND m_refreshBtn = nullptr;
     HWND m_searchEdit = nullptr;
     HWND m_severityCombo = nullptr;
@@ -1538,6 +1525,8 @@ private:
     bool m_isSidePanelVisible = true;
     bool m_alertFilterUnplannedOnly = true;
     std::wstring m_alertOrder = L"Road";
+    std::wstring m_alertsEndpoint = L"https://www.trafficengland.com/traffic-alerts";
+    std::wstring m_serverBaseUrl = L"http://localhost:8080";
     std::atomic_bool m_serverRequestInProgress{ false };
     bool m_hasPendingNoteLocation = false;
     double m_pendingNoteLat = 0.0;
