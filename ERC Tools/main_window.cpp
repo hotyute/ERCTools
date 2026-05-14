@@ -35,6 +35,9 @@ constexpr int IDM_FILE_EXIT = 2002;
 constexpr int IDM_ABOUT = 2003;
 constexpr int IDM_ROADS_INCIDENT_FILTERS = 2004;
 constexpr int IDM_ROADS_INCIDENT_NOTIFICATIONS = 2005;
+constexpr int IDM_EARTHQUAKES_LIST = 2006;
+constexpr int IDM_EARTHQUAKE_NOTIFICATIONS = 2007;
+constexpr int IDM_SHOW_EARTHQUAKES = 2008;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -68,14 +71,45 @@ constexpr int IDC_INCIDENT_NOTIFICATIONS_LANES_EDIT = 2306;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_LABEL = 2307;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT = 2308;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN = 2309;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_REGIONS_LABEL = 2310;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_REGIONS_BTN = 2311;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_DELAY_LABEL = 2312;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_DELAY_EDIT = 2313;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_AND_RADIO = 2314;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_OR_RADIO = 2315;
+constexpr int IDC_NOTIFICATION_REGIONS_LIST = 2401;
+constexpr int IDC_NOTIFICATION_REGIONS_NEW_BTN = 2402;
+constexpr int IDC_NOTIFICATION_REGIONS_EDIT_BTN = 2403;
+constexpr int IDC_NOTIFICATION_REGIONS_DELETE_BTN = 2404;
+constexpr int IDC_NOTIFICATION_REGIONS_CLOSE_BTN = 2405;
+constexpr int IDC_NOTIFICATION_REGION_NAME_EDIT = 2411;
+constexpr int IDC_NOTIFICATION_REGION_ROADS_EDIT = 2412;
+constexpr int IDC_NOTIFICATION_REGION_ALL_ROADS_CHECK = 2413;
+constexpr int IDC_NOTIFICATION_REGION_DRAW_BTN = 2414;
+constexpr int IDC_NOTIFICATION_REGION_CLEAR_BTN = 2415;
+constexpr int IDC_NOTIFICATION_REGION_CLOSE_BTN = 2416;
+constexpr int IDC_NOTIFICATION_REGION_POINTS_LABEL = 2417;
+constexpr int IDC_EARTHQUAKE_LIST_MAG_EDIT = 2501;
+constexpr int IDC_EARTHQUAKE_LIST_TIME_EDIT = 2502;
+constexpr int IDC_EARTHQUAKE_LIST_REGION_BTN = 2503;
+constexpr int IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN = 2504;
+constexpr int IDC_EARTHQUAKE_LIST_LISTVIEW = 2505;
+constexpr int IDC_EARTHQUAKE_LIST_CLOSE_BTN = 2506;
+constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT = 2521;
+constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN = 2522;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
 constexpr const wchar_t* kIncidentNotificationsClassName = L"TrafficEnglandIncidentNotificationsWindow";
+constexpr const wchar_t* kNotificationRegionsClassName = L"TrafficEnglandNotificationRegionsWindow";
+constexpr const wchar_t* kNotificationRegionEditorClassName = L"TrafficEnglandNotificationRegionEditorWindow";
+constexpr const wchar_t* kEarthquakeListClassName = L"TrafficEnglandEarthquakeListWindow";
+constexpr const wchar_t* kEarthquakeNotificationsClassName = L"TrafficEnglandEarthquakeNotificationsWindow";
 constexpr UINT WM_APP_NOTIFY_ICON = WM_APP + 20;
 constexpr UINT kNotificationIconId = 1;
 constexpr UINT_PTR kAlertRefreshTimerId = 1;
 constexpr UINT_PTR kServerPollTimerId = 2;
 constexpr UINT_PTR kInAppNotificationTimerId = 3;
+constexpr UINT_PTR kEarthquakeRefreshTimerId = 4;
 
 struct FeedResult
 {
@@ -89,6 +123,14 @@ struct BoundaryDownloadResult
     bool ok = false;
     std::wstring error;
     std::filesystem::path filePath;
+};
+
+struct EarthquakeResult
+{
+    bool ok = false;
+    bool notify = false;
+    std::wstring error;
+    std::vector<EarthquakeEvent> events;
 };
 
 enum class ServerAction
@@ -107,6 +149,21 @@ struct ServerResult
     std::wstring error;
     std::vector<ChatMessage> chat;
     std::vector<MapNote> notes;
+};
+
+enum class PolygonCaptureTarget
+{
+    None,
+    IncidentRegion,
+    EarthquakeRegion
+};
+
+class MainWindow;
+
+struct NotificationRegionEditorContext
+{
+    MainWindow* owner = nullptr;
+    size_t index = 0;
 };
 
 static std::wstring AppendPath(std::wstring base, const wchar_t* path)
@@ -334,6 +391,221 @@ static std::wstring ExtractLabeledNotificationField(const std::wstring& descript
         return Trim(m[1].str());
 
     return L"";
+}
+
+static bool TryParseDurationMinutes(const std::wstring& text, double& minutesOut)
+{
+    std::wstring value = ToLower(Trim(text));
+    if (value.empty())
+        return false;
+
+    std::wsmatch m;
+    std::wregex re(LR"((\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m)\b)", std::regex_constants::icase);
+    if (!std::regex_search(value, m, re) || m.size() < 3)
+        return false;
+
+    wchar_t* end = nullptr;
+    double amount = std::wcstod(m[1].str().c_str(), &end);
+    if (end == m[1].str().c_str() || !std::isfinite(amount) || amount < 0.0)
+        return false;
+
+    std::wstring unit = ToLower(m[2].str());
+    if (unit == L"h" || unit == L"hr" || unit == L"hrs" || unit == L"hour" || unit == L"hours")
+        amount *= 60.0;
+
+    minutesOut = amount;
+    return true;
+}
+
+static bool TryParseDoubleText(const std::wstring& text, double& valueOut)
+{
+    std::wstring value = Trim(text);
+    if (value.empty())
+        return false;
+
+    wchar_t* end = nullptr;
+    double parsed = std::wcstod(value.c_str(), &end);
+    if (end == value.c_str() || !std::isfinite(parsed) || !Trim(end ? end : L"").empty())
+        return false;
+
+    valueOut = parsed;
+    return true;
+}
+
+static bool TryExtractAlertDelayMinutes(const TrafficAlert& alert, double& minutesOut)
+{
+    std::wstring delayText = ExtractLabeledNotificationField(alert.description, L"Delay");
+    if (!delayText.empty() && TryParseDurationMinutes(delayText, minutesOut))
+        return true;
+
+    std::wsmatch m;
+    std::wregex re(LR"(\bDelay\s*:\s*(.*?)(?=\s+(?:Location|Reason|Status|Time To Clear|Return To Normal|Lanes Closed)\s*:|$))", std::regex_constants::icase);
+    if (std::regex_search(alert.description, m, re) && m.size() > 1)
+        return TryParseDurationMinutes(m[1].str(), minutesOut);
+
+    return false;
+}
+
+static bool PointInPolygon(double lat, double lon, const std::vector<GeoPoint>& points)
+{
+    if (points.size() < 3)
+        return false;
+
+    bool inside = false;
+    size_t j = points.size() - 1;
+    for (size_t i = 0; i < points.size(); ++i) {
+        const double yi = points[i].lat;
+        const double yj = points[j].lat;
+        const double xi = points[i].lon;
+        const double xj = points[j].lon;
+
+        const bool intersects = ((yi > lat) != (yj > lat)) &&
+            (lon < (xj - xi) * (lat - yi) / ((yj - yi) == 0.0 ? 1e-12 : (yj - yi)) + xi);
+        if (intersects)
+            inside = !inside;
+        j = i;
+    }
+    return inside;
+}
+
+static bool TryParseDateTimeFilter(const std::wstring& text, long long& timeMsOut)
+{
+    std::wstring value = Trim(text);
+    if (value.empty()) {
+        timeMsOut = 0;
+        return true;
+    }
+
+    std::tm tm{};
+    int y = 0, mon = 0, d = 0, h = 0, min = 0;
+    int count = swscanf_s(value.c_str(), L"%d-%d-%d %d:%d", &y, &mon, &d, &h, &min);
+    if (count < 3)
+        count = swscanf_s(value.c_str(), L"%d/%d/%d %d:%d", &y, &mon, &d, &h, &min);
+    if (count < 3)
+        return false;
+
+    tm.tm_year = y - 1900;
+    tm.tm_mon = mon - 1;
+    tm.tm_mday = d;
+    tm.tm_hour = count >= 4 ? h : 0;
+    tm.tm_min = count >= 5 ? min : 0;
+    tm.tm_sec = 0;
+    tm.tm_isdst = -1;
+
+    std::time_t t = std::mktime(&tm);
+    if (t == static_cast<std::time_t>(-1))
+        return false;
+
+    timeMsOut = static_cast<long long>(t) * 1000LL;
+    return true;
+}
+
+static std::wstring EarthquakeTimeText(long long timeMs)
+{
+    if (timeMs <= 0)
+        return L"";
+
+    std::time_t t = static_cast<std::time_t>(timeMs / 1000LL);
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    wchar_t buf[64]{};
+    wcsftime(buf, _countof(buf), L"%Y-%m-%d %H:%M", &tm);
+    return buf;
+}
+
+static std::vector<EarthquakeEvent> ParseEarthquakeEvents(const std::string& body)
+{
+    std::vector<EarthquakeEvent> out;
+    json root = json::parse(body);
+    if (!root.is_object())
+        return out;
+
+    auto featuresIt = root.find("features");
+    if (featuresIt == root.end() || !featuresIt->is_array())
+        return out;
+
+    for (const json& feature : *featuresIt) {
+        if (!feature.is_object())
+            continue;
+
+        const json* propsPtr = nullptr;
+        const json* geomPtr = nullptr;
+        auto propsIt = feature.find("properties");
+        if (propsIt != feature.end() && propsIt->is_object())
+            propsPtr = &(*propsIt);
+        auto geomIt = feature.find("geometry");
+        if (geomIt != feature.end() && geomIt->is_object())
+            geomPtr = &(*geomIt);
+        const json& props = propsPtr ? *propsPtr : feature;
+        const json& geom = geomPtr ? *geomPtr : feature;
+        EarthquakeEvent event;
+        event.id = PickString(feature, { "id" });
+        event.place = PickString(props, { "place", "title" });
+        PickDouble(props, { "mag", "magnitude" }, event.magnitude);
+        event.timeMs = props.value("time", 0LL);
+        event.timeText = EarthquakeTimeText(event.timeMs);
+
+        auto coordsIt = geom.find("coordinates");
+        if (coordsIt != geom.end() && coordsIt->is_array() && coordsIt->size() >= 2) {
+            TryGetDoubleFromJsonValue((*coordsIt)[0], event.longitude);
+            TryGetDoubleFromJsonValue((*coordsIt)[1], event.latitude);
+            if (coordsIt->size() >= 3)
+                TryGetDoubleFromJsonValue((*coordsIt)[2], event.depthKm);
+            event.hasLocation = std::isfinite(event.latitude) && std::isfinite(event.longitude);
+        }
+
+        if (event.id.empty())
+            event.id = event.place + L"|" + std::to_wstring(event.timeMs);
+        out.push_back(std::move(event));
+    }
+
+    return out;
+}
+
+static GeoPolygon GeoPolygonFromJson(const json& value)
+{
+    GeoPolygon polygon;
+    if (!value.is_object())
+        return polygon;
+
+    polygon.name = PickString(value, { "name" });
+    polygon.roadFilter = PickString(value, { "roadFilter", "roads" });
+    auto allIt = value.find("allRoads");
+    if (allIt != value.end() && allIt->is_boolean())
+        polygon.allRoads = allIt->get<bool>();
+
+    auto pointsIt = value.find("points");
+    if (pointsIt != value.end() && pointsIt->is_array()) {
+        for (const json& item : *pointsIt) {
+            if (!item.is_object())
+                continue;
+            double lat = 0.0;
+            double lon = 0.0;
+            if (PickDouble(item, { "lat", "latitude" }, lat) &&
+                PickDouble(item, { "lon", "longitude" }, lon))
+            {
+                polygon.points.push_back({ lat, lon });
+            }
+        }
+    }
+
+    return polygon;
+}
+
+static json GeoPolygonToJson(const GeoPolygon& polygon)
+{
+    json value = json::object();
+    value["name"] = WideToUtf8(polygon.name);
+    value["roadFilter"] = WideToUtf8(polygon.roadFilter);
+    value["allRoads"] = polygon.allRoads;
+    value["points"] = json::array();
+    for (const GeoPoint& point : polygon.points) {
+        value["points"].push_back({
+            { "lat", point.lat },
+            { "lon", point.lon }
+            });
+    }
+    return value;
 }
 
 static std::vector<ChatMessage> ParseChatMessages(const json& root)
@@ -641,6 +913,8 @@ private:
                 RefreshFeedAsync();
             else if (wParam == kServerPollTimerId)
                 PollServerAsync();
+            else if (wParam == kEarthquakeRefreshTimerId)
+                FetchEarthquakesAsync(true);
             else if (wParam == kInAppNotificationTimerId) {
                 KillTimer(m_hwnd, kInAppNotificationTimerId);
                 if (m_inAppNotification)
@@ -663,6 +937,10 @@ private:
             OnServerReady(reinterpret_cast<ServerResult*>(lParam));
             return 0;
 
+        case WM_APP_EARTHQUAKE_READY:
+            OnEarthquakeReady(reinterpret_cast<EarthquakeResult*>(lParam));
+            return 0;
+
         case WM_DESTROY:
             g_appQuitting.store(true);
             SaveSettings();
@@ -670,6 +948,7 @@ private:
             KillTimer(m_hwnd, kAlertRefreshTimerId);
             KillTimer(m_hwnd, kServerPollTimerId);
             KillTimer(m_hwnd, kInAppNotificationTimerId);
+            KillTimer(m_hwnd, kEarthquakeRefreshTimerId);
             if (m_font) {
                 DeleteObject(m_font);
                 m_font = nullptr;
@@ -880,13 +1159,19 @@ private:
             SetStatusText(L"Note location selected: " + std::to_wstring(lat) + L", " + std::to_wstring(lon));
             SetFocus(m_noteEdit);
             });
+        m_map.SetPolygonPointCallback([this](double lat, double lon) {
+            OnMapPolygonPoint(lat, lon);
+            });
+        m_map.SetNotificationPolygons(m_incidentNotificationRegions);
 
         Layout();
         SetStatusText(L"Ready.");
         ApplyRefreshTimer();
         SetTimer(m_hwnd, kServerPollTimerId, 8 * 1000, nullptr);
+        SetTimer(m_hwnd, kEarthquakeRefreshTimerId, 10 * 60 * 1000, nullptr);
 
         RefreshFeedAsync();
+        FetchEarthquakesAsync(true);
         PollServerAsync();
     }
 
@@ -1034,6 +1319,18 @@ private:
             ShowIncidentNotificationsWindow();
             break;
 
+        case IDM_EARTHQUAKES_LIST:
+            ShowEarthquakeListWindow();
+            break;
+
+        case IDM_EARTHQUAKE_NOTIFICATIONS:
+            ShowEarthquakeNotificationsWindow();
+            break;
+
+        case IDM_SHOW_EARTHQUAKES:
+            ToggleShowEarthquakes();
+            break;
+
         case IDM_ABOUT:
             ShowAboutDialog();
             break;
@@ -1150,7 +1447,29 @@ private:
             double parsedThreshold = 0.0;
             if (TryParsePercentThreshold(m_incidentNotifyLaneThresholdText, parsedThreshold))
                 m_incidentNotifyLaneThreshold = parsedThreshold;
+            readString("incidentNotifyDelayThresholdText", m_incidentNotifyDelayThresholdText);
+            readDouble("incidentNotifyDelayThresholdMinutes", m_incidentNotifyDelayThresholdMinutes);
+            double parsedDelayMinutes = 0.0;
+            if (TryParseDurationMinutes(m_incidentNotifyDelayThresholdText, parsedDelayMinutes))
+                m_incidentNotifyDelayThresholdMinutes = parsedDelayMinutes;
+            readBool("incidentNotifyThresholdUseOr", m_incidentNotifyThresholdUseOr);
             readString("incidentNotifyReasonExclusions", m_incidentNotifyReasonExclusions);
+            auto regionsIt = settings->find("incidentNotificationRegions");
+            if (regionsIt != settings->end() && regionsIt->is_array()) {
+                m_incidentNotificationRegions.clear();
+                for (const json& item : *regionsIt) {
+                    GeoPolygon polygon = GeoPolygonFromJson(item);
+                    if (!polygon.name.empty() || !polygon.points.empty())
+                        m_incidentNotificationRegions.push_back(std::move(polygon));
+                }
+            }
+
+            readBool("showEarthquakes", m_showEarthquakes);
+            readString("earthquakeNotificationMagnitudeText", m_earthquakeNotificationMagnitudeText);
+            readDouble("earthquakeNotificationMagnitude", m_earthquakeNotificationMagnitude);
+            double parsedMag = 0.0;
+            if (TryParseDoubleText(m_earthquakeNotificationMagnitudeText, parsedMag))
+                m_earthquakeNotificationMagnitude = parsedMag;
         }
         catch (...) {
             OutputDebugStringW(L"Settings file could not be parsed; using defaults.\n");
@@ -1196,7 +1515,16 @@ private:
             settings["incidentNotifyRoads"] = WideToUtf8(m_incidentNotifyRoads);
             settings["incidentNotifyLaneThresholdText"] = WideToUtf8(m_incidentNotifyLaneThresholdText);
             settings["incidentNotifyLaneThreshold"] = m_incidentNotifyLaneThreshold;
+            settings["incidentNotifyDelayThresholdText"] = WideToUtf8(m_incidentNotifyDelayThresholdText);
+            settings["incidentNotifyDelayThresholdMinutes"] = m_incidentNotifyDelayThresholdMinutes;
+            settings["incidentNotifyThresholdUseOr"] = m_incidentNotifyThresholdUseOr;
             settings["incidentNotifyReasonExclusions"] = WideToUtf8(m_incidentNotifyReasonExclusions);
+            settings["incidentNotificationRegions"] = json::array();
+            for (const GeoPolygon& polygon : m_incidentNotificationRegions)
+                settings["incidentNotificationRegions"].push_back(GeoPolygonToJson(polygon));
+            settings["showEarthquakes"] = m_showEarthquakes;
+            settings["earthquakeNotificationMagnitudeText"] = WideToUtf8(m_earthquakeNotificationMagnitudeText);
+            settings["earthquakeNotificationMagnitude"] = m_earthquakeNotificationMagnitude;
 
             std::ofstream out(GetSettingsPath(), std::ios::binary | std::ios::trunc);
             if (out)
@@ -1342,18 +1670,40 @@ private:
         return alert.title;
     }
 
-    bool RoadMatchesIncidentNotification(const TrafficAlert& alert) const
+    bool RoadListMatches(const std::wstring& road, const std::wstring& filter, bool emptyMatchesAll) const
     {
-        std::vector<std::wstring> roads = SplitCommaSeparatedTokens(m_incidentNotifyRoads);
+        std::vector<std::wstring> roads = SplitCommaSeparatedTokens(filter);
         if (roads.empty())
-            return true;
+            return emptyMatchesAll;
 
-        std::wstring road = alert.road.empty() ? alert.region : alert.road;
         for (const std::wstring& token : roads) {
             if (RoadTokenMatches(road, token))
                 return true;
         }
         return false;
+    }
+
+    bool AlertMatchesIncidentNotificationRegion(const TrafficAlert& alert) const
+    {
+        if (!alert.hasLocation)
+            return false;
+
+        std::wstring road = alert.road.empty() ? alert.region : alert.road;
+        for (const GeoPolygon& polygon : m_incidentNotificationRegions) {
+            if (polygon.points.size() < 3 || !PointInPolygon(alert.latitude, alert.longitude, polygon.points))
+                continue;
+            if (polygon.allRoads || RoadListMatches(road, polygon.roadFilter, true))
+                return true;
+        }
+        return false;
+    }
+
+    bool RoadMatchesIncidentNotification(const TrafficAlert& alert) const
+    {
+        std::wstring road = alert.road.empty() ? alert.region : alert.road;
+        if (RoadListMatches(road, m_incidentNotifyRoads, m_incidentNotificationRegions.empty()))
+            return true;
+        return AlertMatchesIncidentNotificationRegion(alert);
     }
 
     bool ReasonExcludedFromNotification(const TrafficAlert& alert) const
@@ -1387,12 +1737,29 @@ private:
         return ClosedLanePercentage(alert) + 0.0001 >= m_incidentNotifyLaneThreshold;
     }
 
+    bool DelayThresholdMatchesIncidentNotification(const TrafficAlert& alert) const
+    {
+        if (m_incidentNotifyDelayThresholdMinutes <= 0.0)
+            return true;
+
+        double delayMinutes = 0.0;
+        return TryExtractAlertDelayMinutes(alert, delayMinutes) &&
+            delayMinutes + 0.0001 >= m_incidentNotifyDelayThresholdMinutes;
+    }
+
+    bool IncidentThresholdsMatchNotification(const TrafficAlert& alert) const
+    {
+        bool laneMatch = LaneThresholdMatchesIncidentNotification(alert);
+        bool delayMatch = DelayThresholdMatchesIncidentNotification(alert);
+        return m_incidentNotifyThresholdUseOr ? (laneMatch || delayMatch) : (laneMatch && delayMatch);
+    }
+
     bool AlertMatchesIncidentNotification(const TrafficAlert& alert) const
     {
         return RoadMatchesIncidentNotification(alert) &&
             SeverityAllowedForIncidentNotification(alert) &&
             IncidentTypeAllowedForNotification(alert) &&
-            LaneThresholdMatchesIncidentNotification(alert) &&
+            IncidentThresholdsMatchNotification(alert) &&
             !ReasonExcludedFromNotification(alert);
     }
 
@@ -1423,6 +1790,12 @@ private:
             line += L" of ";
             line += std::to_wstring(alert.lanesTotal);
             line += L" lanes closed)";
+        }
+        double delayMinutes = 0.0;
+        if (TryExtractAlertDelayMinutes(alert, delayMinutes)) {
+            line += L" (delay ";
+            line += std::to_wstring(static_cast<int>(std::round(delayMinutes)));
+            line += L" min)";
         }
         return line;
     }
@@ -1975,13 +2348,23 @@ private:
         HMENU menu = CreateMenu();
         HMENU fileMenu = CreatePopupMenu();
         HMENU roadsMenu = CreatePopupMenu();
+        HMENU earthquakesMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_SETTINGS, L"Settings...");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_FILTERS, L"Incident Filters...");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_NOTIFICATIONS, L"Incident Notifications...");
+        AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKES_LIST, L"Earthquakes List...");
+        AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKE_NOTIFICATIONS, L"Earthquake Notifications...");
+        AppendMenuW(earthquakesMenu, m_showEarthquakes ? MF_CHECKED : MF_UNCHECKED, IDM_SHOW_EARTHQUAKES, L"Show Earthquakes");
+        MENUITEMINFOW showEarthquakesInfo{};
+        showEarthquakesInfo.cbSize = sizeof(showEarthquakesInfo);
+        showEarthquakesInfo.fMask = MIIM_FTYPE;
+        showEarthquakesInfo.fType = MFT_RADIOCHECK;
+        SetMenuItemInfoW(earthquakesMenu, IDM_SHOW_EARTHQUAKES, FALSE, &showEarthquakesInfo);
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(earthquakesMenu), L"Earthquakes");
         AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"About");
         SetMenu(m_hwnd, menu);
     }
@@ -2199,7 +2582,7 @@ private:
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 540,
-                430,
+                560,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -2238,19 +2621,34 @@ private:
         m_incidentNotifyLaneThresholdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, 120, 26, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_LANES_EDIT), m_hInst, nullptr);
         y += 42;
 
+        m_incidentNotifyAndRadio = CreateWindowExW(0, L"BUTTON", L"AND", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, editX, y, 72, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_AND_RADIO), m_hInst, nullptr);
+        m_incidentNotifyOrRadio = CreateWindowExW(0, L"BUTTON", L"OR", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, editX + 84, y, 72, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_OR_RADIO), m_hInst, nullptr);
+        y += 36;
+
+        CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_DELAY_LABEL, L"Delay threshold", left, y);
+        y += 26;
+        m_incidentNotifyDelayThresholdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, 120, 26, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_DELAY_EDIT), m_hInst, nullptr);
+        y += 42;
+
+        CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_REGIONS_LABEL, L"Notification regions", left, y);
+        y += 26;
+        m_incidentNotifyRegionsBtn = CreateWindowExW(0, L"BUTTON", L"Manage regions...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, editX, y, 168, 32, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_REGIONS_BTN), m_hInst, nullptr);
+        y += 48;
+
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_LABEL, L"Reason exclusions", left, y);
         y += 26;
         m_incidentNotifyReasonExclusionsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT), m_hInst, nullptr);
 
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 392, 338, 102, 32, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 392, y + 42, 102, 32, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyReasonExclusionsEdit, close }) {
+        for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyAndRadio, m_incidentNotifyOrRadio, m_incidentNotifyDelayThresholdEdit, m_incidentNotifyRegionsBtn, m_incidentNotifyReasonExclusionsEdit, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
 
         SendMessageW(m_incidentNotifyRoadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M*, A1(M), A2, A15, A16, A17, A20, A4, A52"));
         SendMessageW(m_incidentNotifyLaneThresholdEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"50%"));
+        SendMessageW(m_incidentNotifyDelayThresholdEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"1 hour"));
         SendMessageW(m_incidentNotifyReasonExclusionsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Road Management"));
         SyncIncidentNotificationControls();
     }
@@ -2262,6 +2660,12 @@ private:
             SetWindowTextSafe(m_incidentNotifyRoadsEdit, m_incidentNotifyRoads);
         if (m_incidentNotifyLaneThresholdEdit)
             SetWindowTextSafe(m_incidentNotifyLaneThresholdEdit, m_incidentNotifyLaneThresholdText);
+        if (m_incidentNotifyDelayThresholdEdit)
+            SetWindowTextSafe(m_incidentNotifyDelayThresholdEdit, m_incidentNotifyDelayThresholdText);
+        if (m_incidentNotifyAndRadio)
+            SendMessageW(m_incidentNotifyAndRadio, BM_SETCHECK, m_incidentNotifyThresholdUseOr ? BST_UNCHECKED : BST_CHECKED, 0);
+        if (m_incidentNotifyOrRadio)
+            SendMessageW(m_incidentNotifyOrRadio, BM_SETCHECK, m_incidentNotifyThresholdUseOr ? BST_CHECKED : BST_UNCHECKED, 0);
         if (m_incidentNotifyReasonExclusionsEdit)
             SetWindowTextSafe(m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyReasonExclusions);
         m_syncingControls = false;
@@ -2274,6 +2678,15 @@ private:
 
         if (id == IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN && code == BN_CLICKED) {
             ShowWindow(m_incidentNotificationsWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_INCIDENT_NOTIFICATIONS_REGIONS_BTN && code == BN_CLICKED) {
+            ShowNotificationRegionsWindow();
+            return;
+        }
+        if ((id == IDC_INCIDENT_NOTIFICATIONS_AND_RADIO || id == IDC_INCIDENT_NOTIFICATIONS_OR_RADIO) && code == BN_CLICKED) {
+            m_incidentNotifyThresholdUseOr = (id == IDC_INCIDENT_NOTIFICATIONS_OR_RADIO);
+            SaveSettings();
             return;
         }
 
@@ -2301,6 +2714,374 @@ private:
                 SetStatusText(L"Lane threshold should be a percentage such as 50%.");
             }
         }
+        else if (id == IDC_INCIDENT_NOTIFICATIONS_DELAY_EDIT) {
+            std::wstring thresholdText = Trim(GetWindowTextString(m_incidentNotifyDelayThresholdEdit));
+            double parsed = 0.0;
+            if (TryParseDurationMinutes(thresholdText, parsed)) {
+                m_incidentNotifyDelayThresholdText = thresholdText;
+                m_incidentNotifyDelayThresholdMinutes = parsed;
+                SaveSettings();
+            }
+            else if (code == EN_KILLFOCUS) {
+                SetWindowTextSafe(m_incidentNotifyDelayThresholdEdit, m_incidentNotifyDelayThresholdText);
+                SetStatusText(L"Delay threshold should be a duration such as 1 hour or 60 minutes.");
+            }
+        }
+    }
+
+    static LRESULT CALLBACK NotificationRegionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleNotificationRegionsMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleNotificationRegionsMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateNotificationRegionsControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnNotificationRegionsCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowNotificationRegionsWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = NotificationRegionsWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.lpszClassName = kNotificationRegionsClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_notificationRegionsWnd || !IsWindow(m_notificationRegionsWnd)) {
+            m_notificationRegionsWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kNotificationRegionsClassName,
+                L"Incident Notification Regions",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                430,
+                360,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        SyncNotificationRegionsList();
+        ShowWindow(m_notificationRegionsWnd, SW_SHOW);
+        SetForegroundWindow(m_notificationRegionsWnd);
+    }
+
+    void CreateNotificationRegionsControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Notification regions", 18, 18, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Each region can notify for every road inside it, or only the roads listed for that region.", 18, 54, nullptr, 364);
+        m_notificationRegionsList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 100, 376, 150, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGIONS_LIST), m_hInst, nullptr);
+        HWND addBtn = CreateWindowExW(0, L"BUTTON", L"New", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 268, 82, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGIONS_NEW_BTN), m_hInst, nullptr);
+        HWND editBtn = CreateWindowExW(0, L"BUTTON", L"Edit", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 108, 268, 82, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGIONS_EDIT_BTN), m_hInst, nullptr);
+        HWND deleteBtn = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 198, 268, 82, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGIONS_DELETE_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 268, 102, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGIONS_CLOSE_BTN), m_hInst, nullptr);
+
+        for (HWND h : { m_notificationRegionsList, addBtn, editBtn, deleteBtn, closeBtn }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+        SyncNotificationRegionsList();
+    }
+
+    void SyncNotificationRegionsList()
+    {
+        if (!m_notificationRegionsList)
+            return;
+
+        int previous = static_cast<int>(SendMessageW(m_notificationRegionsList, LB_GETCURSEL, 0, 0));
+        SendMessageW(m_notificationRegionsList, LB_RESETCONTENT, 0, 0);
+        for (size_t i = 0; i < m_incidentNotificationRegions.size(); ++i) {
+            const GeoPolygon& polygon = m_incidentNotificationRegions[i];
+            std::wstring line = polygon.name.empty() ? (L"Region " + std::to_wstring(i + 1)) : polygon.name;
+            line += L" - ";
+            line += std::to_wstring(polygon.points.size());
+            line += L" point(s)";
+            if (!polygon.allRoads && !polygon.roadFilter.empty()) {
+                line += L" - ";
+                line += polygon.roadFilter;
+            }
+            SendMessageW(m_notificationRegionsList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
+        }
+        if (!m_incidentNotificationRegions.empty()) {
+            previous = ClampValue(previous, 0, static_cast<int>(m_incidentNotificationRegions.size()) - 1);
+            SendMessageW(m_notificationRegionsList, LB_SETCURSEL, previous, 0);
+        }
+    }
+
+    int SelectedNotificationRegionIndex() const
+    {
+        if (!m_notificationRegionsList)
+            return -1;
+        int index = static_cast<int>(SendMessageW(m_notificationRegionsList, LB_GETCURSEL, 0, 0));
+        if (index < 0 || index >= static_cast<int>(m_incidentNotificationRegions.size()))
+            return -1;
+        return index;
+    }
+
+    void OnNotificationRegionsCommand(int id, int code)
+    {
+        if (id == IDC_NOTIFICATION_REGIONS_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_notificationRegionsWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_NOTIFICATION_REGIONS_LIST && code == LBN_DBLCLK) {
+            int index = SelectedNotificationRegionIndex();
+            if (index >= 0)
+                OpenNotificationRegionEditor(static_cast<size_t>(index));
+            return;
+        }
+        if (code != BN_CLICKED)
+            return;
+
+        if (id == IDC_NOTIFICATION_REGIONS_NEW_BTN) {
+            GeoPolygon polygon;
+            polygon.name = L"Region " + std::to_wstring(m_incidentNotificationRegions.size() + 1);
+            polygon.allRoads = true;
+            m_incidentNotificationRegions.push_back(std::move(polygon));
+            m_map.SetNotificationPolygons(m_incidentNotificationRegions);
+            SyncNotificationRegionsList();
+            SaveSettings();
+            OpenNotificationRegionEditor(m_incidentNotificationRegions.size() - 1);
+        }
+        else if (id == IDC_NOTIFICATION_REGIONS_EDIT_BTN) {
+            int index = SelectedNotificationRegionIndex();
+            if (index >= 0)
+                OpenNotificationRegionEditor(static_cast<size_t>(index));
+        }
+        else if (id == IDC_NOTIFICATION_REGIONS_DELETE_BTN) {
+            int index = SelectedNotificationRegionIndex();
+            if (index >= 0) {
+                m_incidentNotificationRegions.erase(m_incidentNotificationRegions.begin() + index);
+                m_map.SetNotificationPolygons(m_incidentNotificationRegions);
+                if (m_polygonCaptureTarget == PolygonCaptureTarget::IncidentRegion &&
+                    m_activeIncidentRegionIndex == static_cast<size_t>(index))
+                {
+                    StopPolygonCapture();
+                }
+                SyncNotificationRegionsList();
+                SaveSettings();
+            }
+        }
+    }
+
+    static LRESULT CALLBACK NotificationRegionEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        NotificationRegionEditorContext* ctx = reinterpret_cast<NotificationRegionEditorContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            ctx = reinterpret_cast<NotificationRegionEditorContext*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        }
+
+        if (ctx && ctx->owner)
+            return ctx->owner->HandleNotificationRegionEditorMessage(ctx, hwnd, msg, wParam, lParam);
+
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleNotificationRegionEditorMessage(NotificationRegionEditorContext* ctx, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateNotificationRegionEditorControls(hwnd, ctx->index);
+            return 0;
+        case WM_COMMAND:
+            OnNotificationRegionEditorCommand(ctx, hwnd, LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_NCDESTROY:
+            delete ctx;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void OpenNotificationRegionEditor(size_t index)
+    {
+        if (index >= m_incidentNotificationRegions.size())
+            return;
+
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = NotificationRegionEditorWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.lpszClassName = kNotificationRegionEditorClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        auto* ctx = new NotificationRegionEditorContext{};
+        ctx->owner = this;
+        ctx->index = index;
+        HWND hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            kNotificationRegionEditorClassName,
+            L"Notification Region",
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            430,
+            365,
+            m_hwnd,
+            nullptr,
+            m_hInst,
+            ctx);
+        if (hwnd) {
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+        }
+        else {
+            delete ctx;
+        }
+    }
+
+    void CreateNotificationRegionEditorControls(HWND parent, size_t index)
+    {
+        const GeoPolygon& polygon = m_incidentNotificationRegions[index];
+        CreateAutoLabel(parent, 0, L"Notification region", 18, 18, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Name", 18, 58);
+        HWND nameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", polygon.name.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 84, 376, 26, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_NAME_EDIT), m_hInst, nullptr);
+        HWND allRoads = CreateWindowExW(0, L"BUTTON", L"All roads inside polygon", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, 122, 220, 24, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_ALL_ROADS_CHECK), m_hInst, nullptr);
+        SendMessageW(allRoads, BM_SETCHECK, polygon.allRoads ? BST_CHECKED : BST_UNCHECKED, 0);
+        CreateAutoLabel(parent, 0, L"Specific roads", 18, 156);
+        HWND roadsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", polygon.roadFilter.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 182, 376, 26, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_ROADS_EDIT), m_hInst, nullptr);
+        HWND pointsLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 220, 376, 24, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_POINTS_LABEL), m_hInst, nullptr);
+        HWND drawBtn = CreateWindowExW(0, L"BUTTON", L"Draw on map", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 254, 128, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_DRAW_BTN), m_hInst, nullptr);
+        HWND clearBtn = CreateWindowExW(0, L"BUTTON", L"Clear points", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 154, 254, 128, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_CLEAR_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 254, 102, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_CLOSE_BTN), m_hInst, nullptr);
+
+        for (HWND h : { nameEdit, allRoads, roadsEdit, pointsLabel, drawBtn, clearBtn, closeBtn }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+        SendMessageW(roadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M*, A1(M), A2, A52"));
+        UpdateNotificationRegionEditorPointsLabel(parent, index);
+    }
+
+    void UpdateNotificationRegionEditorPointsLabel(HWND hwnd, size_t index)
+    {
+        if (index >= m_incidentNotificationRegions.size())
+            return;
+        HWND label = GetDlgItem(hwnd, IDC_NOTIFICATION_REGION_POINTS_LABEL);
+        if (!label)
+            return;
+        std::wstring text = L"Polygon points: " + std::to_wstring(m_incidentNotificationRegions[index].points.size());
+        SetWindowTextSafe(label, text);
+    }
+
+    void OnNotificationRegionEditorCommand(NotificationRegionEditorContext* ctx, HWND hwnd, int id, int code)
+    {
+        if (!ctx || ctx->index >= m_incidentNotificationRegions.size())
+            return;
+
+        GeoPolygon& polygon = m_incidentNotificationRegions[ctx->index];
+        if (id == IDC_NOTIFICATION_REGION_CLOSE_BTN && code == BN_CLICKED) {
+            DestroyWindow(hwnd);
+            return;
+        }
+        if (id == IDC_NOTIFICATION_REGION_DRAW_BTN && code == BN_CLICKED) {
+            m_polygonCaptureTarget = PolygonCaptureTarget::IncidentRegion;
+            m_activeIncidentRegionIndex = ctx->index;
+            m_map.SetPolygonCaptureActive(true);
+            m_map.SetDraftPolygon({});
+            SetStatusText(L"Click the map to add polygon points for " + (polygon.name.empty() ? L"this region" : polygon.name) + L". Drag to pan.");
+            return;
+        }
+        if (id == IDC_NOTIFICATION_REGION_CLEAR_BTN && code == BN_CLICKED) {
+            polygon.points.clear();
+            m_map.SetNotificationPolygons(m_incidentNotificationRegions);
+            UpdateNotificationRegionEditorPointsLabel(hwnd, ctx->index);
+            SyncNotificationRegionsList();
+            SaveSettings();
+            return;
+        }
+        if (id == IDC_NOTIFICATION_REGION_ALL_ROADS_CHECK && code == BN_CLICKED) {
+            polygon.allRoads = SendMessageW(GetDlgItem(hwnd, IDC_NOTIFICATION_REGION_ALL_ROADS_CHECK), BM_GETCHECK, 0, 0) == BST_CHECKED;
+            SyncNotificationRegionsList();
+            SaveSettings();
+            return;
+        }
+        if (id == IDC_NOTIFICATION_REGION_NAME_EDIT && code == EN_CHANGE) {
+            polygon.name = Trim(GetWindowTextString(GetDlgItem(hwnd, IDC_NOTIFICATION_REGION_NAME_EDIT)));
+            SyncNotificationRegionsList();
+            SaveSettings();
+            return;
+        }
+        if (id == IDC_NOTIFICATION_REGION_ROADS_EDIT && code == EN_CHANGE) {
+            polygon.roadFilter = GetWindowTextString(GetDlgItem(hwnd, IDC_NOTIFICATION_REGION_ROADS_EDIT));
+            SyncNotificationRegionsList();
+            SaveSettings();
+            return;
+        }
+    }
+
+    void StopPolygonCapture()
+    {
+        m_polygonCaptureTarget = PolygonCaptureTarget::None;
+        m_activeIncidentRegionIndex = static_cast<size_t>(-1);
+        m_map.SetPolygonCaptureActive(false);
+        m_map.SetDraftPolygon({});
+    }
+
+    void OnMapPolygonPoint(double lat, double lon)
+    {
+        if (m_polygonCaptureTarget == PolygonCaptureTarget::IncidentRegion) {
+            if (m_activeIncidentRegionIndex >= m_incidentNotificationRegions.size()) {
+                StopPolygonCapture();
+                return;
+            }
+            GeoPolygon& polygon = m_incidentNotificationRegions[m_activeIncidentRegionIndex];
+            polygon.points.push_back({ lat, lon });
+            m_map.SetNotificationPolygons(m_incidentNotificationRegions);
+            SyncNotificationRegionsList();
+            SaveSettings();
+            SetStatusText(L"Added polygon point " + std::to_wstring(polygon.points.size()) + L" to " + (polygon.name.empty() ? L"region" : polygon.name) + L".");
+            return;
+        }
+
+        if (m_polygonCaptureTarget == PolygonCaptureTarget::EarthquakeRegion) {
+            m_earthquakeFilterRegion.push_back({ lat, lon });
+            m_map.SetDraftPolygon(m_earthquakeFilterRegion);
+            ApplyEarthquakeListFilters();
+            SetStatusText(L"Added earthquake region point " + std::to_wstring(m_earthquakeFilterRegion.size()) + L".");
+        }
     }
 
     bool TryParsePercentThreshold(const std::wstring& text, double& valueOut) const
@@ -2321,6 +3102,468 @@ private:
             return true;
         }
         return false;
+    }
+
+    std::wstring EarthquakeQueryUrl() const
+    {
+        return L"https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&minlatitude=43.33464&maxlatitude=61.44499&minlongitude=-27.02637&maxlongitude=26.41113&orderby=time&limit=20000";
+    }
+
+    void FetchEarthquakesAsync(bool notify)
+    {
+        if (m_earthquakeFetchInProgress.exchange(true))
+            return;
+
+        HWND hwnd = m_hwnd;
+        std::wstring url = EarthquakeQueryUrl();
+        std::thread([hwnd, url, notify]() {
+            auto* result = new EarthquakeResult{};
+            result->notify = notify;
+            std::string body;
+            std::wstring error;
+            if (HttpGetText(url, body, error)) {
+                try {
+                    result->events = ParseEarthquakeEvents(body);
+                    result->ok = true;
+                }
+                catch (const std::exception& e) {
+                    result->ok = false;
+                    result->error = L"Earthquake parse failed: " + Utf8ToWide(e.what());
+                }
+            }
+            else {
+                result->ok = false;
+                result->error = L"Earthquake fetch failed: " + error;
+            }
+
+            if (g_appQuitting.load() || !IsWindow(hwnd)) {
+                delete result;
+                return;
+            }
+            if (!PostMessageW(hwnd, WM_APP_EARTHQUAKE_READY, 0, reinterpret_cast<LPARAM>(result)))
+                delete result;
+            }).detach();
+    }
+
+    void OnEarthquakeReady(EarthquakeResult* result)
+    {
+        m_earthquakeFetchInProgress.store(false);
+        if (!result)
+            return;
+
+        if (!result->ok) {
+            if (m_earthquakeListWnd && IsWindowVisible(m_earthquakeListWnd))
+                SetStatusText(result->error);
+            delete result;
+            return;
+        }
+
+        m_allEarthquakes = std::move(result->events);
+        ApplyEarthquakeVisibility();
+        ApplyEarthquakeListFilters();
+        if (result->notify)
+            NotifyForMatchingEarthquakes(m_allEarthquakes);
+        delete result;
+    }
+
+    void ApplyEarthquakeVisibility()
+    {
+        if (m_showEarthquakes)
+            m_map.SetEarthquakes(m_allEarthquakes);
+        else
+            m_map.SetEarthquakes({});
+    }
+
+    void UpdateEarthquakeMenu()
+    {
+        HMENU menu = GetMenu(m_hwnd);
+        if (menu)
+            CheckMenuItem(menu, IDM_SHOW_EARTHQUAKES, MF_BYCOMMAND | (m_showEarthquakes ? MF_CHECKED : MF_UNCHECKED));
+    }
+
+    void ToggleShowEarthquakes()
+    {
+        m_showEarthquakes = !m_showEarthquakes;
+        UpdateEarthquakeMenu();
+        ApplyEarthquakeVisibility();
+        SaveSettings();
+        if (m_showEarthquakes && m_allEarthquakes.empty())
+            FetchEarthquakesAsync(false);
+    }
+
+    bool EarthquakeMatchesNotification(const EarthquakeEvent& event) const
+    {
+        return event.magnitude + 0.0001 >= m_earthquakeNotificationMagnitude;
+    }
+
+    std::wstring EarthquakeNotificationLine(const EarthquakeEvent& event) const
+    {
+        std::wstring line = L"M";
+        wchar_t mag[32]{};
+        swprintf_s(mag, L"%.1f", event.magnitude);
+        line += mag;
+        if (!event.place.empty()) {
+            line += L" - ";
+            line += event.place;
+        }
+        if (!event.timeText.empty()) {
+            line += L" (";
+            line += event.timeText;
+            line += L")";
+        }
+        return line;
+    }
+
+    void NotifyForMatchingEarthquakes(const std::vector<EarthquakeEvent>& events)
+    {
+        std::vector<const EarthquakeEvent*> matches;
+        for (const EarthquakeEvent& event : events) {
+            if (!EarthquakeMatchesNotification(event))
+                continue;
+            std::wstring key = event.id + L"|" + std::to_wstring(event.timeMs);
+            if (m_notifiedEarthquakeKeys.insert(key).second)
+                matches.push_back(&event);
+        }
+
+        if (matches.empty())
+            return;
+
+        std::wstring title;
+        std::wstring body;
+        if (matches.size() == 1) {
+            title = L"Earthquake notification";
+            body = EarthquakeNotificationLine(*matches.front());
+        }
+        else {
+            title = std::to_wstring(matches.size()) + L" earthquake notifications";
+            const size_t displayCount = MinValue<size_t>(matches.size(), 3);
+            for (size_t i = 0; i < displayCount; ++i) {
+                if (!body.empty())
+                    body += L"\r\n";
+                body += EarthquakeNotificationLine(*matches[i]);
+            }
+            if (matches.size() > displayCount)
+                body += L"\r\n...";
+        }
+
+        ShowWindowsIncidentNotification(title, body);
+        ShowInAppIncidentNotification(title, body);
+    }
+
+    static LRESULT CALLBACK EarthquakeListWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleEarthquakeListMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleEarthquakeListMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateEarthquakeListControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnEarthquakeListCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            if (m_polygonCaptureTarget == PolygonCaptureTarget::EarthquakeRegion)
+                StopPolygonCapture();
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowEarthquakeListWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = EarthquakeListWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.lpszClassName = kEarthquakeListClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_earthquakeListWnd || !IsWindow(m_earthquakeListWnd)) {
+            m_earthquakeListWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kEarthquakeListClassName,
+                L"Earthquakes List",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                820,
+                540,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        ApplyEarthquakeListFilters();
+        ShowWindow(m_earthquakeListWnd, SW_SHOW);
+        SetForegroundWindow(m_earthquakeListWnd);
+        if (m_allEarthquakes.empty())
+            FetchEarthquakesAsync(false);
+    }
+
+    void CreateEarthquakeListControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Earthquakes List", 18, 18, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Minimum magnitude", 18, 58);
+        m_earthquakeListMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 84, 120, 26, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_MAG_EDIT), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"After date/time", 160, 58);
+        m_earthquakeListTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 160, 84, 170, 26, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_TIME_EDIT), m_hInst, nullptr);
+        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 350, 80, 118, 32, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
+        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 478, 80, 118, 32, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 672, 80, 102, 32, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
+        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 126, 756, 350, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
+
+        for (HWND h : { m_earthquakeListMagnitudeEdit, m_earthquakeListTimeEdit, m_earthquakeListRegionBtn, m_earthquakeListClearRegionBtn, closeBtn, m_earthquakeListView }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+        SendMessageW(m_earthquakeListMagnitudeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"2.5"));
+        SendMessageW(m_earthquakeListTimeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"2026-05-14 09:00"));
+        SendMessageW(m_earthquakeListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
+
+        LVCOLUMNW col{};
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        std::wstring c0 = L"Mag";
+        col.pszText = const_cast<LPWSTR>(c0.c_str());
+        col.cx = 70;
+        SendMessageW(m_earthquakeListView, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&col));
+        std::wstring c1 = L"Time";
+        col.pszText = const_cast<LPWSTR>(c1.c_str());
+        col.cx = 150;
+        SendMessageW(m_earthquakeListView, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&col));
+        std::wstring c2 = L"Region";
+        col.pszText = const_cast<LPWSTR>(c2.c_str());
+        col.cx = 420;
+        SendMessageW(m_earthquakeListView, LVM_INSERTCOLUMNW, 2, reinterpret_cast<LPARAM>(&col));
+        std::wstring c3 = L"Depth km";
+        col.pszText = const_cast<LPWSTR>(c3.c_str());
+        col.cx = 90;
+        SendMessageW(m_earthquakeListView, LVM_INSERTCOLUMNW, 3, reinterpret_cast<LPARAM>(&col));
+    }
+
+    bool EarthquakeMatchesListFilters(const EarthquakeEvent& event) const
+    {
+        double minMagnitude = 0.0;
+        if (m_earthquakeListMagnitudeEdit) {
+            std::wstring magText = Trim(GetWindowTextString(m_earthquakeListMagnitudeEdit));
+            if (!magText.empty() && TryParseDoubleText(magText, minMagnitude) && event.magnitude + 0.0001 < minMagnitude)
+                return false;
+        }
+
+        long long afterMs = 0;
+        if (m_earthquakeListTimeEdit) {
+            std::wstring timeText = Trim(GetWindowTextString(m_earthquakeListTimeEdit));
+            if (!timeText.empty() && TryParseDateTimeFilter(timeText, afterMs) && event.timeMs < afterMs)
+                return false;
+        }
+
+        if (m_earthquakeFilterRegion.size() >= 3) {
+            if (!event.hasLocation || !PointInPolygon(event.latitude, event.longitude, m_earthquakeFilterRegion))
+                return false;
+        }
+
+        return true;
+    }
+
+    void ApplyEarthquakeListFilters()
+    {
+        if (!m_earthquakeListView)
+            return;
+
+        SendMessageW(m_earthquakeListView, LVM_DELETEALLITEMS, 0, 0);
+        int row = 0;
+        for (const EarthquakeEvent& event : m_allEarthquakes) {
+            if (!EarthquakeMatchesListFilters(event))
+                continue;
+
+            wchar_t magText[32]{};
+            swprintf_s(magText, L"%.1f", event.magnitude);
+            LVITEMW item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = row;
+            item.iSubItem = 0;
+            item.pszText = magText;
+            int inserted = static_cast<int>(SendMessageW(m_earthquakeListView, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+            if (inserted >= 0) {
+                LVITEMW sub{};
+                sub.iSubItem = 1;
+                sub.pszText = const_cast<LPWSTR>(event.timeText.c_str());
+                SendMessageW(m_earthquakeListView, LVM_SETITEMTEXTW, inserted, reinterpret_cast<LPARAM>(&sub));
+                sub.iSubItem = 2;
+                sub.pszText = const_cast<LPWSTR>(event.place.c_str());
+                SendMessageW(m_earthquakeListView, LVM_SETITEMTEXTW, inserted, reinterpret_cast<LPARAM>(&sub));
+                wchar_t depthText[32]{};
+                swprintf_s(depthText, L"%.1f", event.depthKm);
+                sub.iSubItem = 3;
+                sub.pszText = depthText;
+                SendMessageW(m_earthquakeListView, LVM_SETITEMTEXTW, inserted, reinterpret_cast<LPARAM>(&sub));
+                ++row;
+            }
+        }
+
+        if (m_earthquakeListWnd && IsWindowVisible(m_earthquakeListWnd))
+            SetStatusText(L"Showing " + std::to_wstring(row) + L" earthquake(s).");
+    }
+
+    void OnEarthquakeListCommand(int id, int code)
+    {
+        if (id == IDC_EARTHQUAKE_LIST_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_earthquakeListWnd, SW_HIDE);
+            if (m_polygonCaptureTarget == PolygonCaptureTarget::EarthquakeRegion)
+                StopPolygonCapture();
+            return;
+        }
+        if (id == IDC_EARTHQUAKE_LIST_REGION_BTN && code == BN_CLICKED) {
+            m_earthquakeFilterRegion.clear();
+            m_polygonCaptureTarget = PolygonCaptureTarget::EarthquakeRegion;
+            m_activeIncidentRegionIndex = static_cast<size_t>(-1);
+            m_map.SetDraftPolygon(m_earthquakeFilterRegion);
+            m_map.SetPolygonCaptureActive(true);
+            SetStatusText(L"Click the map to draw the earthquake filter region. Drag to pan.");
+            return;
+        }
+        if (id == IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN && code == BN_CLICKED) {
+            m_earthquakeFilterRegion.clear();
+            if (m_polygonCaptureTarget == PolygonCaptureTarget::EarthquakeRegion)
+                StopPolygonCapture();
+            else
+                m_map.SetDraftPolygon({});
+            ApplyEarthquakeListFilters();
+            return;
+        }
+        if ((id == IDC_EARTHQUAKE_LIST_MAG_EDIT || id == IDC_EARTHQUAKE_LIST_TIME_EDIT) &&
+            (code == EN_CHANGE || code == EN_KILLFOCUS))
+        {
+            ApplyEarthquakeListFilters();
+        }
+    }
+
+    static LRESULT CALLBACK EarthquakeNotificationsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleEarthquakeNotificationsMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleEarthquakeNotificationsMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateEarthquakeNotificationsControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnEarthquakeNotificationsCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowEarthquakeNotificationsWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = EarthquakeNotificationsWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.lpszClassName = kEarthquakeNotificationsClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_earthquakeNotificationsWnd || !IsWindow(m_earthquakeNotificationsWnd)) {
+            m_earthquakeNotificationsWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kEarthquakeNotificationsClassName,
+                L"Earthquake Notifications",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                430,
+                230,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+        SyncEarthquakeNotificationControls();
+        ShowWindow(m_earthquakeNotificationsWnd, SW_SHOW);
+        SetForegroundWindow(m_earthquakeNotificationsWnd);
+    }
+
+    void CreateEarthquakeNotificationsControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Earthquake Notifications", 18, 18, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Notify when an earthquake is at or above this magnitude.", 18, 58, nullptr, 360);
+        CreateAutoLabel(parent, 0, L"Minimum magnitude", 18, 104);
+        m_earthquakeNotificationMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 130, 120, 26, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 130, 102, 32, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
+        for (HWND h : { m_earthquakeNotificationMagnitudeEdit, closeBtn }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+        SendMessageW(m_earthquakeNotificationMagnitudeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"4.0"));
+        SyncEarthquakeNotificationControls();
+    }
+
+    void SyncEarthquakeNotificationControls()
+    {
+        m_syncingControls = true;
+        if (m_earthquakeNotificationMagnitudeEdit)
+            SetWindowTextSafe(m_earthquakeNotificationMagnitudeEdit, m_earthquakeNotificationMagnitudeText);
+        m_syncingControls = false;
+    }
+
+    void OnEarthquakeNotificationsCommand(int id, int code)
+    {
+        if (m_syncingControls)
+            return;
+        if (id == IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_earthquakeNotificationsWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT && (code == EN_CHANGE || code == EN_KILLFOCUS)) {
+            std::wstring text = Trim(GetWindowTextString(m_earthquakeNotificationMagnitudeEdit));
+            double parsed = 0.0;
+            if (TryParseDoubleText(text, parsed) && parsed >= 0.0) {
+                m_earthquakeNotificationMagnitudeText = text;
+                m_earthquakeNotificationMagnitude = parsed;
+                SaveSettings();
+            }
+            else if (code == EN_KILLFOCUS) {
+                SetWindowTextSafe(m_earthquakeNotificationMagnitudeEdit, m_earthquakeNotificationMagnitudeText);
+                SetStatusText(L"Earthquake magnitude should be a number such as 4.0.");
+            }
+        }
     }
 
     void SortAlertsForCurrentOrder()
@@ -2595,6 +3838,9 @@ private:
     HWND m_settingsWnd = nullptr;
     HWND m_incidentFiltersWnd = nullptr;
     HWND m_incidentNotificationsWnd = nullptr;
+    HWND m_notificationRegionsWnd = nullptr;
+    HWND m_earthquakeListWnd = nullptr;
+    HWND m_earthquakeNotificationsWnd = nullptr;
     HWND m_settingsFilterCombo = nullptr;
     HWND m_settingsOrderCombo = nullptr;
     HWND m_settingsRefreshOffRadio = nullptr;
@@ -2608,7 +3854,18 @@ private:
     HWND m_incidentPlannedCheck = nullptr;
     HWND m_incidentNotifyRoadsEdit = nullptr;
     HWND m_incidentNotifyLaneThresholdEdit = nullptr;
+    HWND m_incidentNotifyDelayThresholdEdit = nullptr;
+    HWND m_incidentNotifyAndRadio = nullptr;
+    HWND m_incidentNotifyOrRadio = nullptr;
+    HWND m_incidentNotifyRegionsBtn = nullptr;
     HWND m_incidentNotifyReasonExclusionsEdit = nullptr;
+    HWND m_notificationRegionsList = nullptr;
+    HWND m_earthquakeListMagnitudeEdit = nullptr;
+    HWND m_earthquakeListTimeEdit = nullptr;
+    HWND m_earthquakeListRegionBtn = nullptr;
+    HWND m_earthquakeListClearRegionBtn = nullptr;
+    HWND m_earthquakeListView = nullptr;
+    HWND m_earthquakeNotificationMagnitudeEdit = nullptr;
     HWND m_chatHistory = nullptr;
     HWND m_chatEdit = nullptr;
     HWND m_chatSendBtn = nullptr;
@@ -2622,6 +3879,9 @@ private:
     std::vector<TrafficAlert> m_filteredAlerts;
     std::vector<ChatMessage> m_chatMessages;
     std::vector<MapNote> m_notes;
+    std::vector<GeoPolygon> m_incidentNotificationRegions;
+    std::vector<EarthquakeEvent> m_allEarthquakes;
+    std::vector<GeoPoint> m_earthquakeFilterRegion;
     std::wstring m_selectedId;
     bool m_programmaticSelection = false;
     bool m_syncingControls = false;
@@ -2636,7 +3896,13 @@ private:
     std::wstring m_incidentNotifyRoads = L"M*, A1(M), A2, A15, A16, A17, A20, A4, A52";
     std::wstring m_incidentNotifyLaneThresholdText = L"50%";
     double m_incidentNotifyLaneThreshold = 50.0;
+    std::wstring m_incidentNotifyDelayThresholdText = L"1 hour";
+    double m_incidentNotifyDelayThresholdMinutes = 60.0;
+    bool m_incidentNotifyThresholdUseOr = false;
     std::wstring m_incidentNotifyReasonExclusions = L"Road Management";
+    bool m_showEarthquakes = false;
+    std::wstring m_earthquakeNotificationMagnitudeText = L"4.0";
+    double m_earthquakeNotificationMagnitude = 4.0;
     std::wstring m_alertOrder = L"Road";
     std::wstring m_alertsEndpoint = L"https://www.trafficengland.com/traffic-alerts";
     std::wstring m_serverBaseUrl = L"http://localhost:8080";
@@ -2644,8 +3910,12 @@ private:
     std::wstring m_refreshIntervalText = L"300s";
     UINT m_refreshIntervalMs = 5 * 60 * 1000;
     std::atomic_bool m_serverRequestInProgress{ false };
+    std::atomic_bool m_earthquakeFetchInProgress{ false };
     bool m_notificationIconAdded = false;
     std::unordered_set<std::wstring> m_notifiedIncidentKeys;
+    std::unordered_set<std::wstring> m_notifiedEarthquakeKeys;
+    PolygonCaptureTarget m_polygonCaptureTarget = PolygonCaptureTarget::None;
+    size_t m_activeIncidentRegionIndex = static_cast<size_t>(-1);
     bool m_hasPendingNoteLocation = false;
     double m_pendingNoteLat = 0.0;
     double m_pendingNoteLon = 0.0;

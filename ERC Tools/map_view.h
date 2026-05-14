@@ -12,6 +12,7 @@ class MapView
 public:
     using SelectCallback = std::function<void(const std::wstring& id)>;
     using NoteLocationCallback = std::function<void(double lat, double lon)>;
+    using PolygonPointCallback = std::function<void(double lat, double lon)>;
 
     MapView();
     ~MapView();
@@ -25,8 +26,13 @@ public:
     HWND Hwnd() const;
     void SetSelectCallback(SelectCallback cb);
     void SetNoteLocationCallback(NoteLocationCallback cb);
+    void SetPolygonPointCallback(PolygonPointCallback cb);
     void SetAlerts(const std::vector<TrafficAlert>& alerts);
     void SetNotes(const std::vector<MapNote>& notes);
+    void SetNotificationPolygons(const std::vector<GeoPolygon>& polygons);
+    void SetDraftPolygon(const std::vector<GeoPoint>& points);
+    void SetPolygonCaptureActive(bool active);
+    void SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes);
     void SetSelectedId(const std::wstring& id);
     void CenterOnAlert(const std::wstring& id);
     void FitToAlerts();

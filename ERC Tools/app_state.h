@@ -10,6 +10,7 @@ inline constexpr UINT WM_APP_FEED_READY = WM_APP + 1;
 inline constexpr UINT WM_APP_TILE_READY = WM_APP + 2;
 inline constexpr UINT WM_APP_BOUNDARY_READY = WM_APP + 3;
 inline constexpr UINT WM_APP_SERVER_READY = WM_APP + 4;
+inline constexpr UINT WM_APP_EARTHQUAKE_READY = WM_APP + 5;
 
 extern const int kMinZoom;
 extern const int kMaxZoom;

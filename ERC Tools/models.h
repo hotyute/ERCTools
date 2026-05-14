@@ -37,6 +37,27 @@ struct TrafficAlert
     bool hasLocation = false;
 };
 
+struct GeoPolygon
+{
+    std::wstring name;
+    std::wstring roadFilter;
+    bool allRoads = true;
+    std::vector<GeoPoint> points;
+};
+
+struct EarthquakeEvent
+{
+    std::wstring id;
+    std::wstring place;
+    std::wstring timeText;
+    double magnitude = 0.0;
+    long long timeMs = 0;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    double depthKm = 0.0;
+    bool hasLocation = false;
+};
+
 struct ChatMessage
 {
     std::wstring author;

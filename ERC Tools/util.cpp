@@ -419,6 +419,46 @@ static std::wstring BuildLaneClosureDisplay(const TrafficAlert& a)
     return text;
 }
 
+static std::wstring FormatAlertDescriptionForDetails(std::wstring description)
+{
+    description = Trim(description);
+    if (description.empty())
+        return L"No description provided.";
+
+    description = std::regex_replace(description, std::wregex(L"\r\n|\r|\n"), L"\r\n");
+
+    static const wchar_t* kLabels =
+        L"Location|Reason|Status|Time To Clear|Return To Normal|Lanes Closed|Delay";
+    std::wstring pattern = LR"(\s+(?=()";
+    pattern += kLabels;
+    pattern += LR"()\s*:))";
+    description = std::regex_replace(description, std::wregex(pattern, std::regex_constants::icase), L"\r\n");
+
+    std::wstring out;
+    out.reserve(description.size());
+    bool pendingBlank = false;
+    size_t pos = 0;
+    while (pos <= description.size()) {
+        size_t next = description.find(L"\r\n", pos);
+        std::wstring line = Trim(description.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos));
+        if (line.empty()) {
+            pendingBlank = !out.empty();
+        }
+        else {
+            if (!out.empty())
+                out += pendingBlank ? L"\r\n\r\n" : L"\r\n";
+            out += line;
+            pendingBlank = false;
+        }
+
+        if (next == std::wstring::npos)
+            break;
+        pos = next + 2;
+    }
+
+    return out.empty() ? L"No description provided." : out;
+}
+
 std::wstring BuildAlertSummary(const TrafficAlert& a)
 {
     std::wstring s;
@@ -479,7 +519,7 @@ std::wstring BuildAlertDetails(const TrafficAlert& a)
     s += L"\r\n\r\n";
 
     s += L"Description:\r\n";
-    s += a.description.empty() ? L"No description provided." : a.description;
+    s += FormatAlertDescriptionForDetails(a.description);
     s += L"\r\n";
 
     return s;

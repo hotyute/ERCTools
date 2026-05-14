@@ -93,6 +93,7 @@ class MapView::Impl
 public:
     using SelectCallback = std::function<void(const std::wstring&)>;
     using NoteLocationCallback = std::function<void(double lat, double lon)>;
+    using PolygonPointCallback = std::function<void(double lat, double lon)>;
 
     bool Create(HWND parent, int x, int y, int w, int h)
     {
@@ -128,6 +129,11 @@ public:
         m_onNoteLocation = std::move(cb);
     }
 
+    void SetPolygonPointCallback(PolygonPointCallback cb)
+    {
+        m_onPolygonPoint = std::move(cb);
+    }
+
     void SetAlerts(const std::vector<TrafficAlert>& alerts)
     {
         m_alerts = alerts;
@@ -141,6 +147,33 @@ public:
             return;
 
         m_notes = notes;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetNotificationPolygons(const std::vector<GeoPolygon>& polygons)
+    {
+        m_notificationPolygons = polygons;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetDraftPolygon(const std::vector<GeoPoint>& points)
+    {
+        m_draftPolygon = points;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetPolygonCaptureActive(bool active)
+    {
+        m_polygonCaptureActive = active;
+        Invalidate();
+    }
+
+    void SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes)
+    {
+        m_earthquakes = earthquakes;
         InvalidateSceneCache();
         Invalidate();
     }
@@ -686,6 +719,16 @@ private:
             ReleaseCapture();
 
         if (!m_dragging) {
+            if (m_polygonCaptureActive && m_onPolygonPoint) {
+                GeoPoint geo = ScreenToGeo(x, y);
+                m_onPolygonPoint(geo.lat, geo.lon);
+                m_dragging = false;
+                m_interactivePan = false;
+                KillTimer(m_hwnd, kInteractionIdleTimer);
+                Invalidate();
+                return;
+            }
+
             std::wstring id = HitTestAlert(x, y);
             if (!id.empty() && m_onSelect)
                 m_onSelect(id);
@@ -781,6 +824,11 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.90f), &m_textBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.20f, 0.95f, 0.95f), &m_noteBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.22f, 0.24f, 0.27f, 0.96f), &m_laneTileBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.00f, 0.42f, 0.78f, 0.18f), &m_polygonFillBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.00f, 0.30f, 0.68f, 0.88f), &m_polygonStrokeBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.98f, 0.68f, 0.10f, 0.22f), &m_draftFillBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.88f, 0.42f, 0.02f, 0.95f), &m_draftStrokeBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.10f, 0.16f, 0.86f), &m_earthquakeBrush);
 
         if (g_dwriteFactory && !m_noteTextFormat) {
             g_dwriteFactory->CreateTextFormat(
@@ -815,6 +863,11 @@ private:
         m_textBrush.Reset();
         m_noteBrush.Reset();
         m_laneTileBrush.Reset();
+        m_polygonFillBrush.Reset();
+        m_polygonStrokeBrush.Reset();
+        m_draftFillBrush.Reset();
+        m_draftStrokeBrush.Reset();
+        m_earthquakeBrush.Reset();
         m_laneBitmaps.clear();
         m_noteTextFormat.Reset();
         InvalidateSceneCache();
@@ -1044,6 +1097,78 @@ private:
             !alert.laneImageUrls.empty() || !alert.laneClosedStates.empty();
     }
 
+    bool AnyPointInView(const ViewState& view, const std::vector<GeoPoint>& points) const
+    {
+        for (const GeoPoint& pt : points) {
+            if (IsGeoPointInView(view, pt.lat, pt.lon))
+                return true;
+        }
+        return false;
+    }
+
+    void DrawPolygonPath(
+        const ViewState& view,
+        const std::vector<GeoPoint>& points,
+        bool closed,
+        ID2D1Brush* fill,
+        ID2D1Brush* stroke,
+        float strokeWidth)
+    {
+        if (!m_rt || !g_d2dFactory || points.size() < 2 || !AnyPointInView(view, points))
+            return;
+
+        ComPtr<ID2D1PathGeometry> geom;
+        if (FAILED(g_d2dFactory->CreatePathGeometry(&geom)))
+            return;
+
+        ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(geom->Open(&sink)))
+            return;
+
+        D2D1_FIGURE_BEGIN begin = closed && points.size() >= 3 ? D2D1_FIGURE_BEGIN_FILLED : D2D1_FIGURE_BEGIN_HOLLOW;
+        sink->BeginFigure(GeoToScreen(view, points[0].lat, points[0].lon), begin);
+        for (size_t i = 1; i < points.size(); ++i)
+            sink->AddLine(GeoToScreen(view, points[i].lat, points[i].lon));
+        sink->EndFigure(closed && points.size() >= 3 ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN);
+
+        if (FAILED(sink->Close()))
+            return;
+
+        if (closed && points.size() >= 3 && fill)
+            m_rt->FillGeometry(geom.Get(), fill);
+        if (stroke)
+            m_rt->DrawGeometry(geom.Get(), stroke, strokeWidth);
+
+        for (const GeoPoint& pt : points) {
+            D2D1_POINT_2F p = GeoToScreen(view, pt.lat, pt.lon);
+            m_rt->FillEllipse(D2D1::Ellipse(p, 3.5f, 3.5f), stroke);
+        }
+    }
+
+    void DrawNotificationPolygons(const ViewState& view)
+    {
+        for (const GeoPolygon& polygon : m_notificationPolygons)
+            DrawPolygonPath(view, polygon.points, true, m_polygonFillBrush.Get(), m_polygonStrokeBrush.Get(), 2.0f);
+
+        DrawPolygonPath(view, m_draftPolygon, m_draftPolygon.size() >= 3, m_draftFillBrush.Get(), m_draftStrokeBrush.Get(), 2.0f);
+    }
+
+    void DrawEarthquakes(const ViewState& view)
+    {
+        if (!m_rt || m_earthquakes.empty())
+            return;
+
+        for (const EarthquakeEvent& event : m_earthquakes) {
+            if (!event.hasLocation || !IsGeoPointInView(view, event.latitude, event.longitude))
+                continue;
+
+            D2D1_POINT_2F p = GeoToScreen(view, event.latitude, event.longitude);
+            float radius = static_cast<float>(ClampValue(4.0 + event.magnitude * 2.2, 5.0, 22.0));
+            m_rt->FillEllipse(D2D1::Ellipse(p, radius, radius), m_earthquakeBrush.Get());
+            m_rt->DrawEllipse(D2D1::Ellipse(p, radius, radius), m_borderBrush.Get(), 1.25f);
+        }
+    }
+
     ComPtr<ID2D1Bitmap> LoadCachedLaneBitmap(const std::wstring& url)
     {
         auto cached = m_laneBitmaps.find(url);
@@ -1084,28 +1209,33 @@ private:
         }
     }
 
-    void DrawLaneClosureOverlay(const ViewState& view)
+    void DrawAlertOverlay(const ViewState& view)
     {
         const TrafficAlert* alert = FindAlertById(m_hoveredAlertId);
-        if (!alert || !alert->hasLocation || !HasLaneClosureOverlay(*alert))
+        if (!alert || !alert->hasLocation)
             return;
 
         D2D1_POINT_2F marker = GeoToScreen(view, alert->latitude, alert->longitude);
-        int total = alert->lanesTotal > 0 ? alert->lanesTotal : static_cast<int>(alert->laneImageUrls.size());
-        if (total == 0)
-            total = static_cast<int>(alert->laneClosedStates.size());
-        total = ClampValue(total, 1, 8);
-        int closed = ClampValue(alert->lanesClosed, 0, total);
-        if (closed == 0 && alert->lanesTotal == 0 && !alert->laneImageUrls.empty())
-            closed = total;
+        const bool hasLaneOverlay = HasLaneClosureOverlay(*alert);
+        int total = 0;
+        int closed = 0;
+        if (hasLaneOverlay) {
+            total = alert->lanesTotal > 0 ? alert->lanesTotal : static_cast<int>(alert->laneImageUrls.size());
+            if (total == 0)
+                total = static_cast<int>(alert->laneClosedStates.size());
+            total = ClampValue(total, 1, 8);
+            closed = ClampValue(alert->lanesClosed, 0, total);
+            if (closed == 0 && alert->lanesTotal == 0 && !alert->laneImageUrls.empty())
+                closed = total;
+        }
 
         const float icon = 34.0f;
         const float gap = 4.0f;
-        const float textH = 42.0f;
+        const float textH = 44.0f;
         const float panelPad = 8.0f;
-        const float iconsW = total * icon + (total - 1) * gap;
-        const float panelW = MaxValue(230.0f, iconsW + panelPad * 2.0f);
-        const float panelH = textH + icon + panelPad * 2.0f + 4.0f;
+        const float iconsW = hasLaneOverlay ? (total * icon + (total - 1) * gap) : 0.0f;
+        const float panelW = MaxValue(238.0f, iconsW + panelPad * 2.0f);
+        const float panelH = hasLaneOverlay ? (textH + icon + panelPad * 2.0f + 4.0f) : (textH + panelPad * 2.0f);
 
         float left = marker.x + 18.0f;
         float top = marker.y - panelH - 18.0f;
@@ -1125,13 +1255,22 @@ private:
         std::wstring roadTitle = alert->road.empty() ? alert->region : alert->road;
         if (roadTitle.empty())
             roadTitle = L"Traffic alert";
-        std::wstring laneTitle = L"Lanes closed: " + std::to_wstring(closed) + L" of " + std::to_wstring(total);
+        std::wstring detailTitle;
+        if (hasLaneOverlay)
+            detailTitle = L"Lanes closed: " + std::to_wstring(closed) + L" of " + std::to_wstring(total);
+        else if (!alert->title.empty())
+            detailTitle = alert->title;
+        else
+            detailTitle = BuildSeverityDisplay(alert->severity);
         if (m_noteTextFormat) {
             D2D1_RECT_F roadRect = D2D1::RectF(left + panelPad, top + panelPad - 1.0f, left + panelW - panelPad, top + panelPad + 20.0f);
             D2D1_RECT_F laneRect = D2D1::RectF(left + panelPad, top + panelPad + 19.0f, left + panelW - panelPad, top + panelPad + textH);
             m_rt->DrawTextW(roadTitle.c_str(), static_cast<UINT32>(roadTitle.size()), m_noteTextFormat.Get(), roadRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            m_rt->DrawTextW(laneTitle.c_str(), static_cast<UINT32>(laneTitle.size()), m_noteTextFormat.Get(), laneRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            m_rt->DrawTextW(detailTitle.c_str(), static_cast<UINT32>(detailTitle.size()), m_noteTextFormat.Get(), laneRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
+
+        if (!hasLaneOverlay)
+            return;
 
         float x = left + panelPad;
         const float y = top + panelPad + textH + 4.0f;
@@ -1466,6 +1605,8 @@ private:
     {
         DrawUkBoundary(boundaryView);
         DrawCityAnchors(overlayView);
+        DrawNotificationPolygons(overlayView);
+        DrawEarthquakes(overlayView);
         DrawNotes(overlayView);
         DrawMarkers(overlayView);
     }
@@ -1576,7 +1717,7 @@ private:
             }
 
             DrawMapChrome();
-            DrawLaneClosureOverlay(overlayView);
+            DrawAlertOverlay(overlayView);
 
             HRESULT hr = m_rt->EndDraw();
             if (hr == D2DERR_RECREATE_TARGET)
@@ -1880,9 +2021,13 @@ private:
     HWND m_hwnd = nullptr;
     std::vector<TrafficAlert> m_alerts;
     std::vector<MapNote> m_notes;
+    std::vector<GeoPolygon> m_notificationPolygons;
+    std::vector<GeoPoint> m_draftPolygon;
+    std::vector<EarthquakeEvent> m_earthquakes;
     std::wstring m_selectedId;
     SelectCallback m_onSelect;
     NoteLocationCallback m_onNoteLocation;
+    PolygonPointCallback m_onPolygonPoint;
 
     int m_zoom = kDefaultZoom;
     double m_centerLat = kDefaultCenterLat;
@@ -1892,6 +2037,7 @@ private:
     POINT m_lastMouse{};
     bool m_dragging = false;
     bool m_interactivePan = false;
+    bool m_polygonCaptureActive = false;
     bool m_trackingMouseLeave = false;
     int m_interactiveTileRequestsThisFrame = 0;
     std::wstring m_hoveredAlertId;
@@ -1910,6 +2056,11 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_textBrush;
     ComPtr<ID2D1SolidColorBrush> m_noteBrush;
     ComPtr<ID2D1SolidColorBrush> m_laneTileBrush;
+    ComPtr<ID2D1SolidColorBrush> m_polygonFillBrush;
+    ComPtr<ID2D1SolidColorBrush> m_polygonStrokeBrush;
+    ComPtr<ID2D1SolidColorBrush> m_draftFillBrush;
+    ComPtr<ID2D1SolidColorBrush> m_draftStrokeBrush;
+    ComPtr<ID2D1SolidColorBrush> m_earthquakeBrush;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
     ComPtr<ID2D1Bitmap> m_sceneBitmap;
     int m_sceneBitmapWidth = 0;
@@ -1954,6 +2105,11 @@ void MapView::SetNoteLocationCallback(NoteLocationCallback cb)
     m_impl->SetNoteLocationCallback(std::move(cb));
 }
 
+void MapView::SetPolygonPointCallback(PolygonPointCallback cb)
+{
+    m_impl->SetPolygonPointCallback(std::move(cb));
+}
+
 void MapView::SetAlerts(const std::vector<TrafficAlert>& alerts)
 {
     m_impl->SetAlerts(alerts);
@@ -1962,6 +2118,26 @@ void MapView::SetAlerts(const std::vector<TrafficAlert>& alerts)
 void MapView::SetNotes(const std::vector<MapNote>& notes)
 {
     m_impl->SetNotes(notes);
+}
+
+void MapView::SetNotificationPolygons(const std::vector<GeoPolygon>& polygons)
+{
+    m_impl->SetNotificationPolygons(polygons);
+}
+
+void MapView::SetDraftPolygon(const std::vector<GeoPoint>& points)
+{
+    m_impl->SetDraftPolygon(points);
+}
+
+void MapView::SetPolygonCaptureActive(bool active)
+{
+    m_impl->SetPolygonCaptureActive(active);
+}
+
+void MapView::SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes)
+{
+    m_impl->SetEarthquakes(earthquakes);
 }
 
 void MapView::SetSelectedId(const std::wstring& id)
