@@ -38,6 +38,8 @@ constexpr int IDM_ROADS_INCIDENT_NOTIFICATIONS = 2005;
 constexpr int IDM_EARTHQUAKES_LIST = 2006;
 constexpr int IDM_EARTHQUAKE_NOTIFICATIONS = 2007;
 constexpr int IDM_SHOW_EARTHQUAKES = 2008;
+constexpr int IDM_VIEW_NOTIFICATION_HISTORY = 2009;
+constexpr int IDC_NOTIFICATION_HISTORY_OVERLAY = 1023;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -133,6 +135,13 @@ struct EarthquakeResult
     std::vector<EarthquakeEvent> events;
 };
 
+struct NotificationHistoryEntry
+{
+    std::wstring title;
+    std::wstring body;
+    std::wstring timestamp;
+};
+
 enum class ServerAction
 {
     Poll,
@@ -187,6 +196,11 @@ static int MinInt(int a, int b)
 static LONG MaxLong(LONG a, LONG b)
 {
     return a > b ? a : b;
+}
+
+static HMENU ControlId(int id)
+{
+    return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id));
 }
 
 static SIZE MeasureControlText(HWND hwnd, int wrapWidth = 0)
@@ -854,7 +868,7 @@ private:
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             x, y, 0, 0,
             parent,
-            reinterpret_cast<HMENU>(id),
+            ControlId(id),
             m_hInst,
             nullptr);
         if (!label)
@@ -991,7 +1005,7 @@ private:
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON,
             0, 0, 0, 0,
             m_hwnd,
-            reinterpret_cast<HMENU>(IDC_PANEL_TAB_BTN),
+            ControlId(IDC_PANEL_TAB_BTN),
             m_hInst,
             nullptr);
 
@@ -1002,7 +1016,7 @@ private:
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_DEFPUSHBUTTON,
             0, 0, 0, 0,
             m_hwnd,
-            reinterpret_cast<HMENU>(IDC_REFRESH_BTN),
+            ControlId(IDC_REFRESH_BTN),
             m_hInst,
             nullptr);
 
@@ -1013,7 +1027,7 @@ private:
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             0, 0, 0, 0,
             m_hwnd,
-            reinterpret_cast<HMENU>(IDC_SEARCH_EDIT),
+            ControlId(IDC_SEARCH_EDIT),
             m_hInst,
             nullptr);
 
@@ -1024,7 +1038,7 @@ private:
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
             0, 0, 0, 0,
             m_hwnd,
-            reinterpret_cast<HMENU>(IDC_SEVERITY_COMBO),
+            ControlId(IDC_SEVERITY_COMBO),
             m_hInst,
             nullptr);
 
@@ -1035,7 +1049,7 @@ private:
             WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
             0, 0, 0, 0,
             m_hwnd,
-            reinterpret_cast<HMENU>(IDC_LISTVIEW),
+            ControlId(IDC_LISTVIEW),
             m_hInst,
             nullptr);
 
@@ -1046,30 +1060,30 @@ private:
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
             0, 0, 0, 0,
             m_hwnd,
-            reinterpret_cast<HMENU>(IDC_DETAILS_EDIT),
+            ControlId(IDC_DETAILS_EDIT),
             m_hInst,
             nullptr);
 
         m_chatHistory = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
-            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_CHAT_HISTORY), m_hInst, nullptr);
+            0, 0, 0, 0, m_hwnd, ControlId(IDC_CHAT_HISTORY), m_hInst, nullptr);
 
         m_chatEdit = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_CHAT_EDIT), m_hInst, nullptr);
+            0, 0, 0, 0, m_hwnd, ControlId(IDC_CHAT_EDIT), m_hInst, nullptr);
 
         m_chatSendBtn = CreateWindowExW(
             0, L"BUTTON", L"Send", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_DEFPUSHBUTTON,
-            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_CHAT_SEND_BTN), m_hInst, nullptr);
+            0, 0, 0, 0, m_hwnd, ControlId(IDC_CHAT_SEND_BTN), m_hInst, nullptr);
 
         m_noteEdit = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_NOTE_EDIT), m_hInst, nullptr);
+            0, 0, 0, 0, m_hwnd, ControlId(IDC_NOTE_EDIT), m_hInst, nullptr);
 
         m_noteBtn = CreateWindowExW(
             0, L"BUTTON", L"Leave note", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON,
-            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_NOTE_BTN), m_hInst, nullptr);
+            0, 0, 0, 0, m_hwnd, ControlId(IDC_NOTE_BTN), m_hInst, nullptr);
 
         m_statusBar = CreateWindowExW(
             0,
@@ -1078,7 +1092,7 @@ private:
             WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
             0, 0, 0, 0,
             m_hwnd,
-            reinterpret_cast<HMENU>(IDC_STATUS_BAR),
+            ControlId(IDC_STATUS_BAR),
             m_hInst,
             nullptr);
 
@@ -1089,22 +1103,35 @@ private:
             WS_CHILD | SS_LEFT | SS_NOPREFIX,
             0, 0, 0, 0,
             m_hwnd,
-            reinterpret_cast<HMENU>(IDC_INAPP_NOTIFICATION),
+            ControlId(IDC_INAPP_NOTIFICATION),
+            m_hInst,
+            nullptr);
+
+        m_notificationHistoryOverlay = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"EDIT",
+            L"",
+            WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
+            0, 0, 0, 0,
+            m_hwnd,
+            ControlId(IDC_NOTIFICATION_HISTORY_OVERLAY),
             m_hInst,
             nullptr);
 
         if (!m_headerLabel || !m_searchLabel || !m_severityLabel ||
-            !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar || !m_inAppNotification)
+            !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar || !m_inAppNotification || !m_notificationHistoryOverlay)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar, m_inAppNotification }) {
+        for (HWND h : { m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar, m_inAppNotification, m_notificationHistoryOverlay }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
         ShowWindow(m_inAppNotification, SW_HIDE);
+        ShowWindow(m_notificationHistoryOverlay, m_showNotificationHistory ? SW_SHOW : SW_HIDE);
+        RenderNotificationHistory();
 
         SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, region, or description"));
         SendMessageW(m_chatEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Message local responders..."));
@@ -1244,14 +1271,41 @@ private:
         LONG mapH = MaxLong(100L, height - mapY - statusH - pad - noteAreaH);
 
         MoveWindow(m_map.Hwnd(), mapX, mapY, mapW, mapH, TRUE);
+        int historyW = 0;
+        if (m_notificationHistoryOverlay) {
+            const int notificationMargin = 12;
+            historyW = m_showNotificationHistory
+                ? MinInt(380, MaxInt(260, static_cast<int>(mapW * 0.30)))
+                : 0;
+            historyW = MinInt(historyW, MaxInt(160, static_cast<int>(mapW) - notificationMargin * 2));
+            if (m_showNotificationHistory) {
+                MoveWindow(
+                    m_notificationHistoryOverlay,
+                    static_cast<int>(mapX + mapW - historyW - notificationMargin),
+                    mapY + notificationMargin,
+                    historyW,
+                    MaxInt(120, static_cast<int>(mapH) - notificationMargin * 2),
+                    TRUE);
+                ShowWindow(m_notificationHistoryOverlay, SW_SHOW);
+                SetWindowPos(m_notificationHistoryOverlay, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            else {
+                ShowWindow(m_notificationHistoryOverlay, SW_HIDE);
+            }
+        }
         if (m_inAppNotification) {
             const int notificationMargin = 12;
+            int notificationW = MaxInt(180, static_cast<int>(mapW) - notificationMargin * 2);
+            if (m_showNotificationHistory && historyW > 0)
+                notificationW = MaxInt(180, notificationW - historyW - notificationMargin);
+            int notificationH = PreferredControlHeight(m_inAppNotification, 14, 44, notificationW);
+            notificationH = ClampValue(notificationH, 44, MaxInt(44, static_cast<int>(mapH) / 3));
             MoveWindow(
                 m_inAppNotification,
                 mapX + notificationMargin,
                 mapY + notificationMargin,
-                MaxLong(80L, mapW - notificationMargin * 2),
-                44,
+                notificationW,
+                notificationH,
                 TRUE);
         }
         int noteY = mapY + mapH + 8;
@@ -1329,6 +1383,10 @@ private:
 
         case IDM_SHOW_EARTHQUAKES:
             ToggleShowEarthquakes();
+            break;
+
+        case IDM_VIEW_NOTIFICATION_HISTORY:
+            ToggleNotificationHistory();
             break;
 
         case IDM_ABOUT:
@@ -1429,6 +1487,7 @@ private:
             readString("alertOrder", m_alertOrder);
             readBool("alertFilterUnplannedOnly", m_alertFilterUnplannedOnly);
             readBool("periodicRefreshEnabled", m_periodicRefreshEnabled);
+            readBool("showNotificationHistory", m_showNotificationHistory);
             readString("refreshIntervalText", m_refreshIntervalText);
             readUInt("refreshIntervalMs", m_refreshIntervalMs);
             UINT parsedRefreshMs = 0;
@@ -1504,6 +1563,7 @@ private:
             settings["alertOrder"] = WideToUtf8(m_alertOrder);
             settings["alertFilterUnplannedOnly"] = m_alertFilterUnplannedOnly;
             settings["periodicRefreshEnabled"] = m_periodicRefreshEnabled;
+            settings["showNotificationHistory"] = m_showNotificationHistory;
             settings["refreshIntervalText"] = WideToUtf8(m_refreshIntervalText);
             settings["refreshIntervalMs"] = m_refreshIntervalMs;
             settings["incidentFilterSevere"] = m_incidentFilterSevere;
@@ -1834,8 +1894,7 @@ private:
                 body += L"\r\n...";
         }
 
-        ShowWindowsIncidentNotification(title, body);
-        ShowInAppIncidentNotification(title, body);
+        PublishNotification(title, body);
     }
 
     void EnsureNotificationIcon()
@@ -1900,10 +1959,56 @@ private:
             text += body;
         }
         SetWindowTextSafe(m_inAppNotification, text);
+        Layout();
         ShowWindow(m_inAppNotification, SW_SHOW);
         SetWindowPos(m_inAppNotification, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         KillTimer(m_hwnd, kInAppNotificationTimerId);
         SetTimer(m_hwnd, kInAppNotificationTimerId, 10 * 1000, nullptr);
+    }
+
+    void RenderNotificationHistory()
+    {
+        if (!m_notificationHistoryOverlay)
+            return;
+
+        std::wstring text = L"Notification History\r\n\r\n";
+        if (m_notificationHistory.empty()) {
+            text += L"No notifications yet.";
+        }
+        else {
+            for (const NotificationHistoryEntry& entry : m_notificationHistory) {
+                text += L"[";
+                text += entry.timestamp;
+                text += L"] ";
+                text += entry.title;
+                if (!entry.body.empty()) {
+                    text += L"\r\n";
+                    text += entry.body;
+                }
+                text += L"\r\n\r\n";
+            }
+        }
+
+        SetWindowTextSafe(m_notificationHistoryOverlay, text);
+    }
+
+    void AddNotificationHistory(const std::wstring& title, const std::wstring& body)
+    {
+        NotificationHistoryEntry entry;
+        entry.title = title;
+        entry.body = body;
+        entry.timestamp = TimeTToText(std::time(nullptr));
+        m_notificationHistory.insert(m_notificationHistory.begin(), std::move(entry));
+        if (m_notificationHistory.size() > 100)
+            m_notificationHistory.resize(100);
+        RenderNotificationHistory();
+    }
+
+    void PublishNotification(const std::wstring& title, const std::wstring& body)
+    {
+        AddNotificationHistory(title, body);
+        ShowWindowsIncidentNotification(title, body);
+        ShowInAppIncidentNotification(title, body);
     }
 
     void DownloadMissingLaneImagesAsync(const std::vector<TrafficAlert>& alerts)
@@ -2349,6 +2454,7 @@ private:
         HMENU fileMenu = CreatePopupMenu();
         HMENU roadsMenu = CreatePopupMenu();
         HMENU earthquakesMenu = CreatePopupMenu();
+        HMENU viewMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_SETTINGS, L"Settings...");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
@@ -2362,9 +2468,16 @@ private:
         showEarthquakesInfo.fMask = MIIM_FTYPE;
         showEarthquakesInfo.fType = MFT_RADIOCHECK;
         SetMenuItemInfoW(earthquakesMenu, IDM_SHOW_EARTHQUAKES, FALSE, &showEarthquakesInfo);
+        AppendMenuW(viewMenu, m_showNotificationHistory ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_NOTIFICATION_HISTORY, L"Notification History");
+        MENUITEMINFOW historyInfo{};
+        historyInfo.cbSize = sizeof(historyInfo);
+        historyInfo.fMask = MIIM_FTYPE;
+        historyInfo.fType = MFT_RADIOCHECK;
+        SetMenuItemInfoW(viewMenu, IDM_VIEW_NOTIFICATION_HISTORY, FALSE, &historyInfo);
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(earthquakesMenu), L"Earthquakes");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"View");
         AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"About");
         SetMenu(m_hwnd, menu);
     }
@@ -2457,16 +2570,16 @@ private:
 
         CreateAutoLabel(parent, IDC_INCIDENT_FILTERS_SEVERITY_LABEL, L"Severity", 18, 54 + descH + 18);
         const int severityY = 54 + descH + 46;
-        m_incidentSevereCheck = CreateWindowExW(0, L"BUTTON", L"Severe", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, severityY, 120, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_SEVERE_CHECK), m_hInst, nullptr);
-        m_incidentModerateCheck = CreateWindowExW(0, L"BUTTON", L"Moderate", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 148, severityY, 130, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_MODERATE_CHECK), m_hInst, nullptr);
-        m_incidentMinorCheck = CreateWindowExW(0, L"BUTTON", L"Minor", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 288, severityY, 110, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_MINOR_CHECK), m_hInst, nullptr);
-        m_incidentUnknownCheck = CreateWindowExW(0, L"BUTTON", L"Unknown", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, severityY + 32, 130, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_UNKNOWN_CHECK), m_hInst, nullptr);
+        m_incidentSevereCheck = CreateWindowExW(0, L"BUTTON", L"Severe", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, severityY, 120, 24, parent, ControlId(IDC_INCIDENT_FILTERS_SEVERE_CHECK), m_hInst, nullptr);
+        m_incidentModerateCheck = CreateWindowExW(0, L"BUTTON", L"Moderate", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 148, severityY, 130, 24, parent, ControlId(IDC_INCIDENT_FILTERS_MODERATE_CHECK), m_hInst, nullptr);
+        m_incidentMinorCheck = CreateWindowExW(0, L"BUTTON", L"Minor", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 288, severityY, 110, 24, parent, ControlId(IDC_INCIDENT_FILTERS_MINOR_CHECK), m_hInst, nullptr);
+        m_incidentUnknownCheck = CreateWindowExW(0, L"BUTTON", L"Unknown", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, severityY + 32, 130, 24, parent, ControlId(IDC_INCIDENT_FILTERS_UNKNOWN_CHECK), m_hInst, nullptr);
 
         CreateAutoLabel(parent, IDC_INCIDENT_FILTERS_TYPE_LABEL, L"Incident type", 18, severityY + 78);
         const int typeY = severityY + 106;
-        m_incidentUnplannedCheck = CreateWindowExW(0, L"BUTTON", L"Unplanned incidents", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY, 180, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_UNPLANNED_CHECK), m_hInst, nullptr);
-        m_incidentPlannedCheck = CreateWindowExW(0, L"BUTTON", L"Planned roadworks", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 218, typeY, 170, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_PLANNED_CHECK), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 280, 102, 32, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_FILTERS_CLOSE_BTN), m_hInst, nullptr);
+        m_incidentUnplannedCheck = CreateWindowExW(0, L"BUTTON", L"Unplanned incidents", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY, 180, 24, parent, ControlId(IDC_INCIDENT_FILTERS_UNPLANNED_CHECK), m_hInst, nullptr);
+        m_incidentPlannedCheck = CreateWindowExW(0, L"BUTTON", L"Planned roadworks", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 218, typeY, 170, 24, parent, ControlId(IDC_INCIDENT_FILTERS_PLANNED_CHECK), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 280, 102, 32, parent, ControlId(IDC_INCIDENT_FILTERS_CLOSE_BTN), m_hInst, nullptr);
 
         for (HWND h : { m_incidentSevereCheck, m_incidentModerateCheck, m_incidentMinorCheck, m_incidentUnknownCheck, m_incidentUnplannedCheck, m_incidentPlannedCheck, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -2613,33 +2726,33 @@ private:
 
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_ROADS_LABEL, L"Roads to notify on", left, y);
         y += 26;
-        m_incidentNotifyRoadsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_ROADS_EDIT), m_hInst, nullptr);
+        m_incidentNotifyRoadsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_ROADS_EDIT), m_hInst, nullptr);
         y += 42;
 
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_LANES_LABEL, L"Closed-lane threshold", left, y);
         y += 26;
-        m_incidentNotifyLaneThresholdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, 120, 26, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_LANES_EDIT), m_hInst, nullptr);
+        m_incidentNotifyLaneThresholdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, 120, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_LANES_EDIT), m_hInst, nullptr);
         y += 42;
 
-        m_incidentNotifyAndRadio = CreateWindowExW(0, L"BUTTON", L"AND", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, editX, y, 72, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_AND_RADIO), m_hInst, nullptr);
-        m_incidentNotifyOrRadio = CreateWindowExW(0, L"BUTTON", L"OR", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, editX + 84, y, 72, 24, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_OR_RADIO), m_hInst, nullptr);
+        m_incidentNotifyAndRadio = CreateWindowExW(0, L"BUTTON", L"AND", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, editX, y, 72, 24, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_AND_RADIO), m_hInst, nullptr);
+        m_incidentNotifyOrRadio = CreateWindowExW(0, L"BUTTON", L"OR", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, editX + 84, y, 72, 24, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_OR_RADIO), m_hInst, nullptr);
         y += 36;
 
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_DELAY_LABEL, L"Delay threshold", left, y);
         y += 26;
-        m_incidentNotifyDelayThresholdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, 120, 26, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_DELAY_EDIT), m_hInst, nullptr);
+        m_incidentNotifyDelayThresholdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, 120, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_DELAY_EDIT), m_hInst, nullptr);
         y += 42;
 
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_REGIONS_LABEL, L"Notification regions", left, y);
         y += 26;
-        m_incidentNotifyRegionsBtn = CreateWindowExW(0, L"BUTTON", L"Manage regions...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, editX, y, 168, 32, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_REGIONS_BTN), m_hInst, nullptr);
+        m_incidentNotifyRegionsBtn = CreateWindowExW(0, L"BUTTON", L"Manage regions...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, editX, y, 168, 32, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_REGIONS_BTN), m_hInst, nullptr);
         y += 48;
 
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_LABEL, L"Reason exclusions", left, y);
         y += 26;
-        m_incidentNotifyReasonExclusionsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT), m_hInst, nullptr);
+        m_incidentNotifyReasonExclusionsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT), m_hInst, nullptr);
 
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 392, y + 42, 102, 32, parent, reinterpret_cast<HMENU>(IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 392, y + 42, 102, 32, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
 
         for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyAndRadio, m_incidentNotifyOrRadio, m_incidentNotifyDelayThresholdEdit, m_incidentNotifyRegionsBtn, m_incidentNotifyReasonExclusionsEdit, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -2798,11 +2911,11 @@ private:
     {
         CreateAutoLabel(parent, 0, L"Notification regions", 18, 18, m_headerFont);
         CreateAutoLabel(parent, 0, L"Each region can notify for every road inside it, or only the roads listed for that region.", 18, 54, nullptr, 364);
-        m_notificationRegionsList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 100, 376, 150, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGIONS_LIST), m_hInst, nullptr);
-        HWND addBtn = CreateWindowExW(0, L"BUTTON", L"New", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 268, 82, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGIONS_NEW_BTN), m_hInst, nullptr);
-        HWND editBtn = CreateWindowExW(0, L"BUTTON", L"Edit", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 108, 268, 82, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGIONS_EDIT_BTN), m_hInst, nullptr);
-        HWND deleteBtn = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 198, 268, 82, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGIONS_DELETE_BTN), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 268, 102, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGIONS_CLOSE_BTN), m_hInst, nullptr);
+        m_notificationRegionsList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 100, 376, 150, parent, ControlId(IDC_NOTIFICATION_REGIONS_LIST), m_hInst, nullptr);
+        HWND addBtn = CreateWindowExW(0, L"BUTTON", L"New", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 268, 82, 32, parent, ControlId(IDC_NOTIFICATION_REGIONS_NEW_BTN), m_hInst, nullptr);
+        HWND editBtn = CreateWindowExW(0, L"BUTTON", L"Edit", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 108, 268, 82, 32, parent, ControlId(IDC_NOTIFICATION_REGIONS_EDIT_BTN), m_hInst, nullptr);
+        HWND deleteBtn = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 198, 268, 82, 32, parent, ControlId(IDC_NOTIFICATION_REGIONS_DELETE_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 268, 102, 32, parent, ControlId(IDC_NOTIFICATION_REGIONS_CLOSE_BTN), m_hInst, nullptr);
 
         for (HWND h : { m_notificationRegionsList, addBtn, editBtn, deleteBtn, closeBtn }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -2977,15 +3090,15 @@ private:
         const GeoPolygon& polygon = m_incidentNotificationRegions[index];
         CreateAutoLabel(parent, 0, L"Notification region", 18, 18, m_headerFont);
         CreateAutoLabel(parent, 0, L"Name", 18, 58);
-        HWND nameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", polygon.name.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 84, 376, 26, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_NAME_EDIT), m_hInst, nullptr);
-        HWND allRoads = CreateWindowExW(0, L"BUTTON", L"All roads inside polygon", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, 122, 220, 24, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_ALL_ROADS_CHECK), m_hInst, nullptr);
+        HWND nameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", polygon.name.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 84, 376, 26, parent, ControlId(IDC_NOTIFICATION_REGION_NAME_EDIT), m_hInst, nullptr);
+        HWND allRoads = CreateWindowExW(0, L"BUTTON", L"All roads inside polygon", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, 122, 220, 24, parent, ControlId(IDC_NOTIFICATION_REGION_ALL_ROADS_CHECK), m_hInst, nullptr);
         SendMessageW(allRoads, BM_SETCHECK, polygon.allRoads ? BST_CHECKED : BST_UNCHECKED, 0);
         CreateAutoLabel(parent, 0, L"Specific roads", 18, 156);
-        HWND roadsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", polygon.roadFilter.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 182, 376, 26, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_ROADS_EDIT), m_hInst, nullptr);
-        HWND pointsLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 220, 376, 24, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_POINTS_LABEL), m_hInst, nullptr);
-        HWND drawBtn = CreateWindowExW(0, L"BUTTON", L"Draw on map", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 254, 128, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_DRAW_BTN), m_hInst, nullptr);
-        HWND clearBtn = CreateWindowExW(0, L"BUTTON", L"Clear points", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 154, 254, 128, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_CLEAR_BTN), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 254, 102, 32, parent, reinterpret_cast<HMENU>(IDC_NOTIFICATION_REGION_CLOSE_BTN), m_hInst, nullptr);
+        HWND roadsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", polygon.roadFilter.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 182, 376, 26, parent, ControlId(IDC_NOTIFICATION_REGION_ROADS_EDIT), m_hInst, nullptr);
+        HWND pointsLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 220, 376, 24, parent, ControlId(IDC_NOTIFICATION_REGION_POINTS_LABEL), m_hInst, nullptr);
+        HWND drawBtn = CreateWindowExW(0, L"BUTTON", L"Draw on map", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 254, 128, 32, parent, ControlId(IDC_NOTIFICATION_REGION_DRAW_BTN), m_hInst, nullptr);
+        HWND clearBtn = CreateWindowExW(0, L"BUTTON", L"Clear points", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 154, 254, 128, 32, parent, ControlId(IDC_NOTIFICATION_REGION_CLEAR_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 254, 102, 32, parent, ControlId(IDC_NOTIFICATION_REGION_CLOSE_BTN), m_hInst, nullptr);
 
         for (HWND h : { nameEdit, allRoads, roadsEdit, pointsLabel, drawBtn, clearBtn, closeBtn }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -3181,6 +3294,22 @@ private:
             CheckMenuItem(menu, IDM_SHOW_EARTHQUAKES, MF_BYCOMMAND | (m_showEarthquakes ? MF_CHECKED : MF_UNCHECKED));
     }
 
+    void UpdateNotificationHistoryMenu()
+    {
+        HMENU menu = GetMenu(m_hwnd);
+        if (menu)
+            CheckMenuItem(menu, IDM_VIEW_NOTIFICATION_HISTORY, MF_BYCOMMAND | (m_showNotificationHistory ? MF_CHECKED : MF_UNCHECKED));
+    }
+
+    void ToggleNotificationHistory()
+    {
+        m_showNotificationHistory = !m_showNotificationHistory;
+        UpdateNotificationHistoryMenu();
+        RenderNotificationHistory();
+        Layout();
+        SaveSettings();
+    }
+
     void ToggleShowEarthquakes()
     {
         m_showEarthquakes = !m_showEarthquakes;
@@ -3246,8 +3375,7 @@ private:
                 body += L"\r\n...";
         }
 
-        ShowWindowsIncidentNotification(title, body);
-        ShowInAppIncidentNotification(title, body);
+        PublishNotification(title, body);
     }
 
     static LRESULT CALLBACK EarthquakeListWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -3323,13 +3451,13 @@ private:
     {
         CreateAutoLabel(parent, 0, L"Earthquakes List", 18, 18, m_headerFont);
         CreateAutoLabel(parent, 0, L"Minimum magnitude", 18, 58);
-        m_earthquakeListMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 84, 120, 26, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_MAG_EDIT), m_hInst, nullptr);
+        m_earthquakeListMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 84, 120, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_MAG_EDIT), m_hInst, nullptr);
         CreateAutoLabel(parent, 0, L"After date/time", 160, 58);
-        m_earthquakeListTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 160, 84, 170, 26, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_TIME_EDIT), m_hInst, nullptr);
-        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 350, 80, 118, 32, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
-        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 478, 80, 118, 32, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 672, 80, 102, 32, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 126, 756, 350, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
+        m_earthquakeListTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 160, 84, 170, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_TIME_EDIT), m_hInst, nullptr);
+        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 350, 80, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
+        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 478, 80, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 672, 80, 102, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
+        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 126, 756, 350, parent, ControlId(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
 
         for (HWND h : { m_earthquakeListMagnitudeEdit, m_earthquakeListTimeEdit, m_earthquakeListRegionBtn, m_earthquakeListClearRegionBtn, closeBtn, m_earthquakeListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -3525,8 +3653,8 @@ private:
         CreateAutoLabel(parent, 0, L"Earthquake Notifications", 18, 18, m_headerFont);
         CreateAutoLabel(parent, 0, L"Notify when an earthquake is at or above this magnitude.", 18, 58, nullptr, 360);
         CreateAutoLabel(parent, 0, L"Minimum magnitude", 18, 104);
-        m_earthquakeNotificationMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 130, 120, 26, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 130, 102, 32, parent, reinterpret_cast<HMENU>(IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
+        m_earthquakeNotificationMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 130, 120, 26, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 130, 102, 32, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
         for (HWND h : { m_earthquakeNotificationMagnitudeEdit, closeBtn }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
@@ -3678,20 +3806,20 @@ private:
     void CreateSettingsControls(HWND parent)
     {
         m_urlLabel = CreateAutoLabel(parent, IDC_SETTINGS_ENDPOINT_LABEL, L"Alerts endpoint", 18, 18);
-        m_urlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 44, 410, 26, parent, reinterpret_cast<HMENU>(IDC_URL_EDIT), m_hInst, nullptr);
+        m_urlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 44, 410, 26, parent, ControlId(IDC_URL_EDIT), m_hInst, nullptr);
         m_serverLabel = CreateAutoLabel(parent, IDC_SETTINGS_SERVER_LABEL, L"Collaboration server", 18, 84);
-        m_serverEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 110, 410, 26, parent, reinterpret_cast<HMENU>(IDC_SERVER_EDIT), m_hInst, nullptr);
+        m_serverEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 110, 410, 26, parent, ControlId(IDC_SERVER_EDIT), m_hInst, nullptr);
         CreateAutoLabel(parent, IDC_SETTINGS_REFRESH_LABEL, L"Periodic alert refresh", 18, 150);
-        m_settingsRefreshOffRadio = CreateWindowExW(0, L"BUTTON", L"Manual refresh only", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 176, 145, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_OFF_RADIO), m_hInst, nullptr);
-        m_settingsRefreshOnRadio = CreateWindowExW(0, L"BUTTON", L"Refresh every", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 176, 120, 24, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_ON_RADIO), m_hInst, nullptr);
+        m_settingsRefreshOffRadio = CreateWindowExW(0, L"BUTTON", L"Manual refresh only", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 176, 145, 24, parent, ControlId(IDC_SETTINGS_REFRESH_OFF_RADIO), m_hInst, nullptr);
+        m_settingsRefreshOnRadio = CreateWindowExW(0, L"BUTTON", L"Refresh every", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 176, 120, 24, parent, ControlId(IDC_SETTINGS_REFRESH_ON_RADIO), m_hInst, nullptr);
         CreateAutoLabel(parent, IDC_SETTINGS_REFRESH_INTERVAL_LABEL, L"Interval", 18, 214);
-        m_settingsRefreshIntervalEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 178, 208, 120, 26, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_REFRESH_INTERVAL_EDIT), m_hInst, nullptr);
+        m_settingsRefreshIntervalEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 178, 208, 120, 26, parent, ControlId(IDC_SETTINGS_REFRESH_INTERVAL_EDIT), m_hInst, nullptr);
         CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 252);
-        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 278, 410, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
+        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 278, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
         CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 316);
-        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 342, 410, 160, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
-        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 388, 260, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 388, 102, 32, parent, reinterpret_cast<HMENU>(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 342, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
+        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 388, 260, 32, parent, ControlId(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 388, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
         for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsFilterCombo, m_settingsOrderCombo, boundary, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -3872,6 +4000,7 @@ private:
     HWND m_noteEdit = nullptr;
     HWND m_noteBtn = nullptr;
     HWND m_inAppNotification = nullptr;
+    HWND m_notificationHistoryOverlay = nullptr;
 
     MapView m_map;
 
@@ -3879,6 +4008,7 @@ private:
     std::vector<TrafficAlert> m_filteredAlerts;
     std::vector<ChatMessage> m_chatMessages;
     std::vector<MapNote> m_notes;
+    std::vector<NotificationHistoryEntry> m_notificationHistory;
     std::vector<GeoPolygon> m_incidentNotificationRegions;
     std::vector<EarthquakeEvent> m_allEarthquakes;
     std::vector<GeoPoint> m_earthquakeFilterRegion;
@@ -3886,6 +4016,7 @@ private:
     bool m_programmaticSelection = false;
     bool m_syncingControls = false;
     bool m_isSidePanelVisible = true;
+    bool m_showNotificationHistory = false;
     bool m_alertFilterUnplannedOnly = true;
     bool m_incidentFilterSevere = true;
     bool m_incidentFilterModerate = true;

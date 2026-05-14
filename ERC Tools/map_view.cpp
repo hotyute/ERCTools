@@ -1231,7 +1231,7 @@ private:
 
         const float icon = 34.0f;
         const float gap = 4.0f;
-        const float textH = 44.0f;
+        const float textH = hasLaneOverlay ? 64.0f : 44.0f;
         const float panelPad = 8.0f;
         const float iconsW = hasLaneOverlay ? (total * icon + (total - 1) * gap) : 0.0f;
         const float panelW = MaxValue(238.0f, iconsW + panelPad * 2.0f);
@@ -1255,18 +1255,19 @@ private:
         std::wstring roadTitle = alert->road.empty() ? alert->region : alert->road;
         if (roadTitle.empty())
             roadTitle = L"Traffic alert";
-        std::wstring detailTitle;
+        std::wstring alertTitle = alert->title.empty() ? BuildSeverityDisplay(alert->severity) : alert->title;
+        std::wstring laneTitle;
         if (hasLaneOverlay)
-            detailTitle = L"Lanes closed: " + std::to_wstring(closed) + L" of " + std::to_wstring(total);
-        else if (!alert->title.empty())
-            detailTitle = alert->title;
-        else
-            detailTitle = BuildSeverityDisplay(alert->severity);
+            laneTitle = L"Lanes closed: " + std::to_wstring(closed) + L" of " + std::to_wstring(total);
         if (m_noteTextFormat) {
             D2D1_RECT_F roadRect = D2D1::RectF(left + panelPad, top + panelPad - 1.0f, left + panelW - panelPad, top + panelPad + 20.0f);
-            D2D1_RECT_F laneRect = D2D1::RectF(left + panelPad, top + panelPad + 19.0f, left + panelW - panelPad, top + panelPad + textH);
+            D2D1_RECT_F titleRect = D2D1::RectF(left + panelPad, top + panelPad + 19.0f, left + panelW - panelPad, top + panelPad + 42.0f);
             m_rt->DrawTextW(roadTitle.c_str(), static_cast<UINT32>(roadTitle.size()), m_noteTextFormat.Get(), roadRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            m_rt->DrawTextW(detailTitle.c_str(), static_cast<UINT32>(detailTitle.size()), m_noteTextFormat.Get(), laneRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            m_rt->DrawTextW(alertTitle.c_str(), static_cast<UINT32>(alertTitle.size()), m_noteTextFormat.Get(), titleRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            if (hasLaneOverlay) {
+                D2D1_RECT_F laneRect = D2D1::RectF(left + panelPad, top + panelPad + 42.0f, left + panelW - panelPad, top + panelPad + textH);
+                m_rt->DrawTextW(laneTitle.c_str(), static_cast<UINT32>(laneTitle.size()), m_noteTextFormat.Get(), laneRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
         }
 
         if (!hasLaneOverlay)
