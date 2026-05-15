@@ -178,6 +178,14 @@ struct ReportTemplate
     std::wstring body;
 };
 
+struct JunctionTemplateData
+{
+    std::wstring display;
+    std::wstring number;
+    std::wstring data;
+    size_t sourcePosition = 0;
+};
+
 struct IncidentNotificationState
 {
     std::wstring signature;
@@ -487,7 +495,10 @@ static std::wstring DecodeBasicHtmlEntities(std::wstring text)
 
 static std::wstring StripTemplateHtmlTags(const std::wstring& html)
 {
-    std::wstring text = std::regex_replace(html, std::wregex(LR"(<[^>]+>)"), L" ");
+    std::wstring text = html;
+    text = std::regex_replace(text, std::wregex(LR"(<\s*(?:br|hr)\b[^>]*>)", std::regex_constants::icase), L" ");
+    text = std::regex_replace(text, std::wregex(LR"(</\s*(?:p|div|td|tr|li|h[1-6])\s*>)", std::regex_constants::icase), L" ");
+    text = std::regex_replace(text, std::wregex(LR"(<[^>]+>)"), L" ");
     text = DecodeBasicHtmlEntities(text);
     std::wstring compact;
     compact.reserve(text.size());
@@ -1105,6 +1116,7 @@ private:
 
         LoadSettings();
         EnsureDefaultReportTemplates();
+        ModernizeReportTemplates();
         CreateMainMenu();
 
         m_searchLabel = CreateAutoLabel(m_hwnd, IDC_SEARCH_LABEL, L"Search");
@@ -1582,9 +1594,19 @@ private:
 
         ReportTemplate reportTemplate;
         reportTemplate.name = L"National Highways incident";
-        reportTemplate.body = L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION between %JUNCTION1 (%JUNCTIONDATA1) and %JUNCTION2 (%JUNCTIONDATA2) with %LANECLOSURES closed. Expect delays and congestion, avoid the area if possible, find alternate routes, monitor local traffic and media for updates. Allow extra time for your journey.";
+        reportTemplate.body = L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION %JUNCTIONS_WITH_DATA with %LANECLOSURES closed. Expect delays and congestion, avoid the area if possible, find alternate routes, monitor local traffic and media for updates. Allow extra time for your journey.";
         m_reportTemplates.push_back(std::move(reportTemplate));
         m_reportTemplatesConfigured = true;
+    }
+
+    void ModernizeReportTemplates()
+    {
+        for (ReportTemplate& reportTemplate : m_reportTemplates) {
+            ReplaceAllText(
+                reportTemplate.body,
+                L"between %JUNCTION1 (%JUNCTIONDATA1) and %JUNCTION2 (%JUNCTIONDATA2)",
+                L"%JUNCTIONS_WITH_DATA");
+        }
     }
 
     void SaveSettings() const
@@ -3514,58 +3536,216 @@ private:
         return slug;
     }
 
-    std::wstring FetchRoadsOrgJunctionData(const std::wstring& road, const std::wstring& junction, const std::wstring& direction) const
+    static std::wstring JoinTemplateItems(const std::vector<std::wstring>& items, const std::wstring& separator = L", ")
     {
-        std::wstring slug = RoadSlugForRoadsOrg(road);
-        if (slug.empty() || junction.empty())
-            return L"";
-
-        std::string body;
-        std::wstring error;
-        if (!HttpGetText(L"https://www.roads.org.uk/" + slug, body, error))
-            return L"";
-
-        std::wstring html = Utf8ToWide(body);
-        std::wstring lower = ToLower(html);
-        std::wstring junctionNumber = junction;
-        std::wregex numRe(LR"((\d+[A-Za-z]?))");
-        std::wsmatch numMatch;
-        if (std::regex_search(junction, numMatch, numRe) && numMatch.size() > 1)
-            junctionNumber = numMatch[1].str();
-
-        std::vector<std::wstring> needles = {
-            L"junction " + ToLower(junctionNumber),
-            L"j" + ToLower(junctionNumber),
-            ToLower(junction)
-        };
-        if (!direction.empty())
-            needles.push_back(ToLower(direction) + L" " + ToLower(junctionNumber));
-
-        size_t found = std::wstring::npos;
-        for (const std::wstring& needle : needles) {
-            found = lower.find(needle);
-            if (found != std::wstring::npos)
-                break;
+        std::wstring text;
+        for (const std::wstring& item : items) {
+            if (item.empty())
+                continue;
+            if (!text.empty())
+                text += separator;
+            text += item;
         }
-        if (found == std::wstring::npos)
+        return text;
+    }
+
+    static std::wstring JoinTemplateItemsAsPhrase(const std::vector<std::wstring>& items)
+    {
+        if (items.empty())
             return L"";
+        if (items.size() == 1)
+            return items.front();
+        if (items.size() == 2)
+            return items[0] + L" and " + items[1];
 
-        const size_t start = found > 1200 ? found - 1200 : 0;
-        const size_t count = MinValue<size_t>(2400, html.size() - start);
-        std::wstring text = StripTemplateHtmlTags(html.substr(start, count));
+        std::wstring text;
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (i > 0)
+                text += (i + 1 == items.size()) ? L" and " : L", ";
+            text += items[i];
+        }
+        return text;
+    }
 
-        std::wregex roadRefRe(LR"(\b([AB]\d{1,4}[A-Z]?(?:\([A-Z]+\))?(?:\s+[A-Z][A-Za-z()'/-]+){0,4}))");
+    static bool PushUniqueText(std::vector<std::wstring>& values, const std::wstring& value)
+    {
+        std::wstring trimmed = Trim(value);
+        if (trimmed.empty())
+            return false;
+
+        std::wstring lower = ToLower(trimmed);
+        for (const std::wstring& existing : values) {
+            if (ToLower(existing) == lower)
+                return false;
+        }
+
+        values.push_back(std::move(trimmed));
+        return true;
+    }
+
+    static std::vector<std::wstring> ExtractRoadRefsFromText(const std::wstring& text, const std::wstring& currentRoad)
+    {
+        std::vector<std::wstring> refs;
+        std::wstring current = ToLower(Trim(currentRoad));
+        std::wregex roadRefRe(LR"(\b([AMB]\d{1,4}[A-Z]?(?:\([A-Z]+\))?)\b)", std::regex_constants::icase);
         for (std::wsregex_iterator it(text.begin(), text.end(), roadRefRe), end; it != end; ++it) {
-            std::wstring candidate = Trim((*it)[1].str());
-            std::wstring lowerCandidate = ToLower(candidate);
-            if (lowerCandidate.find(L"junction") == std::wstring::npos &&
-                lowerCandidate.find(L"road") == std::wstring::npos)
-            {
-                return candidate;
-            }
+            std::wstring ref = Trim((*it)[1].str());
+            if (!current.empty() && ToLower(ref) == current)
+                continue;
+            PushUniqueText(refs, ref);
+        }
+        return refs;
+    }
+
+    static std::wstring ExtractRoadsOrgDataFromFragment(const std::wstring& fragment, const std::wstring& currentRoad)
+    {
+        std::wstring text = StripTemplateHtmlTags(fragment);
+        std::vector<std::wstring> refs = ExtractRoadRefsFromText(text, currentRoad);
+        if (!refs.empty())
+            return JoinTemplateItems(refs);
+
+        std::wregex titleRe(LR"(title\s*=\s*(['"])(.*?)\1)", std::regex_constants::icase);
+        std::wsmatch m;
+        if (std::regex_search(fragment, m, titleRe) && m.size() > 2) {
+            std::wstring title = DecodeBasicHtmlEntities(m[2].str());
+            size_t paren = title.find(L'(');
+            if (paren != std::wstring::npos)
+                title = Trim(title.substr(0, paren));
+            return title;
         }
 
         return L"";
+    }
+
+    static bool TryFetchRoadsOrgPage(const std::wstring& slug, std::wstring& htmlOut)
+    {
+        std::vector<std::wstring> urls = {
+            L"https://www.roads.org.uk/motorway/" + slug + L"/",
+            L"https://www.roads.org.uk/motorway/" + slug,
+            L"https://www.roads.org.uk/" + slug
+        };
+
+        for (const std::wstring& url : urls) {
+            std::string body;
+            std::wstring error;
+            if (HttpGetText(url, body, error)) {
+                htmlOut = Utf8ToWide(body);
+                return true;
+            }
+        }
+
+        htmlOut.clear();
+        return false;
+    }
+
+    static std::wstring ExtractRoadsOrgDetailHref(const std::wstring& rowHtml, const std::wstring& slug)
+    {
+        std::wstring pattern = LR"(href\s*=\s*(['"])((?:/motorway/)";
+        pattern += slug;
+        pattern += LR"(/[^'"]+))\1)";
+        std::wregex hrefRe(pattern, std::regex_constants::icase);
+        std::wsmatch m;
+        if (std::regex_search(rowHtml, m, hrefRe) && m.size() > 2)
+            return m[2].str();
+        return L"";
+    }
+
+    static bool RowMatchesRoadsOrgJunction(const std::wstring& rowHtml, const std::wstring& junctionNumber)
+    {
+        std::wregex jctCellRe(LR"(<td\b[^>]*class\s*=\s*(['"])[^'"]*\bjct\b[^'"]*\1[^>]*>([\s\S]*?)</td>)", std::regex_constants::icase);
+        std::wsmatch m;
+        if (!std::regex_search(rowHtml, m, jctCellRe) || m.size() <= 2)
+            return false;
+
+        std::wstring cellText = StripTemplateHtmlTags(m[2].str());
+        std::wregex numberRe(LR"(\b(?:J\s*)?(\d+[A-Za-z]?)\b)", std::regex_constants::icase);
+        std::wsmatch numberMatch;
+        if (!std::regex_search(cellText, numberMatch, numberRe) || numberMatch.size() <= 1)
+            return false;
+
+        return ToLower(numberMatch[1].str()) == ToLower(junctionNumber);
+    }
+
+    static bool TryFindRoadsOrgJunctionRow(const std::wstring& html, const std::wstring& junctionNumber, std::wstring& rowHtmlOut, std::wstring& detailHrefOut)
+    {
+        std::wregex rowRe(LR"(<tr\b[^>]*>([\s\S]*?)</tr>)", std::regex_constants::icase);
+        for (std::wsregex_iterator it(html.begin(), html.end(), rowRe), end; it != end; ++it) {
+            std::wstring row = (*it)[0].str();
+            if (!RowMatchesRoadsOrgJunction(row, junctionNumber))
+                continue;
+
+            rowHtmlOut = std::move(row);
+            detailHrefOut.clear();
+            return true;
+        }
+        rowHtmlOut.clear();
+        detailHrefOut.clear();
+        return false;
+    }
+
+    static std::wstring ExtractRoadsOrgDetailOtherRoutes(const std::wstring& html, const std::wstring& currentRoad)
+    {
+        std::wstring text = StripTemplateHtmlTags(html);
+        std::wregex otherRoutesRe(LR"(Other routes\s+(.+?)\s+(?:Authority|Restricted turns|Services|Layout and signage))", std::regex_constants::icase);
+        std::wsmatch m;
+        if (std::regex_search(text, m, otherRoutesRe) && m.size() > 1) {
+            std::vector<std::wstring> refs = ExtractRoadRefsFromText(m[1].str(), currentRoad);
+            if (!refs.empty())
+                return JoinTemplateItems(refs);
+            return Trim(m[1].str());
+        }
+
+        return L"";
+    }
+
+    std::wstring FetchRoadsOrgJunctionData(const std::wstring& road, const JunctionTemplateData& junction, const std::wstring& direction) const
+    {
+        std::wstring slug = RoadSlugForRoadsOrg(road);
+        if (slug.empty() || junction.number.empty())
+            return L"";
+
+        std::wstring html;
+        if (!TryFetchRoadsOrgPage(slug, html))
+            return L"";
+
+        std::wstring rowHtml;
+        std::wstring detailHref;
+        std::wstring rowData;
+        if (TryFindRoadsOrgJunctionRow(html, junction.number, rowHtml, detailHref)) {
+            detailHref = ExtractRoadsOrgDetailHref(rowHtml, slug);
+
+            std::vector<std::wstring> signPanels;
+            std::wregex signPanelRe(LR"(<td\b[^>]*class\s*=\s*(['"])[^'"]*\bsignpanel\b[^'"]*\1[^>]*>([\s\S]*?)</td>)", std::regex_constants::icase);
+            for (std::wsregex_iterator it(rowHtml.begin(), rowHtml.end(), signPanelRe), end; it != end; ++it)
+                signPanels.push_back((*it)[2].str());
+
+            std::wstring lowerDirection = ToLower(direction);
+            if (!signPanels.empty() &&
+                (lowerDirection == L"northbound" || lowerDirection == L"westbound" || lowerDirection == L"anticlockwise"))
+            {
+                rowData = ExtractRoadsOrgDataFromFragment(signPanels.front(), road);
+            }
+            else if (signPanels.size() > 1 &&
+                (lowerDirection == L"southbound" || lowerDirection == L"eastbound" || lowerDirection == L"clockwise"))
+            {
+                rowData = ExtractRoadsOrgDataFromFragment(signPanels[1], road);
+            }
+
+            if (rowData.empty())
+                rowData = ExtractRoadsOrgDataFromFragment(rowHtml, road);
+        }
+
+        if (!detailHref.empty()) {
+            std::string detailBody;
+            std::wstring error;
+            if (HttpGetText(L"https://www.roads.org.uk" + detailHref, detailBody, error)) {
+                std::wstring detailData = ExtractRoadsOrgDetailOtherRoutes(Utf8ToWide(detailBody), road);
+                if (!detailData.empty())
+                    return detailData;
+            }
+        }
+
+        return rowData;
     }
 
     static std::wstring ExtractDirectionFromLocation(const std::wstring& location)
@@ -3577,50 +3757,114 @@ private:
         return L"";
     }
 
-    static std::vector<std::pair<std::wstring, std::wstring>> ExtractJunctionsFromLocation(const std::wstring& location)
+    static std::wstring ReadBalancedParenthetical(const std::wstring& text, size_t openPos, size_t& endPos)
     {
-        std::vector<std::pair<std::wstring, std::wstring>> junctions;
-        std::wstring lower = ToLower(location);
-        size_t pos = 0;
-        while ((pos = lower.find(L"junction", pos)) != std::wstring::npos) {
-            size_t cursor = pos + 8;
-            while (cursor < location.size() && iswspace(location[cursor]))
-                ++cursor;
+        endPos = openPos;
+        if (openPos >= text.size() || text[openPos] != L'(')
+            return L"";
 
-            size_t numberStart = cursor;
-            while (cursor < location.size() && iswalnum(location[cursor]))
-                ++cursor;
-            if (cursor == numberStart) {
-                pos += 8;
-                continue;
+        int depth = 0;
+        const size_t valueStart = openPos + 1;
+        for (size_t i = openPos; i < text.size(); ++i) {
+            if (text[i] == L'(')
+                ++depth;
+            else if (text[i] == L')') {
+                --depth;
+                if (depth == 0) {
+                    endPos = i + 1;
+                    return Trim(text.substr(valueStart, i - valueStart));
+                }
             }
+        }
 
-            std::wstring junctionName = L"Junction " + location.substr(numberStart, cursor - numberStart);
+        endPos = text.size();
+        return L"";
+    }
+
+    static std::wstring JunctionDisplayName(const std::wstring& matchText, const std::wstring& number)
+    {
+        std::wstring lowerMatch = ToLower(matchText);
+        std::wregex jPrefixRe(LR"(\bJ\s*\d)", std::regex_constants::icase);
+        if (std::regex_search(matchText, jPrefixRe))
+            return L"J" + number;
+        if (lowerMatch.find(L"junction") != std::wstring::npos)
+            return L"Junction " + number;
+        return L"J" + number;
+    }
+
+    static bool AddExtractedJunction(
+        std::vector<JunctionTemplateData>& junctions,
+        std::unordered_set<std::wstring>& seenNumbers,
+        const std::wstring& display,
+        const std::wstring& number,
+        const std::wstring& data,
+        size_t sourcePosition)
+    {
+        std::wstring normalizedNumber = ToLower(Trim(number));
+        if (normalizedNumber.empty() || seenNumbers.find(normalizedNumber) != seenNumbers.end())
+            return false;
+
+        seenNumbers.insert(normalizedNumber);
+        JunctionTemplateData junction;
+        junction.display = display.empty() ? L"J" + number : display;
+        junction.number = number;
+        junction.data = data;
+        junction.sourcePosition = sourcePosition;
+        junctions.push_back(std::move(junction));
+        return true;
+    }
+
+    static std::vector<JunctionTemplateData> ExtractJunctionsFromLocation(const std::wstring& location)
+    {
+        std::vector<JunctionTemplateData> junctions;
+        std::unordered_set<std::wstring> seenNumbers;
+
+        std::wregex explicitJunctionRe(LR"(\b(?:junctions?|j)\s*(?:\.?\s*)?(?:J\s*)?(\d+[A-Za-z]?)\b)", std::regex_constants::icase);
+        for (std::wsregex_iterator it(location.begin(), location.end(), explicitJunctionRe), end; it != end; ++it) {
+            std::wstring number = (*it)[1].str();
+            std::wstring matchText = (*it)[0].str();
+            size_t matchPos = static_cast<size_t>((*it).position(0));
+            size_t cursor = matchPos + static_cast<size_t>((*it).length(0));
             while (cursor < location.size() && iswspace(location[cursor]))
                 ++cursor;
 
             std::wstring data;
             if (cursor < location.size() && location[cursor] == L'(') {
-                int depth = 0;
-                size_t dataStart = cursor + 1;
-                for (; cursor < location.size(); ++cursor) {
-                    if (location[cursor] == L'(')
-                        ++depth;
-                    else if (location[cursor] == L')') {
-                        --depth;
-                        if (depth == 0) {
-                            data = Trim(location.substr(dataStart, cursor - dataStart));
-                            ++cursor;
-                            break;
-                        }
-                    }
-                }
+                size_t endPos = cursor;
+                data = ReadBalancedParenthetical(location, cursor, endPos);
             }
 
-            junctions.push_back({ junctionName, data });
-            pos = cursor;
+            AddExtractedJunction(
+                junctions,
+                seenNumbers,
+                JunctionDisplayName(matchText, number),
+                number,
+                data,
+                matchPos);
         }
 
+        std::wregex pluralPhraseRe(LR"(\bjunctions?\s+((?:J?\s*\d+[A-Za-z]?\s*(?:(?:,|and|&|to|-)\s*)?)+))", std::regex_constants::icase);
+        for (std::wsregex_iterator it(location.begin(), location.end(), pluralPhraseRe), end; it != end; ++it) {
+            std::wstring phrase = (*it)[1].str();
+            size_t phrasePos = static_cast<size_t>((*it).position(1));
+            std::wregex numberRe(LR"(\b(J?)\s*(\d+[A-Za-z]?)\b)", std::regex_constants::icase);
+            for (std::wsregex_iterator numberIt(phrase.begin(), phrase.end(), numberRe), numberEnd; numberIt != numberEnd; ++numberIt) {
+                std::wstring number = (*numberIt)[2].str();
+                bool hasJPrefix = !(*numberIt)[1].str().empty();
+                std::wstring display = hasJPrefix ? L"J" + number : L"Junction " + number;
+                AddExtractedJunction(
+                    junctions,
+                    seenNumbers,
+                    display,
+                    number,
+                    L"",
+                    phrasePos + static_cast<size_t>((*numberIt).position(0)));
+            }
+        }
+
+        std::sort(junctions.begin(), junctions.end(), [](const JunctionTemplateData& a, const JunctionTemplateData& b) {
+            return a.sourcePosition < b.sourcePosition;
+            });
         return junctions;
     }
 
@@ -3641,7 +3885,7 @@ private:
         std::wstring road = alert.road.empty() ? alert.region : alert.road;
         std::wstring location = AlertLocationForNotification(alert);
         std::wstring direction = ExtractDirectionFromLocation(location);
-        std::vector<std::pair<std::wstring, std::wstring>> junctions = ExtractJunctionsFromLocation(location);
+        std::vector<JunctionTemplateData> junctions = ExtractJunctionsFromLocation(location);
 
         SetTemplateVariable(variables, L"$DATE", CurrentDateText());
         SetTemplateVariable(variables, L"$TITLE", alert.title.empty() ? AlertReasonForNotification(alert) : alert.title);
@@ -3649,19 +3893,31 @@ private:
         SetTemplateVariable(variables, L"$DIRECTION", direction);
         SetTemplateVariable(variables, L"%LOCATION", location);
 
-        for (size_t i = 0; i < 2; ++i) {
+        std::vector<std::wstring> junctionNames;
+        std::vector<std::wstring> junctionsWithData;
+        for (size_t i = 0; i < junctions.size(); ++i) {
             std::wstring suffix = std::to_wstring(i + 1);
-            std::wstring junctionName;
-            std::wstring junctionData;
-            if (i < junctions.size()) {
-                junctionName = junctions[i].first;
-                junctionData = junctions[i].second;
-                if (junctionData.empty())
-                    junctionData = FetchRoadsOrgJunctionData(road, junctionName, direction);
-            }
+            std::wstring junctionName = junctions[i].display;
+            std::wstring junctionData = junctions[i].data;
+            if (junctionData.empty())
+                junctionData = FetchRoadsOrgJunctionData(road, junctions[i], direction);
+
             SetTemplateVariable(variables, L"%JUNCTION" + suffix, junctionName);
             SetTemplateVariable(variables, L"%JUNCTIONDATA" + suffix, junctionData);
+            junctionNames.push_back(junctionName);
+            junctionsWithData.push_back(junctionData.empty() ? junctionName : junctionName + L" (" + junctionData + L")");
         }
+        SetTemplateVariable(variables, L"%JUNCTIONCOUNT", std::to_wstring(junctions.size()));
+        SetTemplateVariable(variables, L"%JUNCTIONS", JoinTemplateItemsAsPhrase(junctionNames));
+        std::wstring junctionsWithDataText = JoinTemplateItemsAsPhrase(junctionsWithData);
+        if (!junctionsWithDataText.empty()) {
+            std::wstring lowerLocation = ToLower(location);
+            if (lowerLocation.find(L"between") != std::wstring::npos)
+                junctionsWithDataText = L"between " + junctionsWithDataText;
+            else if (lowerLocation.find(L" at ") != std::wstring::npos || StartsWithNoCase(lowerLocation, L"at "))
+                junctionsWithDataText = L"at " + junctionsWithDataText;
+        }
+        SetTemplateVariable(variables, L"%JUNCTIONS_WITH_DATA", junctionsWithDataText);
 
         std::wstring laneClosures;
         if (alert.lanesTotal > 0) {
@@ -4089,7 +4345,7 @@ private:
         if (id == IDC_TEMPLATES_EDITOR_NEW) {
             ReportTemplate reportTemplate;
             reportTemplate.name = L"Template " + std::to_wstring(m_reportTemplates.size() + 1);
-            reportTemplate.body = L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION between %JUNCTION1 (%JUNCTIONDATA1) and %JUNCTION2 (%JUNCTIONDATA2) with %LANECLOSURES closed. Allow extra time for your journey.";
+            reportTemplate.body = L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION %JUNCTIONS_WITH_DATA with %LANECLOSURES closed. Allow extra time for your journey.";
             m_reportTemplates.push_back(std::move(reportTemplate));
             m_reportTemplatesConfigured = true;
             SaveSettings();
