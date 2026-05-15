@@ -112,6 +112,7 @@ public:
     using NoteUpdateCallback = std::function<void(size_t index, const std::wstring& text)>;
     using NoteDeleteCallback = std::function<void(size_t index)>;
     using PolygonPointCallback = std::function<void(double lat, double lon)>;
+    using RefreshCallback = std::function<void()>;
 
     bool Create(HWND parent, int x, int y, int w, int h)
     {
@@ -160,6 +161,11 @@ public:
     void SetPolygonPointCallback(PolygonPointCallback cb)
     {
         m_onPolygonPoint = std::move(cb);
+    }
+
+    void SetRefreshCallback(RefreshCallback cb)
+    {
+        m_onRefresh = std::move(cb);
     }
 
     void SetAlerts(const std::vector<TrafficAlert>& alerts)
@@ -795,12 +801,17 @@ private:
 
     D2D1_RECT_F BuildAddNoteButtonRect() const
     {
-        return D2D1::RectF(30.0f, 104.0f, 122.0f, 136.0f);
+        return D2D1::RectF(132.0f, 18.0f, 224.0f, 50.0f);
     }
 
     D2D1_RECT_F BuildAddNotePromptRect() const
     {
-        return D2D1::RectF(132.0f, 104.0f, 334.0f, 136.0f);
+        return D2D1::RectF(234.0f, 18.0f, 436.0f, 50.0f);
+    }
+
+    D2D1_RECT_F BuildRefreshButtonRect() const
+    {
+        return D2D1::RectF(18.0f, 18.0f, 120.0f, 50.0f);
     }
 
     D2D1_RECT_F BuildNoteCloseRect(const D2D1_RECT_F& bubble) const
@@ -1004,6 +1015,8 @@ private:
 
     bool HitNoteInterface(int x, int y) const
     {
+        if (PointInRect(x, y, BuildRefreshButtonRect()))
+            return true;
         if (PointInRect(x, y, BuildAddNoteButtonRect()))
             return true;
         if (m_addNoteMode && PointInRect(x, y, BuildAddNotePromptRect()))
@@ -1022,6 +1035,13 @@ private:
             return false;
 
         const D2D1_RECT_F addButton = BuildAddNoteButtonRect();
+        const D2D1_RECT_F refreshButton = BuildRefreshButtonRect();
+        if (PointInRect(x, y, refreshButton)) {
+            if (m_onRefresh)
+                m_onRefresh();
+            return true;
+        }
+
         if (PointInRect(x, y, addButton)) {
             m_addNoteMode = !m_addNoteMode;
             if (m_addNoteMode)
@@ -2258,6 +2278,11 @@ private:
         if (!m_rt)
             return;
 
+        OverlayButton refreshButton;
+        refreshButton.text = L"Refresh";
+        refreshButton.bounds = BuildRefreshButtonRect();
+        m_overlayUi.DrawButton(refreshButton);
+
         OverlayButton addButton;
         addButton.text = m_addNoteMode ? L"Adding" : L"+ Note";
         addButton.bounds = BuildAddNoteButtonRect();
@@ -2290,14 +2315,6 @@ private:
         GetClientRect(m_hwnd, &rc);
         float width = static_cast<float>(rc.right - rc.left);
         float height = static_cast<float>(rc.bottom - rc.top);
-
-        m_rt->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(18.0f, 18.0f, 330.0f, 92.0f), 16.0f, 16.0f),
-            m_panelBrush.Get());
-        m_rt->DrawRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(18.0f, 18.0f, 330.0f, 92.0f), 16.0f, 16.0f),
-            m_textBrush.Get(),
-            1.0f);
 
         float scaleW = ClampValue(width / static_cast<float>(m_zoom + 2), 70.0f, 180.0f);
         D2D1_POINT_2F a = D2D1::Point2F(width - scaleW - 34.0f, height - 34.0f);
@@ -2809,6 +2826,7 @@ private:
     NoteUpdateCallback m_onNoteUpdate;
     NoteDeleteCallback m_onNoteDelete;
     PolygonPointCallback m_onPolygonPoint;
+    RefreshCallback m_onRefresh;
 
     int m_zoom = kDefaultZoom;
     double m_centerLat = kDefaultCenterLat;
@@ -2917,6 +2935,11 @@ void MapView::SetNoteDeleteCallback(NoteDeleteCallback cb)
 void MapView::SetPolygonPointCallback(PolygonPointCallback cb)
 {
     m_impl->SetPolygonPointCallback(std::move(cb));
+}
+
+void MapView::SetRefreshCallback(RefreshCallback cb)
+{
+    m_impl->SetRefreshCallback(std::move(cb));
 }
 
 void MapView::SetAlerts(const std::vector<TrafficAlert>& alerts)

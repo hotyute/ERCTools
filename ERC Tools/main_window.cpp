@@ -12,12 +12,10 @@
 
 
 constexpr int IDC_URL_EDIT = 1001;
-constexpr int IDC_REFRESH_BTN = 1002;
 constexpr int IDC_SEARCH_EDIT = 1003;
 constexpr int IDC_SEVERITY_COMBO = 1004;
 constexpr int IDC_LISTVIEW = 1005;
 constexpr int IDC_DETAILS_EDIT = 1006;
-constexpr int IDC_HEADER_LABEL = 1008;
 constexpr int IDC_SEARCH_LABEL = 1010;
 constexpr int IDC_SEVERITY_LABEL = 1011;
 constexpr int IDC_STATUS_BAR = 1012;
@@ -35,6 +33,8 @@ constexpr int IDM_EARTHQUAKES_LIST = 2006;
 constexpr int IDM_EARTHQUAKE_NOTIFICATIONS = 2007;
 constexpr int IDM_SHOW_EARTHQUAKES = 2008;
 constexpr int IDM_VIEW_NOTIFICATION_HISTORY = 2009;
+constexpr int IDM_ROADS_TEMPLATES_WIZARD = 2010;
+constexpr int IDM_ROADS_EDIT_TEMPLATES = 2011;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -74,6 +74,8 @@ constexpr int IDC_INCIDENT_NOTIFICATIONS_DELAY_LABEL = 2312;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_DELAY_EDIT = 2313;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_AND_RADIO = 2314;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_OR_RADIO = 2315;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_LOCATION_EXCLUSIONS_LABEL = 2316;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_LOCATION_EXCLUSIONS_EDIT = 2317;
 constexpr int IDC_NOTIFICATION_REGIONS_LIST = 2401;
 constexpr int IDC_NOTIFICATION_REGIONS_NEW_BTN = 2402;
 constexpr int IDC_NOTIFICATION_REGIONS_EDIT_BTN = 2403;
@@ -86,6 +88,8 @@ constexpr int IDC_NOTIFICATION_REGION_DRAW_BTN = 2414;
 constexpr int IDC_NOTIFICATION_REGION_CLEAR_BTN = 2415;
 constexpr int IDC_NOTIFICATION_REGION_CLOSE_BTN = 2416;
 constexpr int IDC_NOTIFICATION_REGION_POINTS_LABEL = 2417;
+constexpr int IDC_NOTIFICATION_REGION_UNDO_BTN = 2418;
+constexpr int IDC_NOTIFICATION_REGION_FINISH_BTN = 2419;
 constexpr int IDC_EARTHQUAKE_LIST_MAG_EDIT = 2501;
 constexpr int IDC_EARTHQUAKE_LIST_TIME_EDIT = 2502;
 constexpr int IDC_EARTHQUAKE_LIST_REGION_BTN = 2503;
@@ -94,6 +98,22 @@ constexpr int IDC_EARTHQUAKE_LIST_LISTVIEW = 2505;
 constexpr int IDC_EARTHQUAKE_LIST_CLOSE_BTN = 2506;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT = 2521;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN = 2522;
+constexpr int IDC_TEMPLATES_WIZARD_TITLE = 2601;
+constexpr int IDC_TEMPLATES_WIZARD_DESC = 2602;
+constexpr int IDC_TEMPLATES_WIZARD_LIST = 2603;
+constexpr int IDC_TEMPLATES_WIZARD_VARIABLES = 2604;
+constexpr int IDC_TEMPLATES_WIZARD_PREVIEW = 2605;
+constexpr int IDC_TEMPLATES_WIZARD_PREV = 2606;
+constexpr int IDC_TEMPLATES_WIZARD_NEXT = 2607;
+constexpr int IDC_TEMPLATES_WIZARD_COPY = 2608;
+constexpr int IDC_TEMPLATES_WIZARD_CLOSE = 2609;
+constexpr int IDC_TEMPLATES_EDITOR_LIST = 2621;
+constexpr int IDC_TEMPLATES_EDITOR_NAME = 2622;
+constexpr int IDC_TEMPLATES_EDITOR_BODY = 2623;
+constexpr int IDC_TEMPLATES_EDITOR_NEW = 2624;
+constexpr int IDC_TEMPLATES_EDITOR_SAVE = 2625;
+constexpr int IDC_TEMPLATES_EDITOR_DELETE = 2626;
+constexpr int IDC_TEMPLATES_EDITOR_CLOSE = 2627;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
 constexpr const wchar_t* kIncidentNotificationsClassName = L"TrafficEnglandIncidentNotificationsWindow";
@@ -101,6 +121,8 @@ constexpr const wchar_t* kNotificationRegionsClassName = L"TrafficEnglandNotific
 constexpr const wchar_t* kNotificationRegionEditorClassName = L"TrafficEnglandNotificationRegionEditorWindow";
 constexpr const wchar_t* kEarthquakeListClassName = L"TrafficEnglandEarthquakeListWindow";
 constexpr const wchar_t* kEarthquakeNotificationsClassName = L"TrafficEnglandEarthquakeNotificationsWindow";
+constexpr const wchar_t* kTemplatesWizardClassName = L"TrafficEnglandTemplatesWizardWindow";
+constexpr const wchar_t* kTemplatesEditorClassName = L"TrafficEnglandTemplatesEditorWindow";
 constexpr UINT WM_APP_NOTIFY_ICON = WM_APP + 20;
 constexpr UINT kNotificationIconId = 1;
 constexpr UINT_PTR kAlertRefreshTimerId = 1;
@@ -148,6 +170,18 @@ struct ServerResult
     std::wstring error;
     std::vector<ChatMessage> chat;
     std::vector<MapNote> notes;
+};
+
+struct ReportTemplate
+{
+    std::wstring name;
+    std::wstring body;
+};
+
+struct IncidentNotificationState
+{
+    std::wstring signature;
+    std::wstring line;
 };
 
 enum class PolygonCaptureTarget
@@ -426,6 +460,51 @@ static bool RoadTokenMatches(const std::wstring& road, const std::wstring& token
     }
 
     return ToLower(Trim(road)) == normalized;
+}
+
+static void ReplaceAllText(std::wstring& text, const std::wstring& from, const std::wstring& to)
+{
+    if (from.empty())
+        return;
+
+    size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::wstring::npos) {
+        text.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
+static std::wstring DecodeBasicHtmlEntities(std::wstring text)
+{
+    ReplaceAllText(text, L"&amp;", L"&");
+    ReplaceAllText(text, L"&lt;", L"<");
+    ReplaceAllText(text, L"&gt;", L">");
+    ReplaceAllText(text, L"&quot;", L"\"");
+    ReplaceAllText(text, L"&#39;", L"'");
+    ReplaceAllText(text, L"&nbsp;", L" ");
+    return text;
+}
+
+static std::wstring StripTemplateHtmlTags(const std::wstring& html)
+{
+    std::wstring text = std::regex_replace(html, std::wregex(LR"(<[^>]+>)"), L" ");
+    text = DecodeBasicHtmlEntities(text);
+    std::wstring compact;
+    compact.reserve(text.size());
+    bool lastSpace = false;
+    for (wchar_t ch : text) {
+        bool isSpace = iswspace(ch) != 0;
+        if (isSpace) {
+            if (!lastSpace)
+                compact.push_back(L' ');
+            lastSpace = true;
+        }
+        else {
+            compact.push_back(ch);
+            lastSpace = false;
+        }
+    }
+    return Trim(compact);
 }
 
 static std::wstring ExtractLabeledNotificationField(const std::wstring& description, const wchar_t* label)
@@ -1025,9 +1104,9 @@ private:
         m_headerFont = CreateUiFont(16, FW_SEMIBOLD);
 
         LoadSettings();
+        EnsureDefaultReportTemplates();
         CreateMainMenu();
 
-        m_headerLabel = CreateAutoLabel(m_hwnd, IDC_HEADER_LABEL, L"Traffic England Alerts", 0, 0, m_headerFont);
         m_searchLabel = CreateAutoLabel(m_hwnd, IDC_SEARCH_LABEL, L"Search");
         m_severityLabel = CreateAutoLabel(m_hwnd, IDC_SEVERITY_LABEL, L"Severity");
 
@@ -1039,17 +1118,6 @@ private:
             0, 0, 0, 0,
             m_hwnd,
             ControlId(IDC_PANEL_TAB_BTN),
-            m_hInst,
-            nullptr);
-
-        m_refreshBtn = CreateWindowExW(
-            0,
-            L"BUTTON",
-            L"Refresh",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_DEFPUSHBUTTON,
-            0, 0, 0, 0,
-            m_hwnd,
-            ControlId(IDC_REFRESH_BTN),
             m_hInst,
             nullptr);
 
@@ -1121,14 +1189,14 @@ private:
             m_hInst,
             nullptr);
 
-        if (!m_headerLabel || !m_searchLabel || !m_severityLabel ||
-            !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_statusBar)
+        if (!m_searchLabel || !m_severityLabel ||
+            !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_statusBar)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_statusBar }) {
+        for (HWND h : { m_panelTabBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_statusBar }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -1187,6 +1255,9 @@ private:
         m_map.SetNoteDeleteCallback([this](size_t index) {
             DeleteMapNote(index);
             });
+        m_map.SetRefreshCallback([this]() {
+            RefreshFeedAsync();
+            });
         m_map.SetPolygonPointCallback([this](double lat, double lon) {
             OnMapPolygonPoint(lat, lon);
             });
@@ -1218,15 +1289,8 @@ private:
         const int controlH = 32;
         const int statusH = 24;
 
-        const LONG refreshW = 132;
         const int topY = 12;
-        const LONG headerMaxW = MaxLong(200L, width - refreshW - static_cast<LONG>(pad * 3));
-        const LONG headerW = PreferredControlWidth(m_headerLabel, 8, 200, static_cast<int>(headerMaxW));
-        const int headerH = PreferredControlHeight(m_headerLabel, 8, 28, static_cast<int>(headerW));
-        MoveWindow(m_headerLabel, pad, topY, headerW, headerH, TRUE);
-        MoveWindow(m_refreshBtn, width - refreshW - pad, topY, refreshW, controlH, TRUE);
-
-        const int topBarH = topY + MaxInt(headerH, controlH) + 4;
+        const int topBarH = topY;
         int bodyTop = topBarH;
         int leftW = m_isSidePanelVisible ? 440 : 0;
         int detailsH = 185;
@@ -1298,11 +1362,6 @@ private:
             }
             break;
 
-        case IDC_REFRESH_BTN:
-            if (code == BN_CLICKED)
-                RefreshFeedAsync();
-            break;
-
         case IDC_SEARCH_EDIT:
             if (code == EN_CHANGE) {
                 size_t visible = ApplyFilters(false);
@@ -1330,6 +1389,14 @@ private:
 
         case IDM_ROADS_INCIDENT_NOTIFICATIONS:
             ShowIncidentNotificationsWindow();
+            break;
+
+        case IDM_ROADS_TEMPLATES_WIZARD:
+            ShowTemplatesWizardWindow();
+            break;
+
+        case IDM_ROADS_EDIT_TEMPLATES:
+            ShowTemplatesEditorWindow();
             break;
 
         case IDM_EARTHQUAKES_LIST:
@@ -1467,6 +1534,7 @@ private:
                 m_incidentNotifyDelayThresholdMinutes = parsedDelayMinutes;
             readBool("incidentNotifyThresholdUseOr", m_incidentNotifyThresholdUseOr);
             readString("incidentNotifyReasonExclusions", m_incidentNotifyReasonExclusions);
+            readString("incidentNotifyLocationExclusions", m_incidentNotifyLocationExclusions);
             auto regionsIt = settings->find("incidentNotificationRegions");
             if (regionsIt != settings->end() && regionsIt->is_array()) {
                 m_incidentNotificationRegions.clear();
@@ -1474,6 +1542,24 @@ private:
                     GeoPolygon polygon = GeoPolygonFromJson(item);
                     if (!polygon.name.empty() || !polygon.points.empty())
                         m_incidentNotificationRegions.push_back(std::move(polygon));
+                }
+            }
+            auto templatesIt = settings->find("roadReportTemplates");
+            if (templatesIt != settings->end() && templatesIt->is_array()) {
+                m_reportTemplatesConfigured = true;
+                m_reportTemplates.clear();
+                for (const json& item : *templatesIt) {
+                    if (!item.is_object())
+                        continue;
+                    ReportTemplate reportTemplate;
+                    auto nameIt = item.find("name");
+                    if (nameIt != item.end())
+                        reportTemplate.name = JsonValueToText(*nameIt);
+                    auto bodyIt = item.find("body");
+                    if (bodyIt != item.end())
+                        reportTemplate.body = JsonValueToText(*bodyIt);
+                    if (!reportTemplate.name.empty() || !reportTemplate.body.empty())
+                        m_reportTemplates.push_back(std::move(reportTemplate));
                 }
             }
 
@@ -1487,6 +1573,18 @@ private:
         catch (...) {
             OutputDebugStringW(L"Settings file could not be parsed; using defaults.\n");
         }
+    }
+
+    void EnsureDefaultReportTemplates()
+    {
+        if (!m_reportTemplates.empty() || m_reportTemplatesConfigured)
+            return;
+
+        ReportTemplate reportTemplate;
+        reportTemplate.name = L"National Highways incident";
+        reportTemplate.body = L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION between %JUNCTION1 (%JUNCTIONDATA1) and %JUNCTION2 (%JUNCTIONDATA2) with %LANECLOSURES closed. Expect delays and congestion, avoid the area if possible, find alternate routes, monitor local traffic and media for updates. Allow extra time for your journey.";
+        m_reportTemplates.push_back(std::move(reportTemplate));
+        m_reportTemplatesConfigured = true;
     }
 
     void SaveSettings() const
@@ -1533,9 +1631,17 @@ private:
             settings["incidentNotifyDelayThresholdMinutes"] = m_incidentNotifyDelayThresholdMinutes;
             settings["incidentNotifyThresholdUseOr"] = m_incidentNotifyThresholdUseOr;
             settings["incidentNotifyReasonExclusions"] = WideToUtf8(m_incidentNotifyReasonExclusions);
+            settings["incidentNotifyLocationExclusions"] = WideToUtf8(m_incidentNotifyLocationExclusions);
             settings["incidentNotificationRegions"] = json::array();
             for (const GeoPolygon& polygon : m_incidentNotificationRegions)
                 settings["incidentNotificationRegions"].push_back(GeoPolygonToJson(polygon));
+            settings["roadReportTemplates"] = json::array();
+            for (const ReportTemplate& reportTemplate : m_reportTemplates) {
+                json item = json::object();
+                item["name"] = WideToUtf8(reportTemplate.name);
+                item["body"] = WideToUtf8(reportTemplate.body);
+                settings["roadReportTemplates"].push_back(std::move(item));
+            }
             settings["showEarthquakes"] = m_showEarthquakes;
             settings["earthquakeNotificationMagnitudeText"] = WideToUtf8(m_earthquakeNotificationMagnitudeText);
             settings["earthquakeNotificationMagnitude"] = m_earthquakeNotificationMagnitude;
@@ -1684,6 +1790,14 @@ private:
         return alert.title;
     }
 
+    std::wstring AlertLocationForNotification(const TrafficAlert& alert) const
+    {
+        std::wstring location = ExtractLabeledNotificationField(alert.description, L"Location");
+        if (!location.empty())
+            return location;
+        return alert.region;
+    }
+
     bool RoadListMatches(const std::wstring& road, const std::wstring& filter, bool emptyMatchesAll) const
     {
         std::vector<std::wstring> roads = SplitCommaSeparatedTokens(filter);
@@ -1735,6 +1849,21 @@ private:
         return false;
     }
 
+    bool LocationExcludedFromNotification(const TrafficAlert& alert) const
+    {
+        std::wstring location = ToLower(AlertLocationForNotification(alert));
+        if (location.empty())
+            return false;
+
+        for (const std::wstring& exclusion : SplitCommaSeparatedTokens(m_incidentNotifyLocationExclusions)) {
+            std::wstring value = ToLower(Trim(exclusion));
+            if (!value.empty() && location.find(value) != std::wstring::npos)
+                return true;
+        }
+
+        return false;
+    }
+
     double ClosedLanePercentage(const TrafficAlert& alert) const
     {
         if (alert.lanesClosed <= 0 || alert.lanesTotal <= 0)
@@ -1774,19 +1903,34 @@ private:
             SeverityAllowedForIncidentNotification(alert) &&
             IncidentTypeAllowedForNotification(alert) &&
             IncidentThresholdsMatchNotification(alert) &&
-            !ReasonExcludedFromNotification(alert);
+            !ReasonExcludedFromNotification(alert) &&
+            !LocationExcludedFromNotification(alert);
     }
 
-    std::wstring IncidentNotificationKey(const TrafficAlert& alert) const
+    std::wstring IncidentNotificationStableKey(const TrafficAlert& alert) const
     {
-        std::wstring key = alert.id.empty() ? BuildAlertSummary(alert) : alert.id;
+        if (!alert.id.empty())
+            return alert.id;
+
+        std::wstring key = alert.road.empty() ? alert.region : alert.road;
         key += L"|";
-        key += alert.updatedText;
+        key += AlertLocationForNotification(alert);
         key += L"|";
-        key += std::to_wstring(alert.lanesClosed);
-        key += L"/";
-        key += std::to_wstring(alert.lanesTotal);
+        key += AlertReasonForNotification(alert);
+        if (Trim(key) == L"||")
+            return BuildAlertSummary(alert);
         return key;
+    }
+
+    std::wstring IncidentNotificationSignature(const TrafficAlert& alert) const
+    {
+        return alert.updatedText + L"|" +
+            alert.title + L"|" +
+            alert.description + L"|" +
+            alert.severity + L"|" +
+            alert.eventType + L"|" +
+            std::to_wstring(alert.lanesClosed) + L"/" +
+            std::to_wstring(alert.lanesTotal);
     }
 
     std::wstring IncidentNotificationLine(const TrafficAlert& alert) const
@@ -1814,41 +1958,80 @@ private:
         return line;
     }
 
-    void NotifyForMatchingIncidents(const std::vector<TrafficAlert>& alerts)
+    void PublishIncidentNotificationBatch(
+        const std::vector<std::wstring>& lines,
+        const std::wstring& singleTitleSuffix,
+        const std::wstring& pluralTitle)
     {
-        std::vector<const TrafficAlert*> matches;
-        for (const TrafficAlert& alert : alerts) {
-            if (!AlertMatchesIncidentNotification(alert))
-                continue;
-
-            std::wstring key = IncidentNotificationKey(alert);
-            if (m_notifiedIncidentKeys.insert(key).second)
-                matches.push_back(&alert);
-        }
-
-        if (matches.empty())
+        if (lines.empty())
             return;
 
         std::wstring title;
         std::wstring body;
-        if (matches.size() == 1) {
-            const TrafficAlert& alert = *matches.front();
-            title = alert.road.empty() ? L"Incident notification" : alert.road + L" incident notification";
-            body = IncidentNotificationLine(alert);
+        if (lines.size() == 1) {
+            title = singleTitleSuffix;
+            body = lines.front();
         }
         else {
-            title = std::to_wstring(matches.size()) + L" matching incident notifications";
-            const size_t displayCount = MinValue<size_t>(matches.size(), 3);
+            title = std::to_wstring(lines.size()) + L" " + pluralTitle;
+            const size_t displayCount = MinValue<size_t>(lines.size(), 3);
             for (size_t i = 0; i < displayCount; ++i) {
                 if (!body.empty())
                     body += L"\r\n";
-                body += IncidentNotificationLine(*matches[i]);
+                body += lines[i];
             }
-            if (matches.size() > displayCount)
+            if (lines.size() > displayCount)
                 body += L"\r\n...";
         }
 
         PublishNotification(title, body);
+    }
+
+    void NotifyForMatchingIncidents(const std::vector<TrafficAlert>& alerts)
+    {
+        std::unordered_set<std::wstring> currentIncidentKeys;
+        std::vector<std::wstring> newLines;
+        std::vector<std::wstring> updateLines;
+
+        for (const TrafficAlert& alert : alerts) {
+            std::wstring stableKey = IncidentNotificationStableKey(alert);
+            currentIncidentKeys.insert(stableKey);
+
+            if (!AlertMatchesIncidentNotification(alert))
+                continue;
+
+            std::wstring signature = IncidentNotificationSignature(alert);
+            std::wstring line = IncidentNotificationLine(alert);
+            auto existing = m_notifiedIncidentStates.find(stableKey);
+            if (existing == m_notifiedIncidentStates.end()) {
+                newLines.push_back(line);
+                m_notifiedIncidentStates[stableKey] = IncidentNotificationState{ signature, line };
+            }
+            else if (existing->second.signature != signature) {
+                updateLines.push_back(line);
+                existing->second.signature = std::move(signature);
+                existing->second.line = std::move(line);
+            }
+        }
+
+        std::vector<std::wstring> removedLines;
+        if (m_haveIncidentNotificationSnapshot) {
+            for (auto it = m_notifiedIncidentStates.begin(); it != m_notifiedIncidentStates.end();) {
+                if (currentIncidentKeys.find(it->first) == currentIncidentKeys.end()) {
+                    removedLines.push_back(it->second.line);
+                    it = m_notifiedIncidentStates.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+
+        m_haveIncidentNotificationSnapshot = true;
+
+        PublishIncidentNotificationBatch(newLines, L"Incident notification", L"matching incident notifications");
+        PublishIncidentNotificationBatch(updateLines, L"Incident update", L"incident updates");
+        PublishIncidentNotificationBatch(removedLines, L"Incident removed", L"incident removals");
     }
 
     void EnsureNotificationIcon()
@@ -2503,6 +2686,9 @@ private:
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_FILTERS, L"Incident Filters...");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_NOTIFICATIONS, L"Incident Notifications...");
+        AppendMenuW(roadsMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_TEMPLATES_WIZARD, L"Templates Wizard...");
+        AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_EDIT_TEMPLATES, L"Edit Templates...");
         AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKES_LIST, L"Earthquakes List...");
         AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKE_NOTIFICATIONS, L"Earthquake Notifications...");
         AppendMenuW(earthquakesMenu, m_showEarthquakes ? MF_CHECKED : MF_UNCHECKED, IDM_SHOW_EARTHQUAKES, L"Show Earthquakes");
@@ -2738,7 +2924,7 @@ private:
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 540,
-                560,
+                660,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -2794,18 +2980,24 @@ private:
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_LABEL, L"Reason exclusions", left, y);
         y += 26;
         m_incidentNotifyReasonExclusionsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT), m_hInst, nullptr);
+        y += 42;
+
+        CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_LOCATION_EXCLUSIONS_LABEL, L"Location exclusions", left, y);
+        y += 26;
+        m_incidentNotifyLocationExclusionsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_LOCATION_EXCLUSIONS_EDIT), m_hInst, nullptr);
 
         HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 392, y + 42, 102, 32, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyAndRadio, m_incidentNotifyOrRadio, m_incidentNotifyDelayThresholdEdit, m_incidentNotifyRegionsBtn, m_incidentNotifyReasonExclusionsEdit, close }) {
+        for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyAndRadio, m_incidentNotifyOrRadio, m_incidentNotifyDelayThresholdEdit, m_incidentNotifyRegionsBtn, m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyLocationExclusionsEdit, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
 
-        SendMessageW(m_incidentNotifyRoadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M*, A1(M), A2, A15, A16, A17, A20, A4, A52"));
+        SendMessageW(m_incidentNotifyRoadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M*, A*, A1(M), A2, A15, A16, A17, A20, A4, A52"));
         SendMessageW(m_incidentNotifyLaneThresholdEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"50%"));
         SendMessageW(m_incidentNotifyDelayThresholdEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"1 hour"));
         SendMessageW(m_incidentNotifyReasonExclusionsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Road Management"));
+        SendMessageW(m_incidentNotifyLocationExclusionsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"entry, exit"));
         SyncIncidentNotificationControls();
     }
 
@@ -2824,6 +3016,8 @@ private:
             SendMessageW(m_incidentNotifyOrRadio, BM_SETCHECK, m_incidentNotifyThresholdUseOr ? BST_CHECKED : BST_UNCHECKED, 0);
         if (m_incidentNotifyReasonExclusionsEdit)
             SetWindowTextSafe(m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyReasonExclusions);
+        if (m_incidentNotifyLocationExclusionsEdit)
+            SetWindowTextSafe(m_incidentNotifyLocationExclusionsEdit, m_incidentNotifyLocationExclusions);
         m_syncingControls = false;
     }
 
@@ -2855,6 +3049,10 @@ private:
         }
         else if (id == IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT) {
             m_incidentNotifyReasonExclusions = GetWindowTextString(m_incidentNotifyReasonExclusionsEdit);
+            SaveSettings();
+        }
+        else if (id == IDC_INCIDENT_NOTIFICATIONS_LOCATION_EXCLUSIONS_EDIT) {
+            m_incidentNotifyLocationExclusions = GetWindowTextString(m_incidentNotifyLocationExclusionsEdit);
             SaveSettings();
         }
         else if (id == IDC_INCIDENT_NOTIFICATIONS_LANES_EDIT) {
@@ -3114,7 +3312,7 @@ private:
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             430,
-            365,
+            410,
             m_hwnd,
             nullptr,
             m_hInst,
@@ -3139,15 +3337,17 @@ private:
         CreateAutoLabel(parent, 0, L"Specific roads", 18, 156);
         HWND roadsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", polygon.roadFilter.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 182, 376, 26, parent, ControlId(IDC_NOTIFICATION_REGION_ROADS_EDIT), m_hInst, nullptr);
         HWND pointsLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 220, 376, 24, parent, ControlId(IDC_NOTIFICATION_REGION_POINTS_LABEL), m_hInst, nullptr);
-        HWND drawBtn = CreateWindowExW(0, L"BUTTON", L"Draw on map", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 254, 128, 32, parent, ControlId(IDC_NOTIFICATION_REGION_DRAW_BTN), m_hInst, nullptr);
-        HWND clearBtn = CreateWindowExW(0, L"BUTTON", L"Clear points", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 154, 254, 128, 32, parent, ControlId(IDC_NOTIFICATION_REGION_CLEAR_BTN), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 254, 102, 32, parent, ControlId(IDC_NOTIFICATION_REGION_CLOSE_BTN), m_hInst, nullptr);
+        HWND drawBtn = CreateWindowExW(0, L"BUTTON", L"Edit on map", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 254, 128, 32, parent, ControlId(IDC_NOTIFICATION_REGION_DRAW_BTN), m_hInst, nullptr);
+        HWND undoBtn = CreateWindowExW(0, L"BUTTON", L"Undo point", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 154, 254, 128, 32, parent, ControlId(IDC_NOTIFICATION_REGION_UNDO_BTN), m_hInst, nullptr);
+        HWND clearBtn = CreateWindowExW(0, L"BUTTON", L"Clear points", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 296, 128, 32, parent, ControlId(IDC_NOTIFICATION_REGION_CLEAR_BTN), m_hInst, nullptr);
+        HWND finishBtn = CreateWindowExW(0, L"BUTTON", L"Finish edit", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 154, 296, 128, 32, parent, ControlId(IDC_NOTIFICATION_REGION_FINISH_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 296, 102, 32, parent, ControlId(IDC_NOTIFICATION_REGION_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { nameEdit, allRoads, roadsEdit, pointsLabel, drawBtn, clearBtn, closeBtn }) {
+        for (HWND h : { nameEdit, allRoads, roadsEdit, pointsLabel, drawBtn, undoBtn, clearBtn, finishBtn, closeBtn }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
-        SendMessageW(roadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M*, A1(M), A2, A52"));
+        SendMessageW(roadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M*, A*, A1(M), A2, A52"));
         UpdateNotificationRegionEditorPointsLabel(parent, index);
     }
 
@@ -3177,7 +3377,27 @@ private:
             m_activeIncidentRegionIndex = ctx->index;
             m_map.SetPolygonCaptureActive(true);
             m_map.SetDraftPolygon({});
-            SetStatusText(L"Click the map to add polygon points for " + (polygon.name.empty() ? L"this region" : polygon.name) + L". Drag to pan.");
+            SetStatusText(L"Editing polygon for " + (polygon.name.empty() ? L"this region" : polygon.name) + L". Click the map to add points; use Undo point to remove the last point.");
+            return;
+        }
+        if (id == IDC_NOTIFICATION_REGION_UNDO_BTN && code == BN_CLICKED) {
+            if (!polygon.points.empty()) {
+                polygon.points.pop_back();
+                m_map.SetNotificationPolygons(m_incidentNotificationRegions);
+                UpdateNotificationRegionEditorPointsLabel(hwnd, ctx->index);
+                SyncNotificationRegionsList();
+                SaveSettings();
+                SetStatusText(L"Removed last polygon point.");
+            }
+            return;
+        }
+        if (id == IDC_NOTIFICATION_REGION_FINISH_BTN && code == BN_CLICKED) {
+            if (m_polygonCaptureTarget == PolygonCaptureTarget::IncidentRegion &&
+                m_activeIncidentRegionIndex == ctx->index)
+            {
+                StopPolygonCapture();
+                SetStatusText(L"Finished editing notification region polygon.");
+            }
             return;
         }
         if (id == IDC_NOTIFICATION_REGION_CLEAR_BTN && code == BN_CLICKED) {
@@ -3237,6 +3457,669 @@ private:
             m_map.SetDraftPolygon(m_earthquakeFilterRegion);
             ApplyEarthquakeListFilters();
             SetStatusText(L"Added earthquake region point " + std::to_wstring(m_earthquakeFilterRegion.size()) + L".");
+        }
+    }
+
+    const TrafficAlert* FindSelectedAlert() const
+    {
+        if (!m_selectedId.empty()) {
+            for (const TrafficAlert& alert : m_allAlerts) {
+                if (alert.id == m_selectedId)
+                    return &alert;
+            }
+            for (const TrafficAlert& alert : m_filteredAlerts) {
+                if (alert.id == m_selectedId)
+                    return &alert;
+            }
+        }
+
+        if (m_listView) {
+            int selected = static_cast<int>(SendMessageW(m_listView, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED));
+            if (selected >= 0 && selected < static_cast<int>(m_filteredAlerts.size()))
+                return &m_filteredAlerts[static_cast<size_t>(selected)];
+        }
+
+        return nullptr;
+    }
+
+    const TrafficAlert* FindTemplateWizardAlert() const
+    {
+        if (!m_templateWizardAlertId.empty()) {
+            for (const TrafficAlert& alert : m_allAlerts) {
+                if (alert.id == m_templateWizardAlertId)
+                    return &alert;
+            }
+        }
+        return FindSelectedAlert();
+    }
+
+    static std::wstring CurrentDateText()
+    {
+        std::time_t now = std::time(nullptr);
+        std::tm local{};
+        localtime_s(&local, &now);
+        wchar_t buffer[32]{};
+        if (std::wcsftime(buffer, _countof(buffer), L"%d/%m/%Y", &local) == 0)
+            return L"";
+        return buffer;
+    }
+
+    static std::wstring RoadSlugForRoadsOrg(std::wstring road)
+    {
+        std::wstring slug;
+        for (wchar_t ch : ToLower(road)) {
+            if (iswalnum(ch))
+                slug.push_back(ch);
+        }
+        return slug;
+    }
+
+    std::wstring FetchRoadsOrgJunctionData(const std::wstring& road, const std::wstring& junction, const std::wstring& direction) const
+    {
+        std::wstring slug = RoadSlugForRoadsOrg(road);
+        if (slug.empty() || junction.empty())
+            return L"";
+
+        std::string body;
+        std::wstring error;
+        if (!HttpGetText(L"https://www.roads.org.uk/" + slug, body, error))
+            return L"";
+
+        std::wstring html = Utf8ToWide(body);
+        std::wstring lower = ToLower(html);
+        std::wstring junctionNumber = junction;
+        std::wregex numRe(LR"((\d+[A-Za-z]?))");
+        std::wsmatch numMatch;
+        if (std::regex_search(junction, numMatch, numRe) && numMatch.size() > 1)
+            junctionNumber = numMatch[1].str();
+
+        std::vector<std::wstring> needles = {
+            L"junction " + ToLower(junctionNumber),
+            L"j" + ToLower(junctionNumber),
+            ToLower(junction)
+        };
+        if (!direction.empty())
+            needles.push_back(ToLower(direction) + L" " + ToLower(junctionNumber));
+
+        size_t found = std::wstring::npos;
+        for (const std::wstring& needle : needles) {
+            found = lower.find(needle);
+            if (found != std::wstring::npos)
+                break;
+        }
+        if (found == std::wstring::npos)
+            return L"";
+
+        const size_t start = found > 1200 ? found - 1200 : 0;
+        const size_t count = MinValue<size_t>(2400, html.size() - start);
+        std::wstring text = StripTemplateHtmlTags(html.substr(start, count));
+
+        std::wregex roadRefRe(LR"(\b([AB]\d{1,4}[A-Z]?(?:\([A-Z]+\))?(?:\s+[A-Z][A-Za-z()'/-]+){0,4}))");
+        for (std::wsregex_iterator it(text.begin(), text.end(), roadRefRe), end; it != end; ++it) {
+            std::wstring candidate = Trim((*it)[1].str());
+            std::wstring lowerCandidate = ToLower(candidate);
+            if (lowerCandidate.find(L"junction") == std::wstring::npos &&
+                lowerCandidate.find(L"road") == std::wstring::npos)
+            {
+                return candidate;
+            }
+        }
+
+        return L"";
+    }
+
+    static std::wstring ExtractDirectionFromLocation(const std::wstring& location)
+    {
+        std::wregex directionRe(LR"(\b(anticlockwise|clockwise|northbound|southbound|eastbound|westbound)\b)", std::regex_constants::icase);
+        std::wsmatch m;
+        if (std::regex_search(location, m, directionRe) && m.size() > 1)
+            return m[1].str();
+        return L"";
+    }
+
+    static std::vector<std::pair<std::wstring, std::wstring>> ExtractJunctionsFromLocation(const std::wstring& location)
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> junctions;
+        std::wstring lower = ToLower(location);
+        size_t pos = 0;
+        while ((pos = lower.find(L"junction", pos)) != std::wstring::npos) {
+            size_t cursor = pos + 8;
+            while (cursor < location.size() && iswspace(location[cursor]))
+                ++cursor;
+
+            size_t numberStart = cursor;
+            while (cursor < location.size() && iswalnum(location[cursor]))
+                ++cursor;
+            if (cursor == numberStart) {
+                pos += 8;
+                continue;
+            }
+
+            std::wstring junctionName = L"Junction " + location.substr(numberStart, cursor - numberStart);
+            while (cursor < location.size() && iswspace(location[cursor]))
+                ++cursor;
+
+            std::wstring data;
+            if (cursor < location.size() && location[cursor] == L'(') {
+                int depth = 0;
+                size_t dataStart = cursor + 1;
+                for (; cursor < location.size(); ++cursor) {
+                    if (location[cursor] == L'(')
+                        ++depth;
+                    else if (location[cursor] == L')') {
+                        --depth;
+                        if (depth == 0) {
+                            data = Trim(location.substr(dataStart, cursor - dataStart));
+                            ++cursor;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            junctions.push_back({ junctionName, data });
+            pos = cursor;
+        }
+
+        return junctions;
+    }
+
+    static void SetTemplateVariable(std::vector<std::pair<std::wstring, std::wstring>>& variables, const std::wstring& key, const std::wstring& value)
+    {
+        for (auto& item : variables) {
+            if (item.first == key) {
+                item.second = value;
+                return;
+            }
+        }
+        variables.push_back({ key, value });
+    }
+
+    std::vector<std::pair<std::wstring, std::wstring>> BuildTemplateVariables(const TrafficAlert& alert) const
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> variables;
+        std::wstring road = alert.road.empty() ? alert.region : alert.road;
+        std::wstring location = AlertLocationForNotification(alert);
+        std::wstring direction = ExtractDirectionFromLocation(location);
+        std::vector<std::pair<std::wstring, std::wstring>> junctions = ExtractJunctionsFromLocation(location);
+
+        SetTemplateVariable(variables, L"$DATE", CurrentDateText());
+        SetTemplateVariable(variables, L"$TITLE", alert.title.empty() ? AlertReasonForNotification(alert) : alert.title);
+        SetTemplateVariable(variables, L"$ROAD", road);
+        SetTemplateVariable(variables, L"$DIRECTION", direction);
+        SetTemplateVariable(variables, L"%LOCATION", location);
+
+        for (size_t i = 0; i < 2; ++i) {
+            std::wstring suffix = std::to_wstring(i + 1);
+            std::wstring junctionName;
+            std::wstring junctionData;
+            if (i < junctions.size()) {
+                junctionName = junctions[i].first;
+                junctionData = junctions[i].second;
+                if (junctionData.empty())
+                    junctionData = FetchRoadsOrgJunctionData(road, junctionName, direction);
+            }
+            SetTemplateVariable(variables, L"%JUNCTION" + suffix, junctionName);
+            SetTemplateVariable(variables, L"%JUNCTIONDATA" + suffix, junctionData);
+        }
+
+        std::wstring laneClosures;
+        if (alert.lanesTotal > 0) {
+            laneClosures = std::to_wstring(alert.lanesClosed) + L" of " +
+                std::to_wstring(alert.lanesTotal) + L" lanes";
+        }
+        else {
+            laneClosures = ExtractLabeledNotificationField(alert.description, L"Lanes Closed");
+        }
+        SetTemplateVariable(variables, L"%LANECLOSURES", laneClosures);
+        return variables;
+    }
+
+    std::wstring FormatTemplateVariablesForEdit() const
+    {
+        std::wstring text;
+        for (const auto& item : m_templateWizardVariables) {
+            if (!text.empty())
+                text += L"\r\n";
+            text += item.first + L" = " + item.second;
+        }
+        return text;
+    }
+
+    void LoadTemplateVariablesFromEdit()
+    {
+        if (!m_templateWizardVariablesEdit)
+            return;
+
+        std::wstring text = GetWindowTextString(m_templateWizardVariablesEdit);
+        size_t pos = 0;
+        while (pos <= text.size()) {
+            size_t next = text.find_first_of(L"\r\n", pos);
+            std::wstring line = Trim(text.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos));
+            if (!line.empty()) {
+                size_t sep = line.find(L'=');
+                if (sep == std::wstring::npos)
+                    sep = line.find(L':');
+                if (sep != std::wstring::npos) {
+                    std::wstring key = Trim(line.substr(0, sep));
+                    std::wstring value = Trim(line.substr(sep + 1));
+                    SetTemplateVariable(m_templateWizardVariables, key, value);
+                }
+            }
+            if (next == std::wstring::npos)
+                break;
+            pos = next + 1;
+            while (pos < text.size() && (text[pos] == L'\r' || text[pos] == L'\n'))
+                ++pos;
+        }
+    }
+
+    std::wstring RenderReportTemplate(const ReportTemplate& reportTemplate) const
+    {
+        std::wstring output = reportTemplate.body;
+        for (const auto& item : m_templateWizardVariables)
+            ReplaceAllText(output, item.first, item.second);
+        return output;
+    }
+
+    bool CopyTextToClipboard(const std::wstring& text, HWND owner)
+    {
+        if (!OpenClipboard(owner))
+            return false;
+        EmptyClipboard();
+
+        const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+        HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (!mem) {
+            CloseClipboard();
+            return false;
+        }
+
+        void* ptr = GlobalLock(mem);
+        if (!ptr) {
+            GlobalFree(mem);
+            CloseClipboard();
+            return false;
+        }
+        CopyMemory(ptr, text.c_str(), bytes);
+        GlobalUnlock(mem);
+
+        if (!SetClipboardData(CF_UNICODETEXT, mem)) {
+            GlobalFree(mem);
+            CloseClipboard();
+            return false;
+        }
+        CloseClipboard();
+        return true;
+    }
+
+    static LRESULT CALLBACK TemplatesWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleTemplatesWizardMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleTemplatesWizardMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateTemplatesWizardControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnTemplatesWizardCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowTemplatesWizardWindow()
+    {
+        EnsureDefaultReportTemplates();
+        if (m_reportTemplates.empty()) {
+            MessageBoxW(m_hwnd, L"No templates are configured. Open Roads > Edit Templates to add one.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        const TrafficAlert* alert = FindSelectedAlert();
+        if (!alert) {
+            MessageBoxW(m_hwnd, L"Select an incident first, then open the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        m_templateWizardAlertId = alert->id;
+        m_templateWizardStep = 0;
+        m_templateWizardTemplateIndex = 0;
+        m_templateWizardVariables = BuildTemplateVariables(*alert);
+
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = TemplatesWizardWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.lpszClassName = kTemplatesWizardClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_templatesWizardWnd || !IsWindow(m_templatesWizardWnd)) {
+            m_templatesWizardWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kTemplatesWizardClassName,
+                L"Templates Wizard",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                640,
+                460,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        PopulateTemplatesWizardList();
+        SetWindowTextSafe(m_templateWizardVariablesEdit, FormatTemplateVariablesForEdit());
+        RenderTemplatesWizardStep();
+        ShowWindow(m_templatesWizardWnd, SW_SHOW);
+        SetForegroundWindow(m_templatesWizardWnd);
+    }
+
+    void CreateTemplatesWizardControls(HWND parent)
+    {
+        CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_TITLE, L"Templates Wizard", 18, 18, m_headerFont);
+        m_templateWizardDesc = CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_DESC, L"", 18, 54, nullptr, 580);
+        m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 92, 584, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
+        m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 18, 92, 584, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
+        m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 92, 584, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
+        m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 234, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
+        m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 344, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
+        m_templateWizardCopyBtn = CreateWindowExW(0, L"BUTTON", L"Copy", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 454, 344, 72, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 534, 344, 68, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_CLOSE), m_hInst, nullptr);
+
+        for (HWND h : { m_templateWizardDesc, m_templateWizardList, m_templateWizardVariablesEdit, m_templateWizardPreviewEdit, m_templateWizardPrevBtn, m_templateWizardNextBtn, m_templateWizardCopyBtn, close }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+
+        PopulateTemplatesWizardList();
+        RenderTemplatesWizardStep();
+    }
+
+    void PopulateTemplatesWizardList()
+    {
+        if (!m_templateWizardList)
+            return;
+        SendMessageW(m_templateWizardList, LB_RESETCONTENT, 0, 0);
+        for (const ReportTemplate& reportTemplate : m_reportTemplates)
+            SendMessageW(m_templateWizardList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(reportTemplate.name.c_str()));
+        if (!m_reportTemplates.empty()) {
+            m_templateWizardTemplateIndex = MinValue<size_t>(m_templateWizardTemplateIndex, m_reportTemplates.size() - 1);
+            SendMessageW(m_templateWizardList, LB_SETCURSEL, static_cast<WPARAM>(m_templateWizardTemplateIndex), 0);
+        }
+    }
+
+    void RenderTemplatesWizardStep()
+    {
+        if (!m_templatesWizardWnd)
+            return;
+
+        const bool chooseStep = m_templateWizardStep == 0;
+        const bool variableStep = m_templateWizardStep == 1;
+        const bool reviewStep = m_templateWizardStep == 2;
+        ShowWindow(m_templateWizardList, chooseStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardVariablesEdit, variableStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardPreviewEdit, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardCopyBtn, reviewStep ? SW_SHOW : SW_HIDE);
+        EnableWindow(m_templateWizardPrevBtn, m_templateWizardStep > 0);
+        SetWindowTextSafe(m_templateWizardNextBtn, reviewStep ? L"Finish" : L"Next");
+
+        if (chooseStep)
+            SetWindowTextSafe(m_templateWizardDesc, L"Choose the report template to use for the selected incident.");
+        else if (variableStep)
+            SetWindowTextSafe(m_templateWizardDesc, L"Review and edit the variables only. Leave the template text itself unchanged here.");
+        else {
+            SetWindowTextSafe(m_templateWizardDesc, L"Review the completed message, then copy it to the clipboard.");
+            if (!m_reportTemplates.empty()) {
+                m_templateWizardTemplateIndex = MinValue<size_t>(m_templateWizardTemplateIndex, m_reportTemplates.size() - 1);
+                SetWindowTextSafe(m_templateWizardPreviewEdit, RenderReportTemplate(m_reportTemplates[m_templateWizardTemplateIndex]));
+            }
+        }
+    }
+
+    void OnTemplatesWizardCommand(int id, int code)
+    {
+        if (id == IDC_TEMPLATES_WIZARD_CLOSE && code == BN_CLICKED) {
+            ShowWindow(m_templatesWizardWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_TEMPLATES_WIZARD_LIST && code == LBN_SELCHANGE) {
+            int selected = static_cast<int>(SendMessageW(m_templateWizardList, LB_GETCURSEL, 0, 0));
+            if (selected >= 0 && selected < static_cast<int>(m_reportTemplates.size()))
+                m_templateWizardTemplateIndex = static_cast<size_t>(selected);
+            return;
+        }
+        if (id == IDC_TEMPLATES_WIZARD_PREV && code == BN_CLICKED) {
+            if (m_templateWizardStep > 0)
+                --m_templateWizardStep;
+            RenderTemplatesWizardStep();
+            return;
+        }
+        if (id == IDC_TEMPLATES_WIZARD_NEXT && code == BN_CLICKED) {
+            if (m_templateWizardStep == 0) {
+                int selected = static_cast<int>(SendMessageW(m_templateWizardList, LB_GETCURSEL, 0, 0));
+                if (selected >= 0 && selected < static_cast<int>(m_reportTemplates.size()))
+                    m_templateWizardTemplateIndex = static_cast<size_t>(selected);
+                SetWindowTextSafe(m_templateWizardVariablesEdit, FormatTemplateVariablesForEdit());
+                m_templateWizardStep = 1;
+            }
+            else if (m_templateWizardStep == 1) {
+                LoadTemplateVariablesFromEdit();
+                m_templateWizardStep = 2;
+            }
+            else {
+                ShowWindow(m_templatesWizardWnd, SW_HIDE);
+            }
+            RenderTemplatesWizardStep();
+            return;
+        }
+        if (id == IDC_TEMPLATES_WIZARD_COPY && code == BN_CLICKED) {
+            std::wstring text = GetWindowTextString(m_templateWizardPreviewEdit);
+            if (CopyTextToClipboard(text, m_templatesWizardWnd))
+                SetStatusText(L"Template message copied to clipboard.");
+            else
+                SetStatusText(L"Could not copy template message to clipboard.");
+            return;
+        }
+    }
+
+    static LRESULT CALLBACK TemplatesEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleTemplatesEditorMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleTemplatesEditorMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateTemplatesEditorControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnTemplatesEditorCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowTemplatesEditorWindow()
+    {
+        EnsureDefaultReportTemplates();
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = TemplatesEditorWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.lpszClassName = kTemplatesEditorClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_templatesEditorWnd || !IsWindow(m_templatesEditorWnd)) {
+            m_templatesEditorWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kTemplatesEditorClassName,
+                L"Edit Templates",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                760,
+                560,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        SyncTemplatesEditorList();
+        ShowWindow(m_templatesEditorWnd, SW_SHOW);
+        SetForegroundWindow(m_templatesEditorWnd);
+    }
+
+    void CreateTemplatesEditorControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Edit Templates", 18, 18, m_headerFont);
+        m_templateEditorList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 64, 214, 340, parent, ControlId(IDC_TEMPLATES_EDITOR_LIST), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Name", 252, 64);
+        m_templateEditorNameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 252, 90, 450, 26, parent, ControlId(IDC_TEMPLATES_EDITOR_NAME), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Template", 252, 132);
+        m_templateEditorBodyEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 252, 158, 450, 246, parent, ControlId(IDC_TEMPLATES_EDITOR_BODY), m_hInst, nullptr);
+        HWND newBtn = CreateWindowExW(0, L"BUTTON", L"New", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_NEW), m_hInst, nullptr);
+        HWND saveBtn = CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 252, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_SAVE), m_hInst, nullptr);
+        HWND deleteBtn = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 348, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_DELETE), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 614, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_CLOSE), m_hInst, nullptr);
+
+        for (HWND h : { m_templateEditorList, m_templateEditorNameEdit, m_templateEditorBodyEdit, newBtn, saveBtn, deleteBtn, closeBtn }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+
+        SyncTemplatesEditorList();
+    }
+
+    int SelectedTemplateEditorIndex() const
+    {
+        if (!m_templateEditorList)
+            return -1;
+        int selected = static_cast<int>(SendMessageW(m_templateEditorList, LB_GETCURSEL, 0, 0));
+        if (selected < 0 || selected >= static_cast<int>(m_reportTemplates.size()))
+            return -1;
+        return selected;
+    }
+
+    void SyncTemplatesEditorList()
+    {
+        if (!m_templateEditorList)
+            return;
+
+        int previous = SelectedTemplateEditorIndex();
+        SendMessageW(m_templateEditorList, LB_RESETCONTENT, 0, 0);
+        for (const ReportTemplate& reportTemplate : m_reportTemplates)
+            SendMessageW(m_templateEditorList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(reportTemplate.name.c_str()));
+
+        if (!m_reportTemplates.empty()) {
+            previous = ClampValue(previous, 0, static_cast<int>(m_reportTemplates.size()) - 1);
+            SendMessageW(m_templateEditorList, LB_SETCURSEL, previous, 0);
+            LoadSelectedTemplateIntoEditor();
+        }
+        else {
+            SetWindowTextSafe(m_templateEditorNameEdit, L"");
+            SetWindowTextSafe(m_templateEditorBodyEdit, L"");
+        }
+    }
+
+    void LoadSelectedTemplateIntoEditor()
+    {
+        int selected = SelectedTemplateEditorIndex();
+        if (selected < 0)
+            return;
+        const ReportTemplate& reportTemplate = m_reportTemplates[static_cast<size_t>(selected)];
+        SetWindowTextSafe(m_templateEditorNameEdit, reportTemplate.name);
+        SetWindowTextSafe(m_templateEditorBodyEdit, reportTemplate.body);
+    }
+
+    void OnTemplatesEditorCommand(int id, int code)
+    {
+        if (id == IDC_TEMPLATES_EDITOR_CLOSE && code == BN_CLICKED) {
+            ShowWindow(m_templatesEditorWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_TEMPLATES_EDITOR_LIST && code == LBN_SELCHANGE) {
+            LoadSelectedTemplateIntoEditor();
+            return;
+        }
+        if (code != BN_CLICKED)
+            return;
+
+        if (id == IDC_TEMPLATES_EDITOR_NEW) {
+            ReportTemplate reportTemplate;
+            reportTemplate.name = L"Template " + std::to_wstring(m_reportTemplates.size() + 1);
+            reportTemplate.body = L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION between %JUNCTION1 (%JUNCTIONDATA1) and %JUNCTION2 (%JUNCTIONDATA2) with %LANECLOSURES closed. Allow extra time for your journey.";
+            m_reportTemplates.push_back(std::move(reportTemplate));
+            m_reportTemplatesConfigured = true;
+            SaveSettings();
+            SyncTemplatesEditorList();
+            SendMessageW(m_templateEditorList, LB_SETCURSEL, static_cast<WPARAM>(m_reportTemplates.size() - 1), 0);
+            LoadSelectedTemplateIntoEditor();
+        }
+        else if (id == IDC_TEMPLATES_EDITOR_SAVE) {
+            int selected = SelectedTemplateEditorIndex();
+            if (selected < 0)
+                return;
+            ReportTemplate& reportTemplate = m_reportTemplates[static_cast<size_t>(selected)];
+            reportTemplate.name = Trim(GetWindowTextString(m_templateEditorNameEdit));
+            reportTemplate.body = GetWindowTextString(m_templateEditorBodyEdit);
+            if (reportTemplate.name.empty())
+                reportTemplate.name = L"Template " + std::to_wstring(selected + 1);
+            SaveSettings();
+            SyncTemplatesEditorList();
+            SendMessageW(m_templateEditorList, LB_SETCURSEL, static_cast<WPARAM>(selected), 0);
+            SetStatusText(L"Template saved.");
+        }
+        else if (id == IDC_TEMPLATES_EDITOR_DELETE) {
+            int selected = SelectedTemplateEditorIndex();
+            if (selected < 0)
+                return;
+            m_reportTemplates.erase(m_reportTemplates.begin() + selected);
+            m_reportTemplatesConfigured = true;
+            SaveSettings();
+            SyncTemplatesEditorList();
+            SetStatusText(L"Template removed.");
         }
     }
 
@@ -3991,7 +4874,6 @@ private:
     HFONT m_font = nullptr;
     HFONT m_headerFont = nullptr;
 
-    HWND m_headerLabel = nullptr;
     HWND m_urlLabel = nullptr;
     HWND m_searchLabel = nullptr;
     HWND m_severityLabel = nullptr;
@@ -4000,7 +4882,6 @@ private:
     HWND m_panelTabBtn = nullptr;
     HWND m_urlEdit = nullptr;
     HWND m_serverEdit = nullptr;
-    HWND m_refreshBtn = nullptr;
     HWND m_searchEdit = nullptr;
     HWND m_severityCombo = nullptr;
     HWND m_listView = nullptr;
@@ -4011,6 +4892,8 @@ private:
     HWND m_notificationRegionsWnd = nullptr;
     HWND m_earthquakeListWnd = nullptr;
     HWND m_earthquakeNotificationsWnd = nullptr;
+    HWND m_templatesWizardWnd = nullptr;
+    HWND m_templatesEditorWnd = nullptr;
     HWND m_settingsFilterCombo = nullptr;
     HWND m_settingsOrderCombo = nullptr;
     HWND m_settingsRefreshOffRadio = nullptr;
@@ -4029,6 +4912,7 @@ private:
     HWND m_incidentNotifyOrRadio = nullptr;
     HWND m_incidentNotifyRegionsBtn = nullptr;
     HWND m_incidentNotifyReasonExclusionsEdit = nullptr;
+    HWND m_incidentNotifyLocationExclusionsEdit = nullptr;
     HWND m_notificationRegionsList = nullptr;
     HWND m_earthquakeListMagnitudeEdit = nullptr;
     HWND m_earthquakeListTimeEdit = nullptr;
@@ -4036,6 +4920,16 @@ private:
     HWND m_earthquakeListClearRegionBtn = nullptr;
     HWND m_earthquakeListView = nullptr;
     HWND m_earthquakeNotificationMagnitudeEdit = nullptr;
+    HWND m_templateWizardDesc = nullptr;
+    HWND m_templateWizardList = nullptr;
+    HWND m_templateWizardVariablesEdit = nullptr;
+    HWND m_templateWizardPreviewEdit = nullptr;
+    HWND m_templateWizardPrevBtn = nullptr;
+    HWND m_templateWizardNextBtn = nullptr;
+    HWND m_templateWizardCopyBtn = nullptr;
+    HWND m_templateEditorList = nullptr;
+    HWND m_templateEditorNameEdit = nullptr;
+    HWND m_templateEditorBodyEdit = nullptr;
     HWND m_chatHistory = nullptr;
     HWND m_chatEdit = nullptr;
     HWND m_chatSendBtn = nullptr;
@@ -4049,9 +4943,14 @@ private:
     std::unordered_map<std::wstring, MapNote> m_pendingNoteEdits;
     std::vector<AppNotification> m_notificationHistory;
     std::vector<GeoPolygon> m_incidentNotificationRegions;
+    std::vector<ReportTemplate> m_reportTemplates;
+    std::vector<std::pair<std::wstring, std::wstring>> m_templateWizardVariables;
     std::vector<EarthquakeEvent> m_allEarthquakes;
     std::vector<GeoPoint> m_earthquakeFilterRegion;
     std::wstring m_selectedId;
+    std::wstring m_templateWizardAlertId;
+    size_t m_templateWizardStep = 0;
+    size_t m_templateWizardTemplateIndex = 0;
     bool m_programmaticSelection = false;
     bool m_syncingControls = false;
     bool m_isSidePanelVisible = true;
@@ -4063,13 +4962,14 @@ private:
     bool m_incidentFilterUnknown = true;
     bool m_incidentFilterUnplanned = true;
     bool m_incidentFilterPlanned = true;
-    std::wstring m_incidentNotifyRoads = L"M*, A1(M), A2, A15, A16, A17, A20, A4, A52";
+    std::wstring m_incidentNotifyRoads = L"M*, A*, A1(M), A2, A15, A16, A17, A20, A4, A52";
     std::wstring m_incidentNotifyLaneThresholdText = L"50%";
     double m_incidentNotifyLaneThreshold = 50.0;
     std::wstring m_incidentNotifyDelayThresholdText = L"1 hour";
     double m_incidentNotifyDelayThresholdMinutes = 60.0;
     bool m_incidentNotifyThresholdUseOr = false;
     std::wstring m_incidentNotifyReasonExclusions = L"Road Management";
+    std::wstring m_incidentNotifyLocationExclusions = L"entry, exit";
     bool m_showEarthquakes = false;
     std::wstring m_earthquakeNotificationMagnitudeText = L"4.0";
     double m_earthquakeNotificationMagnitude = 4.0;
@@ -4082,7 +4982,9 @@ private:
     std::atomic_bool m_serverRequestInProgress{ false };
     std::atomic_bool m_earthquakeFetchInProgress{ false };
     bool m_notificationIconAdded = false;
-    std::unordered_set<std::wstring> m_notifiedIncidentKeys;
+    bool m_haveIncidentNotificationSnapshot = false;
+    bool m_reportTemplatesConfigured = false;
+    std::unordered_map<std::wstring, IncidentNotificationState> m_notifiedIncidentStates;
     std::unordered_set<std::wstring> m_notifiedEarthquakeKeys;
     PolygonCaptureTarget m_polygonCaptureTarget = PolygonCaptureTarget::None;
     size_t m_activeIncidentRegionIndex = static_cast<size_t>(-1);

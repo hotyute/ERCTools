@@ -189,6 +189,15 @@ static std::wstring ExtractHtmlAttribute(const std::wstring& tag, const wchar_t*
     return L"";
 }
 
+static bool IsHardShoulderText(const std::wstring& text)
+{
+    std::wstring lower = ToLower(text);
+    return lower.find(L"hard shoulder") != std::wstring::npos ||
+        lower.find(L"hard-shoulder") != std::wstring::npos ||
+        lower.find(L"hard_shoulder") != std::wstring::npos ||
+        lower.find(L"hardshoulder") != std::wstring::npos;
+}
+
 static bool ExtractLaneClosureCountsFromImages(const std::wstring& html, int& closedOut, int& totalOut)
 {
     closedOut = 0;
@@ -207,6 +216,8 @@ static bool ExtractLaneClosureCountsFromImages(const std::wstring& html, int& cl
             src.find(L"normal-open") != std::wstring::npos ||
             src.find(L"lane") != std::wstring::npos;
         if (!looksLikeLaneImage)
+            continue;
+        if (IsHardShoulderText(alt + L" " + src))
             continue;
 
         ++totalOut;
@@ -237,6 +248,8 @@ static std::vector<std::wstring> ExtractImageUrls(const std::wstring& html)
             continue;
 
         std::wstring lowerUrl = ToLower(url);
+        if (IsHardShoulderText(lowerUrl))
+            continue;
         if (lowerUrl.find(L"lane") != std::wstring::npos ||
             lowerUrl.find(L"closed") != std::wstring::npos ||
             lowerUrl.find(L"arrow") != std::wstring::npos ||
@@ -265,10 +278,11 @@ static void AppendLaneClosureLineIfMissing(TrafficAlert& alert)
     if (line.empty())
         return;
 
-    std::wstring lowerDescription = ToLower(alert.description);
-    if (lowerDescription.find(L"lanes closed") != std::wstring::npos &&
-        lowerDescription.find(L" of ") != std::wstring::npos)
-    {
+    std::wregex existingLineRe(LR"((^|\r?\n)\s*Lanes\s+Closed\s*:\s*[^\r\n]*)", std::regex_constants::icase);
+    std::wsmatch m;
+    if (std::regex_search(alert.description, m, existingLineRe)) {
+        std::wstring replacement = m[1].str() + line;
+        alert.description.replace(static_cast<size_t>(m.position(0)), static_cast<size_t>(m.length(0)), replacement);
         return;
     }
 
@@ -427,6 +441,8 @@ static void ApplyStructuredLaneMetadata(TrafficAlert& alert, const json& props, 
             if (status.empty() && lane.is_string())
                 status = JsonValueToText(lane);
             if (status.empty() && name.empty())
+                continue;
+            if (IsHardShoulderText(name + L" " + status))
                 continue;
 
             bool isClosed = IsClosedLaneStatus(status);
