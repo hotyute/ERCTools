@@ -438,7 +438,7 @@ static void MoveLabelToText(HWND hwnd, int x, int y, int maximumWidth = 0)
 static BOOL CALLBACK AutoFitChildEnumProc(HWND child, LPARAM param)
 {
     RECT childRect{};
-    if (!IsWindowVisible(child) || !GetWindowRect(child, &childRect))
+    if ((GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE) == 0 || !GetWindowRect(child, &childRect))
         return TRUE;
 
     HWND parent = GetParent(child);
@@ -463,10 +463,8 @@ static void AutoFitWindowToChildren(HWND hwnd, int padding = 28)
     if (childBounds.right <= 0 || childBounds.bottom <= 0)
         return;
 
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    int desiredClientW = MaxInt(client.right - client.left, childBounds.right + padding);
-    int desiredClientH = MaxInt(client.bottom - client.top, childBounds.bottom + padding);
+    int desiredClientW = MaxInt(260, childBounds.right + padding);
+    int desiredClientH = MaxInt(160, childBounds.bottom + padding);
 
     RECT windowRect{ 0, 0, desiredClientW, desiredClientH };
     DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
@@ -3954,8 +3952,10 @@ private:
     static std::vector<std::wstring> ExtractRoadsOrgSignPanelItems(const std::wstring& fragment, const std::wstring& currentRoad)
     {
         std::wstring text = fragment;
+        text = std::regex_replace(text, std::wregex(LR"(<\s*img\b[^>]*>)", std::regex_constants::icase), L" ");
         text = std::regex_replace(text, std::wregex(LR"(<\s*hr\b[^>]*>)", std::regex_constants::icase), L"\n");
         text = std::regex_replace(text, std::wregex(LR"(<\s*br\b[^>]*>)", std::regex_constants::icase), L"\n");
+        text = std::regex_replace(text, std::wregex(LR"(<\s*/\s*(?:div|p|span|li)\s*>)", std::regex_constants::icase), L"\n");
         text = std::regex_replace(text, std::wregex(LR"(<[^>]+>)"), L" ");
         text = DecodeBasicHtmlEntities(text);
 
@@ -3966,8 +3966,11 @@ private:
             std::wstring line = Trim(text.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos));
             if (!line.empty()) {
                 std::wstring lower = ToLower(line);
-                if (lower != L"link" && lower != L"details" && lower != L"lanes" && lower != L"signs")
+                if (lower != L"link" && lower != L"details" && lower != L"lanes" && lower != L"signs" &&
+                    lower != L"image" && lower.find(L"image:") != 0)
+                {
                     PushUniqueText(items, line);
+                }
             }
             if (next == std::wstring::npos)
                 break;
@@ -3987,11 +3990,68 @@ private:
         return items;
     }
 
+    static bool TryStandaloneSignRoad(const std::wstring& item, std::wstring& roadOut)
+    {
+        std::wregex roadRe(LR"(^\s*([AMB]\d{1,4}[A-Z]?(?:\([A-Z]+\))?)\s*(?:Link)?\s*$)", std::regex_constants::icase);
+        std::wsmatch m;
+        if (!std::regex_match(item, m, roadRe) || m.size() <= 1)
+            return false;
+
+        roadOut = Trim(m[1].str());
+        return !roadOut.empty();
+    }
+
+    static std::wstring FormatRoadsOrgSignGroup(const std::wstring& road, const std::vector<std::wstring>& destinations)
+    {
+        std::wstring body = JoinTemplateItems(destinations);
+        if (road.empty())
+            return body;
+        if (body.empty())
+            return road;
+        return road + L" " + body;
+    }
+
+    static std::wstring FormatRoadsOrgSignPanelItems(const std::vector<std::wstring>& items)
+    {
+        std::vector<std::wstring> groups;
+        std::vector<std::wstring> pendingDestinations;
+        std::wstring activeRoad;
+
+        auto flush = [&](const std::wstring& road) {
+            if (pendingDestinations.empty())
+                return;
+            PushUniqueText(groups, FormatRoadsOrgSignGroup(road, pendingDestinations));
+            pendingDestinations.clear();
+            };
+
+        for (const std::wstring& item : items) {
+            std::wstring road;
+            if (TryStandaloneSignRoad(item, road)) {
+                if (pendingDestinations.empty()) {
+                    activeRoad = road;
+                }
+                else if (activeRoad.empty()) {
+                    flush(road);
+                }
+                else {
+                    flush(activeRoad);
+                    activeRoad = road;
+                }
+            }
+            else {
+                pendingDestinations.push_back(item);
+            }
+        }
+
+        flush(activeRoad);
+        return JoinTemplateItems(groups, L" - ");
+    }
+
     static std::wstring ExtractRoadsOrgDataFromFragment(const std::wstring& fragment, const std::wstring& currentRoad)
     {
         std::vector<std::wstring> signPanelItems = ExtractRoadsOrgSignPanelItems(fragment, currentRoad);
         if (!signPanelItems.empty())
-            return JoinTemplateItems(signPanelItems);
+            return FormatRoadsOrgSignPanelItems(signPanelItems);
 
         std::wstring text = StripTemplateHtmlTags(fragment);
         std::vector<std::wstring> refs = ExtractRoadRefsFromText(text, currentRoad);

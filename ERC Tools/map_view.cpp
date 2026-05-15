@@ -1245,6 +1245,11 @@ private:
 
     void OnMouseMove(int x, int y, UINT buttons)
     {
+        if (m_draggingNotificationHistoryScrollbar && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            SetNotificationHistoryScrollFromThumbY(static_cast<float>(y), m_notificationHistoryScrollbarDragOffset);
+            return;
+        }
+
         if (m_draggingPolygonPoint && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
             if (m_draggingPolygonIndex < m_notificationPolygons.size() &&
                 m_draggingPolygonPointIndex < m_notificationPolygons[m_draggingPolygonIndex].points.size())
@@ -1307,6 +1312,17 @@ private:
     {
         if (GetCapture() == m_hwnd)
             ReleaseCapture();
+
+        if (m_draggingNotificationHistoryScrollbar) {
+            m_draggingNotificationHistoryScrollbar = false;
+            m_notificationHistoryScrollbarDragOffset = 0.0f;
+            m_notificationUiMouseDown = false;
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            Invalidate();
+            return;
+        }
 
         if (m_draggingPolygonPoint) {
             m_draggingPolygonPoint = false;
@@ -1925,6 +1941,12 @@ private:
             panelRect.bottom - kOverlayUiPadding);
     }
 
+    D2D1_RECT_F NotificationHistoryScrollTrackRect(const D2D1_RECT_F& panelRect) const
+    {
+        const D2D1_RECT_F contentRect = NotificationHistoryContentRect(panelRect);
+        return D2D1::RectF(panelRect.right - 12.0f, contentRect.top, panelRect.right - 7.0f, contentRect.bottom);
+    }
+
     D2D1_RECT_F NotificationHistoryClearRect(const D2D1_RECT_F& panelRect) const
     {
         return D2D1::RectF(
@@ -1962,6 +1984,45 @@ private:
         for (const AppNotification& notification : m_notificationHistory)
             height += NotificationItemHeight(notification, width);
         return height;
+    }
+
+    static D2D1_RECT_F ScrollbarThumbRect(const D2D1_RECT_F& track, float contentHeight, float viewportHeight, float scrollOffset)
+    {
+        if (contentHeight <= viewportHeight || viewportHeight <= 1.0f || track.bottom <= track.top)
+            return D2D1::RectF(0, 0, 0, 0);
+
+        const float trackHeight = track.bottom - track.top;
+        const float thumbHeight = ClampValue(trackHeight * viewportHeight / contentHeight, 26.0f, trackHeight);
+        const float maxScroll = MaxValue(1.0f, contentHeight - viewportHeight);
+        const float thumbTop = track.top + (trackHeight - thumbHeight) * ClampValue(scrollOffset / maxScroll, 0.0f, 1.0f);
+        return D2D1::RectF(track.left, thumbTop, track.right, thumbTop + thumbHeight);
+    }
+
+    bool SetNotificationHistoryScrollFromThumbY(float y, float dragOffset)
+    {
+        const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
+        if (!layout.hasHistory)
+            return false;
+
+        EnsureDeviceResources();
+        if (!m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return false;
+
+        const D2D1_RECT_F contentRect = NotificationHistoryContentRect(layout.historyRect);
+        const float viewportH = MaxValue(1.0f, contentRect.bottom - contentRect.top);
+        const float contentW = MaxValue(1.0f, contentRect.right - contentRect.left);
+        const float contentH = NotificationHistoryContentHeight(contentW);
+        if (contentH <= viewportH)
+            return false;
+
+        const D2D1_RECT_F track = NotificationHistoryScrollTrackRect(layout.historyRect);
+        const D2D1_RECT_F thumb = ScrollbarThumbRect(track, contentH, viewportH, m_notificationHistoryScroll);
+        const float travel = MaxValue(1.0f, (track.bottom - track.top) - (thumb.bottom - thumb.top));
+        const float thumbTop = ClampValue(y - dragOffset, track.top, track.bottom - (thumb.bottom - thumb.top));
+        const float maxScroll = MaxValue(0.0f, contentH - viewportH);
+        m_notificationHistoryScroll = ClampValue(((thumbTop - track.top) / travel) * maxScroll, 0.0f, maxScroll);
+        Invalidate();
+        return true;
     }
 
     float ClampNotificationHistoryScroll(float offset) const
@@ -2009,6 +2070,22 @@ private:
             if (m_onNotificationHistoryClear)
                 m_onNotificationHistoryClear();
             Invalidate();
+            return true;
+        }
+
+        const D2D1_RECT_F contentRect = NotificationHistoryContentRect(layout.historyRect);
+        const float viewportH = MaxValue(1.0f, contentRect.bottom - contentRect.top);
+        const float contentW = MaxValue(1.0f, contentRect.right - contentRect.left);
+        const float contentH = NotificationHistoryContentHeight(contentW);
+        const D2D1_RECT_F track = NotificationHistoryScrollTrackRect(layout.historyRect);
+        if (contentH > viewportH && PointInRect(x, y, track)) {
+            const D2D1_RECT_F thumb = ScrollbarThumbRect(track, contentH, viewportH, m_notificationHistoryScroll);
+            m_draggingNotificationHistoryScrollbar = true;
+            m_notificationHistoryScrollbarDragOffset = PointInRect(x, y, thumb)
+                ? static_cast<float>(y) - thumb.top
+                : (thumb.bottom - thumb.top) * 0.5f;
+            SetCapture(m_hwnd);
+            SetNotificationHistoryScrollFromThumbY(static_cast<float>(y), m_notificationHistoryScrollbarDragOffset);
             return true;
         }
 
@@ -2154,7 +2231,7 @@ private:
         }
         m_rt->PopAxisAlignedClip();
 
-        D2D1_RECT_F scrollTrack = D2D1::RectF(rect.right - 12.0f, contentRect.top, rect.right - 7.0f, contentRect.bottom);
+        D2D1_RECT_F scrollTrack = NotificationHistoryScrollTrackRect(rect);
         m_overlayUi.DrawScrollbar(scrollTrack, contentH, viewportH, m_notificationHistoryScroll);
     }
 
@@ -3112,7 +3189,9 @@ private:
     std::vector<AppNotification> m_notificationHistory;
     bool m_hasActiveNotification = false;
     bool m_showNotificationHistory = false;
+    bool m_draggingNotificationHistoryScrollbar = false;
     float m_notificationHistoryScroll = 0.0f;
+    float m_notificationHistoryScrollbarDragOffset = 0.0f;
     D2D1_RECT_F m_lastActiveNotificationRect{};
     D2D1_RECT_F m_lastNotificationHistoryRect{};
     bool m_hasLastActiveNotificationRect = false;
