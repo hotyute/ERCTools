@@ -5,6 +5,7 @@
 #include "map_view.h"
 #include "app_state.h"
 #include "http.h"
+#include "map_overlay_ui.h"
 #include "parsing.h"
 #include "util.h"
 
@@ -77,6 +78,10 @@ constexpr UINT kInteractionIdleMs = 120;
 constexpr float kMapWaterR = 0.80f;
 constexpr float kMapWaterG = 0.91f;
 constexpr float kMapWaterB = 0.98f;
+constexpr float kOverlayUiMargin = 12.0f;
+constexpr float kOverlayUiPadding = 14.0f;
+constexpr float kOverlayUiGap = 10.0f;
+constexpr float kNotificationScrollStep = 56.0f;
 
 // Boundary rendering.
 constexpr double kBoundaryDrawMarginPixels = 512.0;
@@ -175,6 +180,40 @@ public:
     {
         m_earthquakes = earthquakes;
         InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetActiveNotification(const AppNotification& notification)
+    {
+        m_activeNotification = notification;
+        m_hasActiveNotification = !notification.title.empty() || !notification.body.empty();
+        Invalidate();
+    }
+
+    void ClearActiveNotification()
+    {
+        if (!m_hasActiveNotification)
+            return;
+
+        m_hasActiveNotification = false;
+        m_activeNotification = {};
+        Invalidate();
+    }
+
+    void SetNotificationHistory(const std::vector<AppNotification>& notifications)
+    {
+        m_notificationHistory = notifications;
+        m_notificationHistoryScroll = ClampNotificationHistoryScroll(m_notificationHistoryScroll);
+        Invalidate();
+    }
+
+    void SetNotificationHistoryVisible(bool visible)
+    {
+        if (m_showNotificationHistory == visible)
+            return;
+
+        m_showNotificationHistory = visible;
+        m_notificationHistoryScroll = ClampNotificationHistoryScroll(m_notificationHistoryScroll);
         Invalidate();
     }
 
@@ -433,7 +472,13 @@ private:
             return 1;
 
         case WM_LBUTTONDOWN:
+            if (HitNotificationInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
+                SetCapture(m_hwnd);
+                m_notificationUiMouseDown = true;
+                return 0;
+            }
             SetCapture(m_hwnd);
+            m_notificationUiMouseDown = false;
             m_mouseDown.x = GET_X_LPARAM(lParam);
             m_mouseDown.y = GET_Y_LPARAM(lParam);
             m_lastMouse = m_mouseDown;
@@ -677,6 +722,14 @@ private:
 
     void OnMouseMove(int x, int y, UINT buttons)
     {
+        if (m_notificationUiMouseDown || HitNotificationInterface(x, y)) {
+            if (!m_hoveredAlertId.empty()) {
+                m_hoveredAlertId.clear();
+                Invalidate();
+            }
+            return;
+        }
+
         if (!m_trackingMouseLeave) {
             TRACKMOUSEEVENT tme{};
             tme.cbSize = sizeof(tme);
@@ -718,6 +771,15 @@ private:
         if (GetCapture() == m_hwnd)
             ReleaseCapture();
 
+        if (m_notificationUiMouseDown || HitNotificationInterface(x, y)) {
+            m_notificationUiMouseDown = false;
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            Invalidate();
+            return;
+        }
+
         if (!m_dragging) {
             if (m_polygonCaptureActive && m_onPolygonPoint) {
                 GeoPoint geo = ScreenToGeo(x, y);
@@ -742,6 +804,9 @@ private:
 
     void OnDoubleClick(int x, int y)
     {
+        if (HitNotificationInterface(x, y))
+            return;
+
         if (!m_onNoteLocation)
             return;
 
@@ -753,6 +818,9 @@ private:
     {
         POINT pt{ screenX, screenY };
         ScreenToClient(m_hwnd, &pt);
+
+        if (TryScrollNotificationHistoryAt(pt.x, pt.y, delta))
+            return;
 
         int newZoom = m_zoom + ((delta > 0) ? 1 : -1);
         newZoom = ClampValue(newZoom, kMinZoom, kMaxZoom);
@@ -870,6 +938,7 @@ private:
         m_earthquakeBrush.Reset();
         m_laneBitmaps.clear();
         m_noteTextFormat.Reset();
+        m_overlayUi.DiscardDeviceResources();
         InvalidateSceneCache();
     }
 
@@ -1207,6 +1276,277 @@ private:
             m_rt->DrawLine(D2D1::Point2F(cx, cy + 7.0f), D2D1::Point2F(cx - 6.0f, cy + 1.0f), m_textBrush.Get(), 3.0f);
             m_rt->DrawLine(D2D1::Point2F(cx, cy + 7.0f), D2D1::Point2F(cx + 6.0f, cy + 1.0f), m_textBrush.Get(), 3.0f);
         }
+    }
+
+    struct NotificationLayout
+    {
+        D2D1_RECT_F bannerRect{};
+        D2D1_RECT_F historyRect{};
+        bool hasHistory = false;
+    };
+
+    static bool PointInRect(int x, int y, const D2D1_RECT_F& rect)
+    {
+        return static_cast<float>(x) >= rect.left && static_cast<float>(x) <= rect.right &&
+            static_cast<float>(y) >= rect.top && static_cast<float>(y) <= rect.bottom;
+    }
+
+    NotificationLayout BuildNotificationLayout(const ViewState& view) const
+    {
+        NotificationLayout layout;
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float usableW = MaxValue(1.0f, width - kOverlayUiMargin * 2.0f);
+        const float usableH = MaxValue(1.0f, height - kOverlayUiMargin * 2.0f);
+
+        float historyW = 0.0f;
+        if (m_showNotificationHistory) {
+            historyW = ClampValue(width * 0.32f, 280.0f, 420.0f);
+            historyW = MinValue(historyW, MaxValue(180.0f, usableW));
+            layout.historyRect = D2D1::RectF(
+                width - kOverlayUiMargin - historyW,
+                kOverlayUiMargin,
+                width - kOverlayUiMargin,
+                kOverlayUiMargin + MaxValue(120.0f, usableH));
+            layout.hasHistory = true;
+        }
+
+        const float bannerRight = layout.hasHistory
+            ? MaxValue(kOverlayUiMargin + 180.0f, layout.historyRect.left - kOverlayUiGap)
+            : width - kOverlayUiMargin;
+        layout.bannerRect = D2D1::RectF(
+            kOverlayUiMargin,
+            kOverlayUiMargin,
+            MinValue(width - kOverlayUiMargin, bannerRight),
+            kOverlayUiMargin + 72.0f);
+
+        return layout;
+    }
+
+    D2D1_RECT_F NotificationHistoryContentRect(const D2D1_RECT_F& panelRect) const
+    {
+        return D2D1::RectF(
+            panelRect.left + kOverlayUiPadding,
+            panelRect.top + 58.0f,
+            panelRect.right - kOverlayUiPadding - 10.0f,
+            panelRect.bottom - kOverlayUiPadding);
+    }
+
+    float NotificationItemHeight(const AppNotification& notification, float width) const
+    {
+        width = MaxValue(1.0f, width);
+        const float timeH = notification.timestamp.empty()
+            ? 0.0f
+            : MaxValue(14.0f, m_overlayUi.MeasureTextHeight(notification.timestamp, m_overlayUi.SmallFormat(), width));
+        const float titleH = MaxValue(18.0f, m_overlayUi.MeasureTextHeight(notification.title, m_overlayUi.TitleFormat(), width));
+        const float bodyH = notification.body.empty()
+            ? 0.0f
+            : MaxValue(18.0f, m_overlayUi.MeasureTextHeight(notification.body, m_overlayUi.BodyFormat(), width));
+
+        float height = 14.0f + titleH + 14.0f;
+        if (timeH > 0.0f)
+            height += timeH + 3.0f;
+        if (bodyH > 0.0f)
+            height += bodyH + 5.0f;
+        return height;
+    }
+
+    float NotificationHistoryContentHeight(float width) const
+    {
+        if (m_notificationHistory.empty())
+            return 34.0f;
+
+        float height = 0.0f;
+        for (const AppNotification& notification : m_notificationHistory)
+            height += NotificationItemHeight(notification, width);
+        return height;
+    }
+
+    float ClampNotificationHistoryScroll(float offset) const
+    {
+        return MaxValue(0.0f, offset);
+    }
+
+    float MaxNotificationHistoryScroll(const D2D1_RECT_F& panelRect) const
+    {
+        const D2D1_RECT_F contentRect = NotificationHistoryContentRect(panelRect);
+        const float viewportH = MaxValue(1.0f, contentRect.bottom - contentRect.top);
+        const float contentH = NotificationHistoryContentHeight(MaxValue(1.0f, contentRect.right - contentRect.left));
+        return MaxValue(0.0f, contentH - viewportH);
+    }
+
+    bool HitNotificationInterface(int x, int y) const
+    {
+        if (!m_showNotificationHistory && !m_hasActiveNotification)
+            return false;
+
+        const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
+        if (m_showNotificationHistory && PointInRect(x, y, layout.historyRect))
+            return true;
+        if (m_hasActiveNotification && m_hasLastActiveNotificationRect && PointInRect(x, y, m_lastActiveNotificationRect))
+            return true;
+        if (m_hasActiveNotification) {
+            D2D1_RECT_F fallback = layout.bannerRect;
+            fallback.bottom = fallback.top + 160.0f;
+            return PointInRect(x, y, fallback);
+        }
+        return false;
+    }
+
+    bool TryScrollNotificationHistoryAt(int x, int y, short delta)
+    {
+        if (!m_showNotificationHistory)
+            return false;
+
+        const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
+        if (!PointInRect(x, y, layout.historyRect))
+            return false;
+
+        EnsureDeviceResources();
+        if (!m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return true;
+
+        const float maxScroll = MaxNotificationHistoryScroll(layout.historyRect);
+        const float direction = delta > 0 ? -1.0f : 1.0f;
+        m_notificationHistoryScroll = ClampValue(
+            m_notificationHistoryScroll + direction * kNotificationScrollStep,
+            0.0f,
+            maxScroll);
+        Invalidate();
+        return true;
+    }
+
+    void DrawActiveNotification(const NotificationLayout& layout, const ViewState& view)
+    {
+        m_hasLastActiveNotificationRect = false;
+        if (!m_hasActiveNotification || !m_rt)
+            return;
+
+        D2D1_RECT_F rect = layout.bannerRect;
+        const float contentW = MaxValue(1.0f, rect.right - rect.left - kOverlayUiPadding * 2.0f);
+        const std::wstring title = m_activeNotification.title.empty() ? L"Notification" : m_activeNotification.title;
+        const float titleH = MaxValue(20.0f, m_overlayUi.MeasureTextHeight(title, m_overlayUi.TitleFormat(), contentW));
+        const float bodyH = m_activeNotification.body.empty()
+            ? 0.0f
+            : MaxValue(18.0f, m_overlayUi.MeasureTextHeight(m_activeNotification.body, m_overlayUi.BodyFormat(), contentW));
+        const float timestampH = m_activeNotification.timestamp.empty()
+            ? 0.0f
+            : MaxValue(13.0f, m_overlayUi.MeasureTextHeight(m_activeNotification.timestamp, m_overlayUi.SmallFormat(), contentW));
+        const float desiredH = kOverlayUiPadding * 2.0f + titleH + timestampH + (bodyH > 0.0f ? bodyH + 6.0f : 0.0f);
+        rect.bottom = rect.top + ClampValue(desiredH, 58.0f, MaxValue(82.0f, static_cast<float>(view.height) * 0.38f));
+        m_lastActiveNotificationRect = rect;
+        m_hasLastActiveNotificationRect = true;
+
+        m_overlayUi.DrawGlassPanel(rect, 12.0f);
+        m_rt->FillRectangle(D2D1::RectF(rect.left, rect.top + 10.0f, rect.left + 3.0f, rect.bottom - 10.0f), m_overlayUi.AccentBrush());
+
+        float y = rect.top + kOverlayUiPadding - 1.0f;
+        D2D1_RECT_F titleRect = D2D1::RectF(rect.left + kOverlayUiPadding, y, rect.right - kOverlayUiPadding, y + titleH + 3.0f);
+        m_overlayUi.DrawLabel(title, m_overlayUi.TitleFormat(), titleRect);
+        y += titleH + 3.0f;
+
+        if (!m_activeNotification.timestamp.empty()) {
+            D2D1_RECT_F timeRect = D2D1::RectF(rect.left + kOverlayUiPadding, y, rect.right - kOverlayUiPadding, y + timestampH + 2.0f);
+            m_overlayUi.DrawLabel(m_activeNotification.timestamp, m_overlayUi.SmallFormat(), timeRect, m_overlayUi.MutedTextBrush());
+            y += timestampH + 2.0f;
+        }
+
+        if (!m_activeNotification.body.empty()) {
+            D2D1_RECT_F bodyRect = D2D1::RectF(rect.left + kOverlayUiPadding, y + 3.0f, rect.right - kOverlayUiPadding, rect.bottom - kOverlayUiPadding + 4.0f);
+            m_overlayUi.DrawLabel(m_activeNotification.body, m_overlayUi.BodyFormat(), bodyRect);
+        }
+    }
+
+    void DrawNotificationHistory(const NotificationLayout& layout)
+    {
+        m_hasLastNotificationHistoryRect = false;
+        if (!m_showNotificationHistory || !layout.hasHistory || !m_rt)
+            return;
+
+        const D2D1_RECT_F rect = layout.historyRect;
+        if (rect.right - rect.left < 120.0f || rect.bottom - rect.top < 120.0f)
+            return;
+
+        m_lastNotificationHistoryRect = rect;
+        m_hasLastNotificationHistoryRect = true;
+        m_overlayUi.DrawGlassPanel(rect, 12.0f);
+
+        D2D1_RECT_F titleRect = D2D1::RectF(
+            rect.left + kOverlayUiPadding,
+            rect.top + kOverlayUiPadding - 1.0f,
+            rect.right - kOverlayUiPadding,
+            rect.top + kOverlayUiPadding + 22.0f);
+        m_overlayUi.DrawLabel(L"Notification History", m_overlayUi.TitleFormat(), titleRect);
+
+        std::wstring countText = m_notificationHistory.empty()
+            ? L"No notifications yet"
+            : std::to_wstring(m_notificationHistory.size()) + L" recent notification(s)";
+        D2D1_RECT_F countRect = D2D1::RectF(
+            rect.left + kOverlayUiPadding,
+            rect.top + kOverlayUiPadding + 23.0f,
+            rect.right - kOverlayUiPadding,
+            rect.top + kOverlayUiPadding + 43.0f);
+        m_overlayUi.DrawLabel(countText, m_overlayUi.SmallFormat(), countRect, m_overlayUi.MutedTextBrush());
+        m_overlayUi.DrawSeparator(rect.left + kOverlayUiPadding, rect.right - kOverlayUiPadding, rect.top + 52.0f);
+
+        const D2D1_RECT_F contentRect = NotificationHistoryContentRect(rect);
+        const float viewportH = MaxValue(1.0f, contentRect.bottom - contentRect.top);
+        const float contentW = MaxValue(1.0f, contentRect.right - contentRect.left);
+        const float contentH = NotificationHistoryContentHeight(contentW);
+        const float maxScroll = MaxValue(0.0f, contentH - viewportH);
+        m_notificationHistoryScroll = ClampValue(m_notificationHistoryScroll, 0.0f, maxScroll);
+
+        m_rt->PushAxisAlignedClip(contentRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        if (m_notificationHistory.empty()) {
+            D2D1_RECT_F emptyRect = D2D1::RectF(contentRect.left, contentRect.top + 6.0f, contentRect.right, contentRect.top + 44.0f);
+            m_overlayUi.DrawLabel(L"No notifications yet.", m_overlayUi.BodyFormat(), emptyRect, m_overlayUi.MutedTextBrush());
+        }
+        else {
+            float y = contentRect.top - m_notificationHistoryScroll;
+            for (const AppNotification& notification : m_notificationHistory) {
+                const float itemH = NotificationItemHeight(notification, contentW);
+                if (y + itemH >= contentRect.top && y <= contentRect.bottom) {
+                    float itemY = y + 6.0f;
+                    if (!notification.timestamp.empty()) {
+                        D2D1_RECT_F timeRect = D2D1::RectF(contentRect.left, itemY, contentRect.right, itemY + 15.0f);
+                        m_overlayUi.DrawLabel(notification.timestamp, m_overlayUi.SmallFormat(), timeRect, m_overlayUi.MutedTextBrush());
+                        itemY += 17.0f;
+                    }
+
+                    const float titleH = MaxValue(18.0f, m_overlayUi.MeasureTextHeight(notification.title, m_overlayUi.TitleFormat(), contentW));
+                    D2D1_RECT_F itemTitleRect = D2D1::RectF(contentRect.left, itemY, contentRect.right, itemY + titleH + 2.0f);
+                    m_overlayUi.DrawLabel(notification.title, m_overlayUi.TitleFormat(), itemTitleRect);
+                    itemY += titleH + 3.0f;
+
+                    if (!notification.body.empty()) {
+                        const float bodyH = MaxValue(18.0f, m_overlayUi.MeasureTextHeight(notification.body, m_overlayUi.BodyFormat(), contentW));
+                        D2D1_RECT_F bodyRect = D2D1::RectF(contentRect.left, itemY, contentRect.right, itemY + bodyH + 2.0f);
+                        m_overlayUi.DrawLabel(notification.body, m_overlayUi.BodyFormat(), bodyRect, m_overlayUi.TextBrush());
+                    }
+
+                    m_overlayUi.DrawSeparator(contentRect.left, contentRect.right, y + itemH - 5.0f);
+                }
+                y += itemH;
+            }
+        }
+        m_rt->PopAxisAlignedClip();
+
+        D2D1_RECT_F scrollTrack = D2D1::RectF(rect.right - 12.0f, contentRect.top, rect.right - 7.0f, contentRect.bottom);
+        m_overlayUi.DrawScrollbar(scrollTrack, contentH, viewportH, m_notificationHistoryScroll);
+    }
+
+    void DrawNotificationInterface(const ViewState& view)
+    {
+        m_hasLastActiveNotificationRect = false;
+        m_hasLastNotificationHistoryRect = false;
+        if ((!m_hasActiveNotification && !m_showNotificationHistory) || !m_rt)
+            return;
+        if (!m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return;
+
+        const NotificationLayout layout = BuildNotificationLayout(view);
+        DrawNotificationHistory(layout);
+        DrawActiveNotification(layout, view);
     }
 
     void DrawAlertOverlay(const ViewState& view)
@@ -1719,6 +2059,7 @@ private:
 
             DrawMapChrome();
             DrawAlertOverlay(overlayView);
+            DrawNotificationInterface(view);
 
             HRESULT hr = m_rt->EndDraw();
             if (hr == D2DERR_RECREATE_TARGET)
@@ -2038,10 +2379,21 @@ private:
     POINT m_lastMouse{};
     bool m_dragging = false;
     bool m_interactivePan = false;
+    bool m_notificationUiMouseDown = false;
     bool m_polygonCaptureActive = false;
     bool m_trackingMouseLeave = false;
     int m_interactiveTileRequestsThisFrame = 0;
     std::wstring m_hoveredAlertId;
+    AppNotification m_activeNotification;
+    std::vector<AppNotification> m_notificationHistory;
+    bool m_hasActiveNotification = false;
+    bool m_showNotificationHistory = false;
+    float m_notificationHistoryScroll = 0.0f;
+    D2D1_RECT_F m_lastActiveNotificationRect{};
+    D2D1_RECT_F m_lastNotificationHistoryRect{};
+    bool m_hasLastActiveNotificationRect = false;
+    bool m_hasLastNotificationHistoryRect = false;
+    MapOverlayUiRenderer m_overlayUi;
 
     ComPtr<ID2D1HwndRenderTarget> m_rt;
     ComPtr<ID2D1SolidColorBrush> m_severeBrush;
@@ -2139,6 +2491,26 @@ void MapView::SetPolygonCaptureActive(bool active)
 void MapView::SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes)
 {
     m_impl->SetEarthquakes(earthquakes);
+}
+
+void MapView::SetActiveNotification(const AppNotification& notification)
+{
+    m_impl->SetActiveNotification(notification);
+}
+
+void MapView::ClearActiveNotification()
+{
+    m_impl->ClearActiveNotification();
+}
+
+void MapView::SetNotificationHistory(const std::vector<AppNotification>& notifications)
+{
+    m_impl->SetNotificationHistory(notifications);
+}
+
+void MapView::SetNotificationHistoryVisible(bool visible)
+{
+    m_impl->SetNotificationHistoryVisible(visible);
 }
 
 void MapView::SetSelectedId(const std::wstring& id)

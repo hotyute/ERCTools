@@ -58,6 +58,13 @@ struct EarthquakeEvent
     bool hasLocation = false;
 };
 
+struct AppNotification
+{
+    std::wstring title;
+    std::wstring body;
+    std::wstring timestamp;
+};
+
 struct ChatMessage
 {
     std::wstring author;

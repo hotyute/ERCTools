@@ -29,7 +29,6 @@ constexpr int IDC_NOTE_EDIT = 1018;
 constexpr int IDC_NOTE_BTN = 1019;
 constexpr int IDC_NOTE_LABEL = 1020;
 constexpr int IDC_PANEL_TAB_BTN = 1021;
-constexpr int IDC_INAPP_NOTIFICATION = 1022;
 constexpr int IDM_FILE_SETTINGS = 2001;
 constexpr int IDM_FILE_EXIT = 2002;
 constexpr int IDM_ABOUT = 2003;
@@ -39,7 +38,6 @@ constexpr int IDM_EARTHQUAKES_LIST = 2006;
 constexpr int IDM_EARTHQUAKE_NOTIFICATIONS = 2007;
 constexpr int IDM_SHOW_EARTHQUAKES = 2008;
 constexpr int IDM_VIEW_NOTIFICATION_HISTORY = 2009;
-constexpr int IDC_NOTIFICATION_HISTORY_OVERLAY = 1023;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -133,13 +131,6 @@ struct EarthquakeResult
     bool notify = false;
     std::wstring error;
     std::vector<EarthquakeEvent> events;
-};
-
-struct NotificationHistoryEntry
-{
-    std::wstring title;
-    std::wstring body;
-    std::wstring timestamp;
 };
 
 enum class ServerAction
@@ -931,8 +922,7 @@ private:
                 FetchEarthquakesAsync(true);
             else if (wParam == kInAppNotificationTimerId) {
                 KillTimer(m_hwnd, kInAppNotificationTimerId);
-                if (m_inAppNotification)
-                    ShowWindow(m_inAppNotification, SW_HIDE);
+                m_map.ClearActiveNotification();
             }
             return 0;
 
@@ -1096,42 +1086,17 @@ private:
             m_hInst,
             nullptr);
 
-        m_inAppNotification = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
-            L"STATIC",
-            L"",
-            WS_CHILD | SS_LEFT | SS_NOPREFIX,
-            0, 0, 0, 0,
-            m_hwnd,
-            ControlId(IDC_INAPP_NOTIFICATION),
-            m_hInst,
-            nullptr);
-
-        m_notificationHistoryOverlay = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
-            L"EDIT",
-            L"",
-            WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
-            0, 0, 0, 0,
-            m_hwnd,
-            ControlId(IDC_NOTIFICATION_HISTORY_OVERLAY),
-            m_hInst,
-            nullptr);
-
         if (!m_headerLabel || !m_searchLabel || !m_severityLabel ||
-            !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar || !m_inAppNotification || !m_notificationHistoryOverlay)
+            !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar, m_inAppNotification, m_notificationHistoryOverlay }) {
+        for (HWND h : { m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
-        ShowWindow(m_inAppNotification, SW_HIDE);
-        ShowWindow(m_notificationHistoryOverlay, m_showNotificationHistory ? SW_SHOW : SW_HIDE);
-        RenderNotificationHistory();
 
         SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, region, or description"));
         SendMessageW(m_chatEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Message local responders..."));
@@ -1190,6 +1155,8 @@ private:
             OnMapPolygonPoint(lat, lon);
             });
         m_map.SetNotificationPolygons(m_incidentNotificationRegions);
+        m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
+        RenderNotificationHistory();
 
         Layout();
         SetStatusText(L"Ready.");
@@ -1271,43 +1238,6 @@ private:
         LONG mapH = MaxLong(100L, height - mapY - statusH - pad - noteAreaH);
 
         MoveWindow(m_map.Hwnd(), mapX, mapY, mapW, mapH, TRUE);
-        int historyW = 0;
-        if (m_notificationHistoryOverlay) {
-            const int notificationMargin = 12;
-            historyW = m_showNotificationHistory
-                ? MinInt(380, MaxInt(260, static_cast<int>(mapW * 0.30)))
-                : 0;
-            historyW = MinInt(historyW, MaxInt(160, static_cast<int>(mapW) - notificationMargin * 2));
-            if (m_showNotificationHistory) {
-                MoveWindow(
-                    m_notificationHistoryOverlay,
-                    static_cast<int>(mapX + mapW - historyW - notificationMargin),
-                    mapY + notificationMargin,
-                    historyW,
-                    MaxInt(120, static_cast<int>(mapH) - notificationMargin * 2),
-                    TRUE);
-                ShowWindow(m_notificationHistoryOverlay, SW_SHOW);
-                SetWindowPos(m_notificationHistoryOverlay, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            }
-            else {
-                ShowWindow(m_notificationHistoryOverlay, SW_HIDE);
-            }
-        }
-        if (m_inAppNotification) {
-            const int notificationMargin = 12;
-            int notificationW = MaxInt(180, static_cast<int>(mapW) - notificationMargin * 2);
-            if (m_showNotificationHistory && historyW > 0)
-                notificationW = MaxInt(180, notificationW - historyW - notificationMargin);
-            int notificationH = PreferredControlHeight(m_inAppNotification, 14, 44, notificationW);
-            notificationH = ClampValue(notificationH, 44, MaxInt(44, static_cast<int>(mapH) / 3));
-            MoveWindow(
-                m_inAppNotification,
-                mapX + notificationMargin,
-                mapY + notificationMargin,
-                notificationW,
-                notificationH,
-                TRUE);
-        }
         int noteY = mapY + mapH + 8;
         MoveLabelToText(m_noteLabel, mapX, noteY, static_cast<int>(mapW));
         MoveWindow(m_noteEdit, mapX, noteY + noteLabelH + 2, MaxLong(180L, mapW - 132), controlH, TRUE);
@@ -1950,51 +1880,23 @@ private:
 
     void ShowInAppIncidentNotification(const std::wstring& title, const std::wstring& body)
     {
-        if (!m_inAppNotification)
-            return;
-
-        std::wstring text = title;
-        if (!body.empty()) {
-            text += L"\r\n";
-            text += body;
-        }
-        SetWindowTextSafe(m_inAppNotification, text);
-        Layout();
-        ShowWindow(m_inAppNotification, SW_SHOW);
-        SetWindowPos(m_inAppNotification, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        AppNotification notification;
+        notification.title = title;
+        notification.body = body;
+        notification.timestamp = TimeTToText(std::time(nullptr));
+        m_map.SetActiveNotification(notification);
         KillTimer(m_hwnd, kInAppNotificationTimerId);
         SetTimer(m_hwnd, kInAppNotificationTimerId, 10 * 1000, nullptr);
     }
 
     void RenderNotificationHistory()
     {
-        if (!m_notificationHistoryOverlay)
-            return;
-
-        std::wstring text = L"Notification History\r\n\r\n";
-        if (m_notificationHistory.empty()) {
-            text += L"No notifications yet.";
-        }
-        else {
-            for (const NotificationHistoryEntry& entry : m_notificationHistory) {
-                text += L"[";
-                text += entry.timestamp;
-                text += L"] ";
-                text += entry.title;
-                if (!entry.body.empty()) {
-                    text += L"\r\n";
-                    text += entry.body;
-                }
-                text += L"\r\n\r\n";
-            }
-        }
-
-        SetWindowTextSafe(m_notificationHistoryOverlay, text);
+        m_map.SetNotificationHistory(m_notificationHistory);
     }
 
     void AddNotificationHistory(const std::wstring& title, const std::wstring& body)
     {
-        NotificationHistoryEntry entry;
+        AppNotification entry;
         entry.title = title;
         entry.body = body;
         entry.timestamp = TimeTToText(std::time(nullptr));
@@ -2475,9 +2377,9 @@ private:
         historyInfo.fType = MFT_RADIOCHECK;
         SetMenuItemInfoW(viewMenu, IDM_VIEW_NOTIFICATION_HISTORY, FALSE, &historyInfo);
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"View");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(earthquakesMenu), L"Earthquakes");
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"View");
         AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"About");
         SetMenu(m_hwnd, menu);
     }
@@ -3305,8 +3207,8 @@ private:
     {
         m_showNotificationHistory = !m_showNotificationHistory;
         UpdateNotificationHistoryMenu();
+        m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
         RenderNotificationHistory();
-        Layout();
         SaveSettings();
     }
 
@@ -3999,8 +3901,6 @@ private:
     HWND m_chatSendBtn = nullptr;
     HWND m_noteEdit = nullptr;
     HWND m_noteBtn = nullptr;
-    HWND m_inAppNotification = nullptr;
-    HWND m_notificationHistoryOverlay = nullptr;
 
     MapView m_map;
 
@@ -4008,7 +3908,7 @@ private:
     std::vector<TrafficAlert> m_filteredAlerts;
     std::vector<ChatMessage> m_chatMessages;
     std::vector<MapNote> m_notes;
-    std::vector<NotificationHistoryEntry> m_notificationHistory;
+    std::vector<AppNotification> m_notificationHistory;
     std::vector<GeoPolygon> m_incidentNotificationRegions;
     std::vector<EarthquakeEvent> m_allEarthquakes;
     std::vector<GeoPoint> m_earthquakeFilterRegion;

@@ -33,6 +33,10 @@ public:
     void SetDraftPolygon(const std::vector<GeoPoint>& points);
     void SetPolygonCaptureActive(bool active);
     void SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes);
+    void SetActiveNotification(const AppNotification& notification);
+    void ClearActiveNotification();
+    void SetNotificationHistory(const std::vector<AppNotification>& notifications);
+    void SetNotificationHistoryVisible(bool visible);
     void SetSelectedId(const std::wstring& id);
     void CenterOnAlert(const std::wstring& id);
     void FitToAlerts();

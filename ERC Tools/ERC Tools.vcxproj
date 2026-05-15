@@ -23,6 +23,7 @@
     <ClCompile Include="app_state.cpp" />
     <ClCompile Include="http.cpp" />
     <ClCompile Include="main_window.cpp" />
+    <ClCompile Include="map_overlay_ui.cpp" />
     <ClCompile Include="map_view.cpp" />
     <ClCompile Include="parsing.cpp" />
     <ClCompile Include="util.cpp" />
@@ -32,6 +33,7 @@
     <ClInclude Include="common.h" />
     <ClInclude Include="http.h" />
     <ClInclude Include="main_window.h" />
+    <ClInclude Include="map_overlay_ui.h" />
     <ClInclude Include="map_view.h" />
     <ClInclude Include="models.h" />
     <ClInclude Include="parsing.h" />
