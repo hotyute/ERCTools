@@ -280,6 +280,49 @@ static HMENU ControlId(int id)
     return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id));
 }
 
+static constexpr COLORREF kUiBackground = RGB(246, 248, 251);
+static constexpr COLORREF kUiSurface = RGB(255, 255, 255);
+static constexpr COLORREF kUiText = RGB(22, 34, 49);
+static constexpr COLORREF kUiMutedText = RGB(86, 99, 115);
+static constexpr COLORREF kUiSelection = RGB(226, 240, 255);
+
+static HBRUSH ModernWindowBrush()
+{
+    static HBRUSH brush = CreateSolidBrush(kUiBackground);
+    return brush;
+}
+
+static HBRUSH ModernInputBrush()
+{
+    static HBRUSH brush = CreateSolidBrush(kUiSurface);
+    return brush;
+}
+
+static LRESULT HandleModernCtlColor(UINT msg, WPARAM wParam)
+{
+    HDC hdc = reinterpret_cast<HDC>(wParam);
+    if (!hdc)
+        return FALSE;
+
+    SetTextColor(hdc, kUiText);
+    if (msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORBTN) {
+        SetBkColor(hdc, kUiBackground);
+        SetBkMode(hdc, TRANSPARENT);
+        return reinterpret_cast<LRESULT>(ModernWindowBrush());
+    }
+
+    SetBkColor(hdc, kUiSurface);
+    SetBkMode(hdc, OPAQUE);
+    return reinterpret_cast<LRESULT>(ModernInputBrush());
+}
+
+static void ApplyModernEditChrome(HWND hwnd)
+{
+    if (!hwnd)
+        return;
+    SendMessageW(hwnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 8));
+}
+
 static SIZE MeasureControlText(HWND hwnd, int wrapWidth = 0)
 {
     SIZE size{};
@@ -972,7 +1015,7 @@ private:
         wc.lpfnWndProc = MainWndProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.hbrBackground = ModernWindowBrush();
         wc.lpszClassName = kMainClassName;
 
         if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
@@ -1035,6 +1078,12 @@ private:
         case WM_DRAWITEM:
             return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
 
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
+
         case WM_SIZE:
             Layout();
             return 0;
@@ -1044,8 +1093,7 @@ private:
             return 0;
 
         case WM_NOTIFY:
-            OnNotify(reinterpret_cast<NMHDR*>(lParam));
-            return 0;
+            return OnNotify(reinterpret_cast<NMHDR*>(lParam));
 
         case WM_TIMER:
             if (wParam == kAlertRefreshTimerId)
@@ -1111,8 +1159,8 @@ private:
 
         EnableModernWindowFrame(m_hwnd);
 
-        m_font = CreateUiFont(10);
-        m_headerFont = CreateUiFont(16, FW_SEMIBOLD);
+        m_font = CreateUiFont(11);
+        m_headerFont = CreateUiFont(18, FW_SEMIBOLD);
 
         LoadSettings();
         EnsureDefaultReportTemplates();
@@ -1212,6 +1260,8 @@ private:
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
+        for (HWND h : { m_searchEdit, m_detailsEdit, m_chatHistory, m_chatEdit })
+            ApplyModernEditChrome(h);
 
         SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, region, or description"));
         SendMessageW(m_chatEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Message local responders..."));
@@ -1225,6 +1275,9 @@ private:
 
         SendMessageW(m_listView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
             LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP | LVS_EX_INFOTIP);
+        ListView_SetBkColor(m_listView, kUiSurface);
+        ListView_SetTextBkColor(m_listView, CLR_NONE);
+        ListView_SetTextColor(m_listView, kUiText);
 
         LVCOLUMNW col{};
         col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
@@ -1438,14 +1491,17 @@ private:
         }
     }
 
-    void OnNotify(NMHDR* nmh)
+    LRESULT OnNotify(NMHDR* nmh)
     {
         if (!nmh)
-            return;
+            return 0;
+
+        if (nmh->hwndFrom == m_listView && nmh->code == NM_CUSTOMDRAW)
+            return OnAlertListCustomDraw(reinterpret_cast<NMLVCUSTOMDRAW*>(nmh));
 
         if (nmh->hwndFrom == m_listView && nmh->code == LVN_ITEMCHANGED) {
             if (m_programmaticSelection)
-                return;
+                return 0;
 
             NMLISTVIEW* lv = reinterpret_cast<NMLISTVIEW*>(nmh);
             if ((lv->uChanged & LVIF_STATE) && (lv->uNewState & LVIS_SELECTED)) {
@@ -1456,6 +1512,29 @@ private:
                 }
             }
         }
+
+        return 0;
+    }
+
+    LRESULT OnAlertListCustomDraw(NMLVCUSTOMDRAW* cd)
+    {
+        if (!cd)
+            return CDRF_DODEFAULT;
+
+        switch (cd->nmcd.dwDrawStage) {
+        case CDDS_PREPAINT:
+            return CDRF_NOTIFYITEMDRAW;
+        case CDDS_ITEMPREPAINT:
+        {
+            const bool selected = (cd->nmcd.uItemState & CDIS_SELECTED) != 0;
+            const bool hot = (cd->nmcd.uItemState & CDIS_HOT) != 0;
+            cd->clrText = selected ? RGB(12, 75, 142) : kUiText;
+            cd->clrTextBk = selected ? kUiSelection : (hot ? RGB(240, 246, 253) : kUiSurface);
+            return CDRF_DODEFAULT;
+        }
+        }
+
+        return CDRF_DODEFAULT;
     }
 
     void SetStatusText(const std::wstring& text)
@@ -2762,6 +2841,11 @@ private:
         case WM_COMMAND:
             OnIncidentFiltersCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
         case WM_DRAWITEM:
             return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         case WM_CLOSE:
@@ -2780,7 +2864,7 @@ private:
             wc.lpfnWndProc = IncidentFiltersWndProc;
             wc.hInstance = m_hInst;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.hbrBackground = ModernWindowBrush();
             wc.lpszClassName = kIncidentFiltersClassName;
             RegisterClassExW(&wc);
             registered = true;
@@ -2913,6 +2997,11 @@ private:
         case WM_COMMAND:
             OnIncidentNotificationsCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
         case WM_DRAWITEM:
             return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         case WM_CLOSE:
@@ -2931,7 +3020,7 @@ private:
             wc.lpfnWndProc = IncidentNotificationsWndProc;
             wc.hInstance = m_hInst;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.hbrBackground = ModernWindowBrush();
             wc.lpszClassName = kIncidentNotificationsClassName;
             RegisterClassExW(&wc);
             registered = true;
@@ -3125,6 +3214,11 @@ private:
         case WM_COMMAND:
             OnNotificationRegionsCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
         case WM_DRAWITEM:
             return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         case WM_CLOSE:
@@ -3143,7 +3237,7 @@ private:
             wc.lpfnWndProc = NotificationRegionsWndProc;
             wc.hInstance = m_hInst;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.hbrBackground = ModernWindowBrush();
             wc.lpszClassName = kNotificationRegionsClassName;
             RegisterClassExW(&wc);
             registered = true;
@@ -3292,6 +3386,11 @@ private:
         case WM_COMMAND:
             OnNotificationRegionEditorCommand(ctx, hwnd, LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
         case WM_DRAWITEM:
             return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         case WM_CLOSE:
@@ -3317,7 +3416,7 @@ private:
             wc.lpfnWndProc = NotificationRegionEditorWndProc;
             wc.hInstance = m_hInst;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.hbrBackground = ModernWindowBrush();
             wc.lpszClassName = kNotificationRegionEditorClassName;
             RegisterClassExW(&wc);
             registered = true;
@@ -3597,8 +3696,48 @@ private:
         return refs;
     }
 
+    static std::vector<std::wstring> ExtractRoadsOrgSignPanelItems(const std::wstring& fragment, const std::wstring& currentRoad)
+    {
+        std::wstring text = fragment;
+        text = std::regex_replace(text, std::wregex(LR"(<\s*hr\b[^>]*>)", std::regex_constants::icase), L"\n");
+        text = std::regex_replace(text, std::wregex(LR"(<\s*br\b[^>]*>)", std::regex_constants::icase), L"\n");
+        text = std::regex_replace(text, std::wregex(LR"(<[^>]+>)"), L" ");
+        text = DecodeBasicHtmlEntities(text);
+
+        std::vector<std::wstring> items;
+        size_t pos = 0;
+        while (pos <= text.size()) {
+            size_t next = text.find_first_of(L"\r\n", pos);
+            std::wstring line = Trim(text.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos));
+            if (!line.empty()) {
+                std::wstring lower = ToLower(line);
+                if (lower != L"link" && lower != L"details" && lower != L"lanes" && lower != L"signs")
+                    PushUniqueText(items, line);
+            }
+            if (next == std::wstring::npos)
+                break;
+            pos = next + 1;
+            while (pos < text.size() && (text[pos] == L'\r' || text[pos] == L'\n'))
+                ++pos;
+        }
+
+        std::wstring current = ToLower(Trim(currentRoad));
+        if (!current.empty()) {
+            items.erase(
+                std::remove_if(items.begin(), items.end(), [&](const std::wstring& item) {
+                    return ToLower(item) == current;
+                    }),
+                items.end());
+        }
+        return items;
+    }
+
     static std::wstring ExtractRoadsOrgDataFromFragment(const std::wstring& fragment, const std::wstring& currentRoad)
     {
+        std::vector<std::wstring> signPanelItems = ExtractRoadsOrgSignPanelItems(fragment, currentRoad);
+        if (!signPanelItems.empty())
+            return JoinTemplateItems(signPanelItems);
+
         std::wstring text = StripTemplateHtmlTags(fragment);
         std::vector<std::wstring> refs = ExtractRoadRefsFromText(text, currentRoad);
         if (!refs.empty())
@@ -3734,6 +3873,9 @@ private:
             if (rowData.empty())
                 rowData = ExtractRoadsOrgDataFromFragment(rowHtml, road);
         }
+
+        if (!rowData.empty())
+            return rowData;
 
         if (!detailHref.empty()) {
             std::string detailBody;
@@ -3973,7 +4115,11 @@ private:
     std::wstring RenderReportTemplate(const ReportTemplate& reportTemplate) const
     {
         std::wstring output = reportTemplate.body;
-        for (const auto& item : m_templateWizardVariables)
+        std::vector<std::pair<std::wstring, std::wstring>> variables = m_templateWizardVariables;
+        std::sort(variables.begin(), variables.end(), [](const auto& a, const auto& b) {
+            return a.first.size() > b.first.size();
+            });
+        for (const auto& item : variables)
             ReplaceAllText(output, item.first, item.second);
         return output;
     }
@@ -4029,6 +4175,11 @@ private:
         case WM_COMMAND:
             OnTemplatesWizardCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
         case WM_DRAWITEM:
             return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         case WM_CLOSE:
@@ -4064,7 +4215,7 @@ private:
             wc.lpfnWndProc = TemplatesWizardWndProc;
             wc.hInstance = m_hInst;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.hbrBackground = ModernWindowBrush();
             wc.lpszClassName = kTemplatesWizardClassName;
             RegisterClassExW(&wc);
             registered = true;
@@ -4221,6 +4372,11 @@ private:
         case WM_COMMAND:
             OnTemplatesEditorCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
         case WM_DRAWITEM:
             return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         case WM_CLOSE:
@@ -4240,7 +4396,7 @@ private:
             wc.lpfnWndProc = TemplatesEditorWndProc;
             wc.hInstance = m_hInst;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.hbrBackground = ModernWindowBrush();
             wc.lpszClassName = kTemplatesEditorClassName;
             RegisterClassExW(&wc);
             registered = true;
@@ -4401,7 +4557,9 @@ private:
 
     std::wstring EarthquakeQueryUrl() const
     {
-        return L"https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&minlatitude=43.33464&maxlatitude=61.44499&minlongitude=-27.02637&maxlongitude=26.41113&orderby=time&limit=20000";
+        // Equivalent GeoJSON query for the requested USGS map extent:
+        // https://earthquake.usgs.gov/earthquakes/map/?extent=-82.94033,-81.5625&extent=82.9834,480.9375
+        return L"https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&minlatitude=-82.94033&maxlatitude=82.9834&minlongitude=-180&maxlongitude=180&orderby=time&limit=20000";
     }
 
     void FetchEarthquakesAsync(bool notify)
@@ -4580,6 +4738,11 @@ private:
         case WM_COMMAND:
             OnEarthquakeListCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
         case WM_DRAWITEM:
             return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         case WM_CLOSE:
@@ -4600,7 +4763,7 @@ private:
             wc.lpfnWndProc = EarthquakeListWndProc;
             wc.hInstance = m_hInst;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.hbrBackground = ModernWindowBrush();
             wc.lpszClassName = kEarthquakeListClassName;
             RegisterClassExW(&wc);
             registered = true;
@@ -4786,6 +4949,11 @@ private:
         case WM_COMMAND:
             OnEarthquakeNotificationsCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
         case WM_DRAWITEM:
             return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         case WM_CLOSE:
@@ -4804,7 +4972,7 @@ private:
             wc.lpfnWndProc = EarthquakeNotificationsWndProc;
             wc.hInstance = m_hInst;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.hbrBackground = ModernWindowBrush();
             wc.lpszClassName = kEarthquakeNotificationsClassName;
             RegisterClassExW(&wc);
             registered = true;
@@ -4952,6 +5120,11 @@ private:
         case WM_COMMAND:
             OnSettingsCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
         case WM_DRAWITEM:
             return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         case WM_CLOSE:
@@ -4970,7 +5143,7 @@ private:
             wc.lpfnWndProc = SettingsWndProc;
             wc.hInstance = m_hInst;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            wc.hbrBackground = ModernWindowBrush();
             wc.lpszClassName = kSettingsClassName;
             RegisterClassExW(&wc);
             registered = true;
