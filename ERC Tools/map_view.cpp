@@ -82,6 +82,10 @@ constexpr float kOverlayUiMargin = 12.0f;
 constexpr float kOverlayUiPadding = 14.0f;
 constexpr float kOverlayUiGap = 10.0f;
 constexpr float kNotificationScrollStep = 56.0f;
+constexpr float kNoteBubbleWidth = 204.0f;
+constexpr float kNoteBubbleHeight = 64.0f;
+constexpr float kNoteEditorWidth = 300.0f;
+constexpr float kNoteEditorMinHeight = 144.0f;
 
 // Boundary rendering.
 constexpr double kBoundaryDrawMarginPixels = 512.0;
@@ -95,9 +99,18 @@ std::atomic<int> g_activeTileDownloads{ 0 };
 
 class MapView::Impl
 {
+    enum class NoteEditorMode
+    {
+        None,
+        New,
+        Edit
+    };
+
 public:
     using SelectCallback = std::function<void(const std::wstring&)>;
-    using NoteLocationCallback = std::function<void(double lat, double lon)>;
+    using NoteCreateCallback = std::function<void(const std::wstring& text, double lat, double lon)>;
+    using NoteUpdateCallback = std::function<void(size_t index, const std::wstring& text)>;
+    using NoteDeleteCallback = std::function<void(size_t index)>;
     using PolygonPointCallback = std::function<void(double lat, double lon)>;
 
     bool Create(HWND parent, int x, int y, int w, int h)
@@ -129,9 +142,19 @@ public:
         m_onSelect = std::move(cb);
     }
 
-    void SetNoteLocationCallback(NoteLocationCallback cb)
+    void SetNoteCreateCallback(NoteCreateCallback cb)
     {
-        m_onNoteLocation = std::move(cb);
+        m_onNoteCreate = std::move(cb);
+    }
+
+    void SetNoteUpdateCallback(NoteUpdateCallback cb)
+    {
+        m_onNoteUpdate = std::move(cb);
+    }
+
+    void SetNoteDeleteCallback(NoteDeleteCallback cb)
+    {
+        m_onNoteDelete = std::move(cb);
     }
 
     void SetPolygonPointCallback(PolygonPointCallback cb)
@@ -152,6 +175,8 @@ public:
             return;
 
         m_notes = notes;
+        if (m_noteEditorMode == NoteEditorMode::Edit && m_noteEditorIndex >= m_notes.size())
+            CancelNoteEditor();
         InvalidateSceneCache();
         Invalidate();
     }
@@ -472,11 +497,15 @@ private:
             return 1;
 
         case WM_LBUTTONDOWN:
+            SetFocus(m_hwnd);
             if (HitNotificationInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
                 SetCapture(m_hwnd);
                 m_notificationUiMouseDown = true;
                 return 0;
             }
+            EnsureDeviceResources();
+            if (m_rt && HandleNotePointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
             SetCapture(m_hwnd);
             m_notificationUiMouseDown = false;
             m_mouseDown.x = GET_X_LPARAM(lParam);
@@ -510,6 +539,16 @@ private:
         case WM_MOUSEWHEEL:
             OnMouseWheel(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), GET_WHEEL_DELTA_WPARAM(wParam));
             return 0;
+
+        case WM_KEYDOWN:
+            if (HandleNoteEditorKeyDown(wParam))
+                return 0;
+            break;
+
+        case WM_CHAR:
+            if (HandleNoteEditorChar(wParam))
+                return 0;
+            break;
 
         case WM_APP_TILE_READY:
             InvalidateRect(m_hwnd, nullptr, FALSE);
@@ -720,9 +759,324 @@ private:
         return bestId;
     }
 
+    D2D1_RECT_F ClampRectToView(D2D1_RECT_F rect, const ViewState& view) const
+    {
+        const float margin = 8.0f;
+        const float width = rect.right - rect.left;
+        const float height = rect.bottom - rect.top;
+        if (rect.right > view.width - margin) {
+            rect.left = static_cast<float>(view.width) - margin - width;
+            rect.right = rect.left + width;
+        }
+        if (rect.left < margin) {
+            rect.left = margin;
+            rect.right = rect.left + width;
+        }
+        if (rect.bottom > view.height - margin) {
+            rect.top = static_cast<float>(view.height) - margin - height;
+            rect.bottom = rect.top + height;
+        }
+        if (rect.top < margin) {
+            rect.top = margin;
+            rect.bottom = rect.top + height;
+        }
+        return rect;
+    }
+
+    D2D1_RECT_F BuildNoteBubbleRect(const ViewState& view, D2D1_POINT_2F anchor, float width, float height) const
+    {
+        D2D1_RECT_F rect = D2D1::RectF(anchor.x + 10.0f, anchor.y - height + 20.0f, anchor.x + 10.0f + width, anchor.y + 20.0f);
+        if (rect.right > view.width - 8.0f)
+            rect = D2D1::RectF(anchor.x - width - 12.0f, anchor.y - height + 20.0f, anchor.x - 12.0f, anchor.y + 20.0f);
+        if (rect.top < 8.0f)
+            rect = D2D1::RectF(rect.left, anchor.y + 18.0f, rect.right, anchor.y + 18.0f + height);
+        return ClampRectToView(rect, view);
+    }
+
+    D2D1_RECT_F BuildAddNoteButtonRect() const
+    {
+        return D2D1::RectF(30.0f, 104.0f, 122.0f, 136.0f);
+    }
+
+    D2D1_RECT_F BuildAddNotePromptRect() const
+    {
+        return D2D1::RectF(132.0f, 104.0f, 334.0f, 136.0f);
+    }
+
+    D2D1_RECT_F BuildNoteCloseRect(const D2D1_RECT_F& bubble) const
+    {
+        return D2D1::RectF(bubble.right - 24.0f, bubble.top + 6.0f, bubble.right - 6.0f, bubble.top + 24.0f);
+    }
+
+    D2D1_RECT_F BuildNoteEditorRect(const ViewState& view) const
+    {
+        D2D1_POINT_2F anchor = GeoToScreen(view, m_noteEditorLat, m_noteEditorLon);
+        float textHeight = 46.0f;
+        if (m_overlayUi.BodyFormat())
+            textHeight = MaxValue(46.0f, m_overlayUi.MeasureTextHeight(m_noteEditorText.empty() ? L" " : m_noteEditorText, m_overlayUi.BodyFormat(), kNoteEditorWidth - 32.0f));
+        const float height = ClampValue(94.0f + textHeight, kNoteEditorMinHeight, 320.0f);
+        return BuildNoteBubbleRect(view, anchor, kNoteEditorWidth, height);
+    }
+
+    void StartDraftNoteAt(double lat, double lon)
+    {
+        m_noteEditorMode = NoteEditorMode::New;
+        m_noteEditorIndex = static_cast<size_t>(-1);
+        m_noteEditorLat = lat;
+        m_noteEditorLon = lon;
+        m_noteEditorText.clear();
+        m_noteEditorCursor = 0;
+        m_addNoteMode = false;
+        SetFocus(m_hwnd);
+        Invalidate();
+    }
+
+    void StartEditNote(size_t index)
+    {
+        if (index >= m_notes.size())
+            return;
+
+        m_noteEditorMode = NoteEditorMode::Edit;
+        m_noteEditorIndex = index;
+        m_noteEditorLat = m_notes[index].latitude;
+        m_noteEditorLon = m_notes[index].longitude;
+        m_noteEditorText = m_notes[index].text;
+        m_noteEditorCursor = m_noteEditorText.size();
+        m_addNoteMode = false;
+        SetFocus(m_hwnd);
+        Invalidate();
+    }
+
+    void CancelNoteEditor()
+    {
+        m_noteEditorMode = NoteEditorMode::None;
+        m_noteEditorIndex = static_cast<size_t>(-1);
+        m_noteEditorText.clear();
+        m_noteEditorCursor = 0;
+        Invalidate();
+    }
+
+    void CommitNoteEditor()
+    {
+        std::wstring text = Trim(m_noteEditorText);
+        if (text.empty()) {
+            CancelNoteEditor();
+            return;
+        }
+
+        if (m_noteEditorMode == NoteEditorMode::New) {
+            if (m_onNoteCreate)
+                m_onNoteCreate(text, m_noteEditorLat, m_noteEditorLon);
+        }
+        else if (m_noteEditorMode == NoteEditorMode::Edit) {
+            if (m_onNoteUpdate && m_noteEditorIndex < m_notes.size())
+                m_onNoteUpdate(m_noteEditorIndex, text);
+        }
+        CancelNoteEditor();
+    }
+
+    void DeleteNoteAt(size_t index)
+    {
+        if (index >= m_notes.size())
+            return;
+
+        if (m_onNoteDelete)
+            m_onNoteDelete(index);
+        if (m_noteEditorMode == NoteEditorMode::Edit && m_noteEditorIndex == index)
+            CancelNoteEditor();
+        Invalidate();
+    }
+
+    void InsertNoteEditorText(wchar_t ch)
+    {
+        if (m_noteEditorMode == NoteEditorMode::None)
+            return;
+        if (ch < 32 && ch != L'\n' && ch != L'\r')
+            return;
+        if (ch == L'\r')
+            ch = L'\n';
+
+        m_noteEditorCursor = MinValue(m_noteEditorCursor, m_noteEditorText.size());
+        m_noteEditorText.insert(m_noteEditorText.begin() + static_cast<std::ptrdiff_t>(m_noteEditorCursor), ch);
+        ++m_noteEditorCursor;
+        Invalidate();
+    }
+
+    bool HandleNoteEditorKeyDown(WPARAM key)
+    {
+        if (m_noteEditorMode == NoteEditorMode::None)
+            return false;
+
+        switch (key) {
+        case VK_ESCAPE:
+            CancelNoteEditor();
+            return true;
+        case VK_RETURN:
+            if (GetKeyState(VK_CONTROL) & 0x8000) {
+                CommitNoteEditor();
+                return true;
+            }
+            return false;
+        case VK_BACK:
+            if (m_noteEditorCursor > 0 && !m_noteEditorText.empty()) {
+                m_noteEditorText.erase(m_noteEditorText.begin() + static_cast<std::ptrdiff_t>(m_noteEditorCursor - 1));
+                --m_noteEditorCursor;
+                Invalidate();
+            }
+            return true;
+        case VK_DELETE:
+            if (m_noteEditorCursor < m_noteEditorText.size()) {
+                m_noteEditorText.erase(m_noteEditorText.begin() + static_cast<std::ptrdiff_t>(m_noteEditorCursor));
+                Invalidate();
+            }
+            return true;
+        case VK_LEFT:
+            if (m_noteEditorCursor > 0) {
+                --m_noteEditorCursor;
+                Invalidate();
+            }
+            return true;
+        case VK_RIGHT:
+            if (m_noteEditorCursor < m_noteEditorText.size()) {
+                ++m_noteEditorCursor;
+                Invalidate();
+            }
+            return true;
+        case VK_HOME:
+            m_noteEditorCursor = 0;
+            Invalidate();
+            return true;
+        case VK_END:
+            m_noteEditorCursor = m_noteEditorText.size();
+            Invalidate();
+            return true;
+        }
+        return false;
+    }
+
+    bool HandleNoteEditorChar(WPARAM ch)
+    {
+        if (m_noteEditorMode == NoteEditorMode::None)
+            return false;
+        if (ch == L'\b' || ch == 0x1B)
+            return true;
+        InsertNoteEditorText(static_cast<wchar_t>(ch));
+        return true;
+    }
+
+    struct NoteHit
+    {
+        bool hit = false;
+        bool close = false;
+        size_t index = 0;
+    };
+
+    NoteHit HitTestNote(int x, int y) const
+    {
+        NoteHit result;
+        const ViewState view = BuildViewState(80.0);
+
+        for (size_t i = m_notes.size(); i > 0; --i) {
+            const size_t index = i - 1;
+            if (m_noteEditorMode == NoteEditorMode::Edit && m_noteEditorIndex == index)
+                continue;
+            const MapNote& note = m_notes[index];
+            if (!IsGeoPointInView(view, note.latitude, note.longitude))
+                continue;
+
+            D2D1_POINT_2F anchor = GeoToScreen(view, note.latitude, note.longitude);
+            D2D1_RECT_F rect = BuildNoteBubbleRect(view, anchor, kNoteBubbleWidth, kNoteBubbleHeight);
+            if (PointInRect(x, y, BuildNoteCloseRect(rect))) {
+                result.hit = true;
+                result.close = true;
+                result.index = index;
+                return result;
+            }
+            if (PointInRect(x, y, rect)) {
+                result.hit = true;
+                result.index = index;
+                return result;
+            }
+        }
+
+        return result;
+    }
+
+    bool HitNoteInterface(int x, int y) const
+    {
+        if (PointInRect(x, y, BuildAddNoteButtonRect()))
+            return true;
+        if (m_addNoteMode && PointInRect(x, y, BuildAddNotePromptRect()))
+            return true;
+        if (m_noteEditorMode != NoteEditorMode::None) {
+            D2D1_RECT_F editor = BuildNoteEditorRect(BuildViewState());
+            if (PointInRect(x, y, editor))
+                return true;
+        }
+        return HitTestNote(x, y).hit;
+    }
+
+    bool HandleNotePointerDown(int x, int y)
+    {
+        if (!m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return false;
+
+        const D2D1_RECT_F addButton = BuildAddNoteButtonRect();
+        if (PointInRect(x, y, addButton)) {
+            m_addNoteMode = !m_addNoteMode;
+            if (m_addNoteMode)
+                CancelNoteEditor();
+            Invalidate();
+            return true;
+        }
+
+        if (m_noteEditorMode != NoteEditorMode::None) {
+            const D2D1_RECT_F editor = BuildNoteEditorRect(BuildViewState());
+            const D2D1_RECT_F closeRect = BuildNoteCloseRect(editor);
+            const D2D1_RECT_F saveRect = D2D1::RectF(editor.right - 156.0f, editor.bottom - 42.0f, editor.right - 84.0f, editor.bottom - 12.0f);
+            const D2D1_RECT_F cancelRect = D2D1::RectF(editor.right - 78.0f, editor.bottom - 42.0f, editor.right - 12.0f, editor.bottom - 12.0f);
+            if (PointInRect(x, y, closeRect)) {
+                if (m_noteEditorMode == NoteEditorMode::Edit && m_noteEditorIndex < m_notes.size())
+                    DeleteNoteAt(m_noteEditorIndex);
+                else
+                    CancelNoteEditor();
+                return true;
+            }
+            if (PointInRect(x, y, saveRect)) {
+                CommitNoteEditor();
+                return true;
+            }
+            if (PointInRect(x, y, cancelRect)) {
+                CancelNoteEditor();
+                return true;
+            }
+            if (PointInRect(x, y, editor)) {
+                SetFocus(m_hwnd);
+                return true;
+            }
+        }
+
+        NoteHit hit = HitTestNote(x, y);
+        if (hit.hit) {
+            if (hit.close)
+                DeleteNoteAt(hit.index);
+            else
+                StartEditNote(hit.index);
+            return true;
+        }
+
+        if (m_addNoteMode) {
+            GeoPoint geo = ScreenToGeo(x, y);
+            StartDraftNoteAt(geo.lat, geo.lon);
+            return true;
+        }
+
+        return false;
+    }
+
     void OnMouseMove(int x, int y, UINT buttons)
     {
-        if (m_notificationUiMouseDown || HitNotificationInterface(x, y)) {
+        if (m_notificationUiMouseDown || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
             if (!m_hoveredAlertId.empty()) {
                 m_hoveredAlertId.clear();
                 Invalidate();
@@ -771,7 +1125,7 @@ private:
         if (GetCapture() == m_hwnd)
             ReleaseCapture();
 
-        if (m_notificationUiMouseDown || HitNotificationInterface(x, y)) {
+        if (m_notificationUiMouseDown || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
             m_notificationUiMouseDown = false;
             m_dragging = false;
             m_interactivePan = false;
@@ -804,14 +1158,11 @@ private:
 
     void OnDoubleClick(int x, int y)
     {
-        if (HitNotificationInterface(x, y))
-            return;
-
-        if (!m_onNoteLocation)
+        if (HitNotificationInterface(x, y) || HitNoteInterface(x, y))
             return;
 
         GeoPoint geo = ScreenToGeo(x, y);
-        m_onNoteLocation(geo.lat, geo.lon);
+        StartDraftNoteAt(geo.lat, geo.lon);
     }
 
     void OnMouseWheel(int screenX, int screenY, short delta)
@@ -1820,6 +2171,9 @@ private:
         int height = view.height;
 
         for (const auto& note : m_notes) {
+            size_t noteIndex = static_cast<size_t>(&note - m_notes.data());
+            if (m_noteEditorMode == NoteEditorMode::Edit && m_noteEditorIndex == noteIndex)
+                continue;
             if (!IsGeoPointInView(view, note.latitude, note.longitude))
                 continue;
 
@@ -1831,18 +2185,100 @@ private:
             if (text.size() > 120)
                 text = text.substr(0, 117) + L"...";
 
-            D2D1_RECT_F textRect = D2D1::RectF(p.x + 24.0f, p.y - 36.0f, p.x + 204.0f, p.y + 12.0f);
-            D2D1_ROUNDED_RECT bubble = D2D1::RoundedRect(
-                D2D1::RectF(p.x + 10.0f, p.y - 44.0f, p.x + 214.0f, p.y + 20.0f),
-                10.0f,
-                10.0f);
+            D2D1_RECT_F bubbleRect = BuildNoteBubbleRect(view, p, kNoteBubbleWidth, kNoteBubbleHeight);
+            D2D1_RECT_F textRect = D2D1::RectF(bubbleRect.left + 14.0f, bubbleRect.top + 10.0f, bubbleRect.right - 30.0f, bubbleRect.bottom - 8.0f);
+            D2D1_ROUNDED_RECT bubble = D2D1::RoundedRect(bubbleRect, 10.0f, 10.0f);
             m_rt->FillRoundedRectangle(bubble, m_panelBrush.Get());
             m_rt->DrawRoundedRectangle(bubble, m_noteBrush.Get(), 1.5f);
             m_rt->FillEllipse(D2D1::Ellipse(p, 8.0f, 8.0f), m_noteBrush.Get());
-            m_rt->DrawLine(p, D2D1::Point2F(p.x + 12.0f, p.y - 6.0f), m_noteBrush.Get(), 2.0f);
+            m_rt->DrawLine(p, D2D1::Point2F(bubbleRect.left + 6.0f, bubbleRect.bottom - 12.0f), m_noteBrush.Get(), 2.0f);
+            D2D1_RECT_F closeRect = BuildNoteCloseRect(bubbleRect);
+            D2D1_POINT_2F c = D2D1::Point2F((closeRect.left + closeRect.right) * 0.5f, (closeRect.top + closeRect.bottom) * 0.5f);
+            m_rt->DrawEllipse(D2D1::Ellipse(c, 8.0f, 8.0f), m_noteBrush.Get(), 1.2f);
+            m_rt->DrawLine(D2D1::Point2F(c.x - 4.0f, c.y - 4.0f), D2D1::Point2F(c.x + 4.0f, c.y + 4.0f), m_textBrush.Get(), 1.6f);
+            m_rt->DrawLine(D2D1::Point2F(c.x + 4.0f, c.y - 4.0f), D2D1::Point2F(c.x - 4.0f, c.y + 4.0f), m_textBrush.Get(), 1.6f);
             if (m_noteTextFormat && !text.empty())
                 m_rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), m_noteTextFormat.Get(), textRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
+    }
+
+    void DrawNoteEditor(const ViewState& view)
+    {
+        if (m_noteEditorMode == NoteEditorMode::None || !m_rt)
+            return;
+
+        const D2D1_POINT_2F anchor = GeoToScreen(view, m_noteEditorLat, m_noteEditorLon);
+        const D2D1_RECT_F rect = BuildNoteEditorRect(view);
+        m_rt->DrawLine(anchor, D2D1::Point2F(rect.left + 8.0f, rect.bottom - 18.0f), m_noteBrush.Get(), 2.0f);
+        m_rt->FillEllipse(D2D1::Ellipse(anchor, 8.0f, 8.0f), m_noteBrush.Get());
+
+        D2D1_ROUNDED_RECT bubble = D2D1::RoundedRect(rect, 12.0f, 12.0f);
+        m_rt->FillRoundedRectangle(bubble, m_panelBrush.Get());
+        m_rt->DrawRoundedRectangle(bubble, m_noteBrush.Get(), 1.7f);
+
+        const std::wstring title = m_noteEditorMode == NoteEditorMode::New ? L"New map note" : L"Edit map note";
+        D2D1_RECT_F titleRect = D2D1::RectF(rect.left + 14.0f, rect.top + 10.0f, rect.right - 38.0f, rect.top + 34.0f);
+        m_overlayUi.DrawLabel(title, m_overlayUi.TitleFormat(), titleRect);
+
+        D2D1_RECT_F closeRect = BuildNoteCloseRect(rect);
+        OverlayButton closeButton;
+        closeButton.text = L"x";
+        closeButton.bounds = closeRect;
+        m_overlayUi.DrawButton(closeButton);
+
+        OverlayTextBox textBox;
+        textBox.text = m_noteEditorText;
+        textBox.placeholder = L"Type note text here...";
+        textBox.bounds = D2D1::RectF(rect.left + 12.0f, rect.top + 42.0f, rect.right - 12.0f, rect.bottom - 54.0f);
+        textBox.focused = true;
+        m_overlayUi.DrawTextBox(textBox);
+
+        const bool showCaret = (GetTickCount64() / 550) % 2 == 0;
+        if (showCaret && m_noteEditorText.empty()) {
+            m_rt->DrawLine(
+                D2D1::Point2F(textBox.bounds.left + 10.0f, textBox.bounds.top + 10.0f),
+                D2D1::Point2F(textBox.bounds.left + 10.0f, textBox.bounds.bottom - 10.0f),
+                m_overlayUi.AccentBrush(),
+                1.4f);
+        }
+
+        OverlayButton saveButton;
+        saveButton.text = L"Save";
+        saveButton.bounds = D2D1::RectF(rect.right - 156.0f, rect.bottom - 42.0f, rect.right - 84.0f, rect.bottom - 12.0f);
+        m_overlayUi.DrawButton(saveButton);
+
+        OverlayButton cancelButton;
+        cancelButton.text = L"Cancel";
+        cancelButton.bounds = D2D1::RectF(rect.right - 78.0f, rect.bottom - 42.0f, rect.right - 12.0f, rect.bottom - 12.0f);
+        m_overlayUi.DrawButton(cancelButton);
+    }
+
+    void DrawNoteToolbar()
+    {
+        if (!m_rt)
+            return;
+
+        OverlayButton addButton;
+        addButton.text = m_addNoteMode ? L"Adding" : L"+ Note";
+        addButton.bounds = BuildAddNoteButtonRect();
+        addButton.hot = m_addNoteMode;
+        m_overlayUi.DrawButton(addButton);
+
+        if (m_addNoteMode) {
+            D2D1_RECT_F promptRect = BuildAddNotePromptRect();
+            m_overlayUi.DrawGlassPanel(promptRect, 8.0f);
+            D2D1_RECT_F textRect = D2D1::RectF(promptRect.left + 10.0f, promptRect.top + 7.0f, promptRect.right - 10.0f, promptRect.bottom - 4.0f);
+            m_overlayUi.DrawLabel(L"Click the map to place the note", m_overlayUi.ControlFormat(), textRect);
+        }
+    }
+
+    void DrawNoteInterface(const ViewState& view)
+    {
+        if (!m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return;
+
+        DrawNoteToolbar();
+        DrawNoteEditor(view);
     }
 
     void DrawMapChrome()
@@ -2059,6 +2495,7 @@ private:
 
             DrawMapChrome();
             DrawAlertOverlay(overlayView);
+            DrawNoteInterface(view);
             DrawNotificationInterface(view);
 
             HRESULT hr = m_rt->EndDraw();
@@ -2368,7 +2805,9 @@ private:
     std::vector<EarthquakeEvent> m_earthquakes;
     std::wstring m_selectedId;
     SelectCallback m_onSelect;
-    NoteLocationCallback m_onNoteLocation;
+    NoteCreateCallback m_onNoteCreate;
+    NoteUpdateCallback m_onNoteUpdate;
+    NoteDeleteCallback m_onNoteDelete;
     PolygonPointCallback m_onPolygonPoint;
 
     int m_zoom = kDefaultZoom;
@@ -2380,10 +2819,17 @@ private:
     bool m_dragging = false;
     bool m_interactivePan = false;
     bool m_notificationUiMouseDown = false;
+    bool m_addNoteMode = false;
     bool m_polygonCaptureActive = false;
     bool m_trackingMouseLeave = false;
     int m_interactiveTileRequestsThisFrame = 0;
     std::wstring m_hoveredAlertId;
+    NoteEditorMode m_noteEditorMode = NoteEditorMode::None;
+    size_t m_noteEditorIndex = static_cast<size_t>(-1);
+    std::wstring m_noteEditorText;
+    size_t m_noteEditorCursor = 0;
+    double m_noteEditorLat = 0.0;
+    double m_noteEditorLon = 0.0;
     AppNotification m_activeNotification;
     std::vector<AppNotification> m_notificationHistory;
     bool m_hasActiveNotification = false;
@@ -2453,9 +2899,19 @@ void MapView::SetSelectCallback(SelectCallback cb)
     m_impl->SetSelectCallback(std::move(cb));
 }
 
-void MapView::SetNoteLocationCallback(NoteLocationCallback cb)
+void MapView::SetNoteCreateCallback(NoteCreateCallback cb)
 {
-    m_impl->SetNoteLocationCallback(std::move(cb));
+    m_impl->SetNoteCreateCallback(std::move(cb));
+}
+
+void MapView::SetNoteUpdateCallback(NoteUpdateCallback cb)
+{
+    m_impl->SetNoteUpdateCallback(std::move(cb));
+}
+
+void MapView::SetNoteDeleteCallback(NoteDeleteCallback cb)
+{
+    m_impl->SetNoteDeleteCallback(std::move(cb));
 }
 
 void MapView::SetPolygonPointCallback(PolygonPointCallback cb)

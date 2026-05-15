@@ -25,9 +25,6 @@ constexpr int IDC_SERVER_EDIT = 1013;
 constexpr int IDC_CHAT_HISTORY = 1015;
 constexpr int IDC_CHAT_EDIT = 1016;
 constexpr int IDC_CHAT_SEND_BTN = 1017;
-constexpr int IDC_NOTE_EDIT = 1018;
-constexpr int IDC_NOTE_BTN = 1019;
-constexpr int IDC_NOTE_LABEL = 1020;
 constexpr int IDC_PANEL_TAB_BTN = 1021;
 constexpr int IDM_FILE_SETTINGS = 2001;
 constexpr int IDM_FILE_EXIT = 2002;
@@ -137,7 +134,9 @@ enum class ServerAction
 {
     Poll,
     SendChat,
-    SendNote
+    SendNote,
+    UpdateNote,
+    DeleteNote
 };
 
 struct ServerResult
@@ -172,6 +171,51 @@ static std::wstring AppendPath(std::wstring base, const wchar_t* path)
     while (!base.empty() && base.back() == L'/')
         base.pop_back();
     return base + path;
+}
+
+static std::wstring UrlEncodePathSegment(const std::wstring& value)
+{
+    std::string utf8 = WideToUtf8(value);
+    std::wstring encoded;
+    encoded.reserve(utf8.size());
+    const wchar_t* hex = L"0123456789ABCDEF";
+    for (unsigned char ch : utf8) {
+        const bool safe =
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') ||
+            ch == '-' || ch == '_' || ch == '.' || ch == '~';
+        if (safe) {
+            encoded.push_back(static_cast<wchar_t>(ch));
+        }
+        else {
+            encoded.push_back(L'%');
+            encoded.push_back(hex[(ch >> 4) & 0x0F]);
+            encoded.push_back(hex[ch & 0x0F]);
+        }
+    }
+    return encoded;
+}
+
+static std::wstring AppendNoteIdPath(const std::wstring& server, const std::wstring& noteId)
+{
+    return AppendPath(server, L"/api/notes/") + UrlEncodePathSegment(noteId);
+}
+
+static std::string BuildNoteJsonBody(const MapNote& note)
+{
+    std::string body = "{";
+    if (!note.id.empty() && note.id.rfind(L"local-", 0) != 0)
+        body += "\"id\":" + JsonEscape(note.id) + ",";
+    body += "\"author\":" + JsonEscape(note.author.empty() ? L"ERCTools" : note.author) +
+        ",\"text\":" + JsonEscape(note.text) +
+        ",\"latitude\":" + std::to_string(note.latitude) +
+        ",\"longitude\":" + std::to_string(note.longitude) +
+        ",\"lat\":" + std::to_string(note.latitude) +
+        ",\"lon\":" + std::to_string(note.longitude) +
+        ",\"x\":" + std::to_string(note.longitude) +
+        ",\"y\":" + std::to_string(note.latitude) + "}";
+    return body;
 }
 
 static int MaxInt(int a, int b)
@@ -986,7 +1030,6 @@ private:
         m_headerLabel = CreateAutoLabel(m_hwnd, IDC_HEADER_LABEL, L"Traffic England Alerts", 0, 0, m_headerFont);
         m_searchLabel = CreateAutoLabel(m_hwnd, IDC_SEARCH_LABEL, L"Search");
         m_severityLabel = CreateAutoLabel(m_hwnd, IDC_SEVERITY_LABEL, L"Severity");
-        m_noteLabel = CreateAutoLabel(m_hwnd, IDC_NOTE_LABEL, L"Map note (double-click map to choose a location)");
 
         m_panelTabBtn = CreateWindowExW(
             0,
@@ -1067,14 +1110,6 @@ private:
             0, L"BUTTON", L"Send", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_DEFPUSHBUTTON,
             0, 0, 0, 0, m_hwnd, ControlId(IDC_CHAT_SEND_BTN), m_hInst, nullptr);
 
-        m_noteEdit = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            0, 0, 0, 0, m_hwnd, ControlId(IDC_NOTE_EDIT), m_hInst, nullptr);
-
-        m_noteBtn = CreateWindowExW(
-            0, L"BUTTON", L"Leave note", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON,
-            0, 0, 0, 0, m_hwnd, ControlId(IDC_NOTE_BTN), m_hInst, nullptr);
-
         m_statusBar = CreateWindowExW(
             0,
             STATUSCLASSNAMEW,
@@ -1087,20 +1122,19 @@ private:
             nullptr);
 
         if (!m_headerLabel || !m_searchLabel || !m_severityLabel ||
-            !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_noteLabel || !m_noteEdit || !m_noteBtn || !m_statusBar)
+            !m_refreshBtn || !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_statusBar)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_noteEdit, m_noteBtn, m_statusBar }) {
+        for (HWND h : { m_panelTabBtn, m_refreshBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_statusBar }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
 
         SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, region, or description"));
         SendMessageW(m_chatEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Message local responders..."));
-        SendMessageW(m_noteEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Note text for the selected map location"));
 
         SendMessageW(m_severityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All"));
         SendMessageW(m_severityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Severe"));
@@ -1144,12 +1178,14 @@ private:
         m_map.SetSelectCallback([this](const std::wstring& id) {
             SelectAlertById(id, true);
             });
-        m_map.SetNoteLocationCallback([this](double lat, double lon) {
-            m_pendingNoteLat = lat;
-            m_pendingNoteLon = lon;
-            m_hasPendingNoteLocation = true;
-            SetStatusText(L"Note location selected: " + std::to_wstring(lat) + L", " + std::to_wstring(lon));
-            SetFocus(m_noteEdit);
+        m_map.SetNoteCreateCallback([this](const std::wstring& text, double lat, double lon) {
+            CreateMapNote(text, lat, lon);
+            });
+        m_map.SetNoteUpdateCallback([this](size_t index, const std::wstring& text) {
+            UpdateMapNote(index, text);
+            });
+        m_map.SetNoteDeleteCallback([this](size_t index) {
+            DeleteMapNote(index);
             });
         m_map.SetPolygonPointCallback([this](double lat, double lon) {
             OnMapPolygonPoint(lat, lon);
@@ -1232,16 +1268,9 @@ private:
         int mapX = (m_isSidePanelVisible ? leftW + pad : pad);
         int mapY = bodyTop + pad;
         LONG mapW = MaxLong(100L, width - mapX - pad);
-        const int noteLabelW = AutoLabelWidth(m_noteLabel, static_cast<int>(mapW));
-        const int noteLabelH = AutoLabelHeight(m_noteLabel, labelH, noteLabelW);
-        const int noteAreaH = noteLabelH + 2 + controlH + 8;
-        LONG mapH = MaxLong(100L, height - mapY - statusH - pad - noteAreaH);
+        LONG mapH = MaxLong(100L, height - mapY - statusH - pad);
 
         MoveWindow(m_map.Hwnd(), mapX, mapY, mapW, mapH, TRUE);
-        int noteY = mapY + mapH + 8;
-        MoveLabelToText(m_noteLabel, mapX, noteY, static_cast<int>(mapW));
-        MoveWindow(m_noteEdit, mapX, noteY + noteLabelH + 2, MaxLong(180L, mapW - 132), controlH, TRUE);
-        MoveWindow(m_noteBtn, mapX + mapW - 122, noteY + noteLabelH + 2, 122, controlH, TRUE);
 
         const int tabW = 24;
         const int tabH = 72;
@@ -1326,11 +1355,6 @@ private:
         case IDC_CHAT_SEND_BTN:
             if (code == BN_CLICKED)
                 SendChatAsync();
-            break;
-
-        case IDC_NOTE_BTN:
-            if (code == BN_CLICKED)
-                SendNoteAsync();
             break;
         }
     }
@@ -2199,45 +2223,37 @@ private:
             }).detach();
     }
 
-    void SendNoteAsync()
+    static bool IsLocalOnlyNoteId(const std::wstring& id)
     {
-        std::wstring text = Trim(GetWindowTextString(m_noteEdit));
-        if (text.empty()) {
-            SetStatusText(L"Type note text first.");
-            return;
-        }
-        if (!m_hasPendingNoteLocation) {
-            SetStatusText(L"Double-click the map to choose where the note belongs.");
-            return;
-        }
+        return id.empty() || id.rfind(L"local-", 0) == 0;
+    }
 
+    void CreateMapNote(const std::wstring& text, double lat, double lon)
+    {
         MapNote note;
+        note.id = L"local-" + std::to_wstring(GetTickCount64());
         note.author = L"Me";
         note.text = text;
         note.timestamp = L"pending";
-        note.latitude = m_pendingNoteLat;
-        note.longitude = m_pendingNoteLon;
+        note.latitude = lat;
+        note.longitude = lon;
         m_notes.push_back(note);
         m_map.SetNotes(m_notes);
-        SetWindowTextSafe(m_noteEdit, L"");
+        SetStatusText(L"Map note added.");
 
         std::wstring server = ServerBaseUrl();
+        if (server.empty()) {
+            SetStatusText(L"Map note added locally.");
+            return;
+        }
+
         HWND hwnd = m_hwnd;
-        double lat = m_pendingNoteLat;
-        double lon = m_pendingNoteLon;
-        std::thread([hwnd, server, text, lat, lon]() {
+        std::string body = BuildNoteJsonBody(note);
+        std::thread([hwnd, server, body]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::SendNote;
             std::string response;
             std::wstring error;
-            std::string body = "{\"author\":" + JsonEscape(L"ERCTools") +
-                ",\"text\":" + JsonEscape(text) +
-                ",\"latitude\":" + std::to_string(lat) +
-                ",\"longitude\":" + std::to_string(lon) +
-                ",\"lat\":" + std::to_string(lat) +
-                ",\"lon\":" + std::to_string(lon) +
-                ",\"x\":" + std::to_string(lon) +
-                ",\"y\":" + std::to_string(lat) + "}";
             result->ok = HttpPostJsonText(AppendPath(server, L"/api/notes"), body, response, error);
             result->error = error;
             if (!g_appQuitting.load() && IsWindow(hwnd))
@@ -2245,6 +2261,122 @@ private:
             else
                 delete result;
             }).detach();
+    }
+
+    void UpdateMapNote(size_t index, const std::wstring& text)
+    {
+        if (index >= m_notes.size())
+            return;
+
+        MapNote& note = m_notes[index];
+        note.text = text;
+        if (!IsLocalOnlyNoteId(note.id)) {
+            note.timestamp = L"pending edit";
+            m_pendingNoteEdits[note.id] = note;
+        }
+        else {
+            note.timestamp = L"pending";
+        }
+        m_map.SetNotes(m_notes);
+        SetStatusText(L"Map note updated.");
+
+        if (IsLocalOnlyNoteId(note.id))
+            return;
+
+        std::wstring server = ServerBaseUrl();
+        if (server.empty())
+            return;
+
+        HWND hwnd = m_hwnd;
+        std::wstring noteId = note.id;
+        std::string body = BuildNoteJsonBody(note);
+        std::thread([hwnd, server, noteId, body]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::UpdateNote;
+            std::string response;
+            std::wstring error;
+            std::wstring endpoint = AppendNoteIdPath(server, noteId);
+            result->ok = HttpPutJsonText(endpoint, body, response, error);
+            if (!result->ok)
+                result->ok = HttpPatchJsonText(endpoint, body, response, error);
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            }).detach();
+    }
+
+    void DeleteMapNote(size_t index)
+    {
+        if (index >= m_notes.size())
+            return;
+
+        MapNote note = m_notes[index];
+        if (!IsLocalOnlyNoteId(note.id)) {
+            m_deletedNoteIds.insert(note.id);
+            m_pendingNoteEdits.erase(note.id);
+        }
+        m_notes.erase(m_notes.begin() + static_cast<std::ptrdiff_t>(index));
+        m_map.SetNotes(m_notes);
+        SetStatusText(L"Map note removed.");
+
+        if (IsLocalOnlyNoteId(note.id))
+            return;
+
+        std::wstring server = ServerBaseUrl();
+        if (server.empty())
+            return;
+
+        HWND hwnd = m_hwnd;
+        std::wstring noteId = note.id;
+        std::thread([hwnd, server, noteId]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::DeleteNote;
+            std::string response;
+            std::wstring error;
+            result->ok = HttpDeleteText(AppendNoteIdPath(server, noteId), response, error);
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            }).detach();
+    }
+
+    void ReconcilePendingNoteEdits(const std::vector<MapNote>& serverNotes)
+    {
+        for (auto it = m_pendingNoteEdits.begin(); it != m_pendingNoteEdits.end();) {
+            const auto found = std::find_if(serverNotes.begin(), serverNotes.end(), [&](const MapNote& note) {
+                return note.id == it->first && note.text == it->second.text;
+                });
+            if (found != serverNotes.end())
+                it = m_pendingNoteEdits.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    void ApplyLocalNoteOverrides(std::vector<MapNote>& serverNotes)
+    {
+        serverNotes.erase(std::remove_if(serverNotes.begin(), serverNotes.end(), [&](const MapNote& note) {
+            return !note.id.empty() && m_deletedNoteIds.find(note.id) != m_deletedNoteIds.end();
+            }), serverNotes.end());
+
+        for (const auto& [id, pendingNote] : m_pendingNoteEdits) {
+            bool replaced = false;
+            for (MapNote& note : serverNotes) {
+                if (note.id == id) {
+                    note = pendingNote;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced)
+                serverNotes.push_back(pendingNote);
+        }
+
+        MergePendingLocalNotes(serverNotes, m_notes);
     }
 
     void OnServerReady(ServerResult* result)
@@ -2260,7 +2392,8 @@ private:
             }
 
             if (result->notesOk) {
-                MergePendingLocalNotes(result->notes, m_notes);
+                ReconcilePendingNoteEdits(result->notes);
+                ApplyLocalNoteOverrides(result->notes);
                 if (!MapNotesEqual(m_notes, result->notes)) {
                     m_notes = std::move(result->notes);
                     m_map.SetNotes(m_notes);
@@ -2273,6 +2406,14 @@ private:
         }
         else if (result->action == ServerAction::SendNote) {
             SetStatusText(result->ok ? L"Map note shared." : L"Note share failed; kept locally.");
+            PollServerAsync();
+        }
+        else if (result->action == ServerAction::UpdateNote) {
+            SetStatusText(result->ok ? L"Map note synced." : L"Note update kept locally.");
+            PollServerAsync();
+        }
+        else if (result->action == ServerAction::DeleteNote) {
+            SetStatusText(result->ok ? L"Map note deleted." : L"Note delete kept locally.");
             PollServerAsync();
         }
 
@@ -3856,7 +3997,6 @@ private:
     HWND m_severityLabel = nullptr;
     HWND m_statusBar = nullptr;
     HWND m_serverLabel = nullptr;
-    HWND m_noteLabel = nullptr;
     HWND m_panelTabBtn = nullptr;
     HWND m_urlEdit = nullptr;
     HWND m_serverEdit = nullptr;
@@ -3899,8 +4039,6 @@ private:
     HWND m_chatHistory = nullptr;
     HWND m_chatEdit = nullptr;
     HWND m_chatSendBtn = nullptr;
-    HWND m_noteEdit = nullptr;
-    HWND m_noteBtn = nullptr;
 
     MapView m_map;
 
@@ -3908,6 +4046,7 @@ private:
     std::vector<TrafficAlert> m_filteredAlerts;
     std::vector<ChatMessage> m_chatMessages;
     std::vector<MapNote> m_notes;
+    std::unordered_map<std::wstring, MapNote> m_pendingNoteEdits;
     std::vector<AppNotification> m_notificationHistory;
     std::vector<GeoPolygon> m_incidentNotificationRegions;
     std::vector<EarthquakeEvent> m_allEarthquakes;
@@ -3947,9 +4086,7 @@ private:
     std::unordered_set<std::wstring> m_notifiedEarthquakeKeys;
     PolygonCaptureTarget m_polygonCaptureTarget = PolygonCaptureTarget::None;
     size_t m_activeIncidentRegionIndex = static_cast<size_t>(-1);
-    bool m_hasPendingNoteLocation = false;
-    double m_pendingNoteLat = 0.0;
-    double m_pendingNoteLon = 0.0;
+    std::unordered_set<std::wstring> m_deletedNoteIds;
 };
 
 

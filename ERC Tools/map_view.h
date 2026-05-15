@@ -11,7 +11,9 @@ class MapView
 {
 public:
     using SelectCallback = std::function<void(const std::wstring& id)>;
-    using NoteLocationCallback = std::function<void(double lat, double lon)>;
+    using NoteCreateCallback = std::function<void(const std::wstring& text, double lat, double lon)>;
+    using NoteUpdateCallback = std::function<void(size_t index, const std::wstring& text)>;
+    using NoteDeleteCallback = std::function<void(size_t index)>;
     using PolygonPointCallback = std::function<void(double lat, double lon)>;
 
     MapView();
@@ -25,7 +27,9 @@ public:
     bool Create(HWND parent, int x, int y, int w, int h);
     HWND Hwnd() const;
     void SetSelectCallback(SelectCallback cb);
-    void SetNoteLocationCallback(NoteLocationCallback cb);
+    void SetNoteCreateCallback(NoteCreateCallback cb);
+    void SetNoteUpdateCallback(NoteUpdateCallback cb);
+    void SetNoteDeleteCallback(NoteDeleteCallback cb);
     void SetPolygonPointCallback(PolygonPointCallback cb);
     void SetAlerts(const std::vector<TrafficAlert>& alerts);
     void SetNotes(const std::vector<MapNote>& notes);
