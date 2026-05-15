@@ -93,6 +93,12 @@ constexpr int kFullBoundaryMaxZoom = 7;
 
 std::atomic<int> g_activeTileDownloads{ 0 };
 
+template <typename Fn>
+static void ScheduleMapTask(Fn&& fn)
+{
+    std::thread(std::forward<Fn>(fn)).detach();
+}
+
 // ============================================================
 // MapView
 // ============================================================
@@ -106,13 +112,24 @@ class MapView::Impl
         Edit
     };
 
+    struct PolygonPointHit
+    {
+        bool hit = false;
+        size_t polygonIndex = static_cast<size_t>(-1);
+        size_t pointIndex = static_cast<size_t>(-1);
+    };
+
 public:
     using SelectCallback = std::function<void(const std::wstring&)>;
     using NoteCreateCallback = std::function<void(const std::wstring& text, double lat, double lon)>;
     using NoteUpdateCallback = std::function<void(size_t index, const std::wstring& text)>;
     using NoteDeleteCallback = std::function<void(size_t index)>;
     using PolygonPointCallback = std::function<void(double lat, double lon)>;
+    using PolygonPointMoveCallback = std::function<void(size_t polygonIndex, size_t pointIndex, double lat, double lon)>;
+    using PolygonPointDeleteCallback = std::function<void(size_t polygonIndex, size_t pointIndex)>;
+    using PolygonClearCallback = std::function<void(size_t polygonIndex)>;
     using RefreshCallback = std::function<void()>;
+    using NotificationHistoryClearCallback = std::function<void()>;
 
     bool Create(HWND parent, int x, int y, int w, int h)
     {
@@ -163,9 +180,29 @@ public:
         m_onPolygonPoint = std::move(cb);
     }
 
+    void SetPolygonPointMoveCallback(PolygonPointMoveCallback cb)
+    {
+        m_onPolygonPointMove = std::move(cb);
+    }
+
+    void SetPolygonPointDeleteCallback(PolygonPointDeleteCallback cb)
+    {
+        m_onPolygonPointDelete = std::move(cb);
+    }
+
+    void SetPolygonClearCallback(PolygonClearCallback cb)
+    {
+        m_onPolygonClear = std::move(cb);
+    }
+
     void SetRefreshCallback(RefreshCallback cb)
     {
         m_onRefresh = std::move(cb);
+    }
+
+    void SetNotificationHistoryClearCallback(NotificationHistoryClearCallback cb)
+    {
+        m_onNotificationHistoryClear = std::move(cb);
     }
 
     void SetAlerts(const std::vector<TrafficAlert>& alerts)
@@ -190,6 +227,13 @@ public:
     void SetNotificationPolygons(const std::vector<GeoPolygon>& polygons)
     {
         m_notificationPolygons = polygons;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetActiveNotificationPolygonIndex(size_t index)
+    {
+        m_activeNotificationPolygonIndex = index;
         InvalidateSceneCache();
         Invalidate();
     }
@@ -442,7 +486,7 @@ private:
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.lpszClassName = kMapClassName;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
 
         if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
             return false;
@@ -504,6 +548,8 @@ private:
 
         case WM_LBUTTONDOWN:
             SetFocus(m_hwnd);
+            if (HandleNotificationPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
             if (HitNotificationInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
                 SetCapture(m_hwnd);
                 m_notificationUiMouseDown = true;
@@ -511,6 +557,8 @@ private:
             }
             EnsureDeviceResources();
             if (m_rt && HandleNotePointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
+            if (HandlePolygonPointPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             SetCapture(m_hwnd);
             m_notificationUiMouseDown = false;
@@ -537,6 +585,11 @@ private:
         case WM_LBUTTONUP:
             OnLeftButtonUp(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;
+
+        case WM_RBUTTONDOWN:
+            if (HandlePolygonRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
+            break;
 
         case WM_LBUTTONDBLCLK:
             OnDoubleClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
@@ -1094,8 +1147,118 @@ private:
         return false;
     }
 
+    PolygonPointHit HitTestEditablePolygonPoint(int x, int y) const
+    {
+        PolygonPointHit result;
+        if (!m_polygonCaptureActive ||
+            m_activeNotificationPolygonIndex >= m_notificationPolygons.size())
+            return result;
+
+        const GeoPolygon& polygon = m_notificationPolygons[m_activeNotificationPolygonIndex];
+        const ViewState view = BuildViewState(32.0);
+        constexpr float hitRadius = 12.0f;
+        float bestDistance = hitRadius;
+        for (size_t i = 0; i < polygon.points.size(); ++i) {
+            const GeoPoint& point = polygon.points[i];
+            if (!IsGeoPointInView(view, point.lat, point.lon))
+                continue;
+            D2D1_POINT_2F screen = GeoToScreen(view, point.lat, point.lon);
+            float dx = screen.x - static_cast<float>(x);
+            float dy = screen.y - static_cast<float>(y);
+            float distance = std::sqrt(dx * dx + dy * dy);
+            if (distance <= bestDistance) {
+                bestDistance = distance;
+                result.hit = true;
+                result.polygonIndex = m_activeNotificationPolygonIndex;
+                result.pointIndex = i;
+            }
+        }
+        return result;
+    }
+
+    bool HandlePolygonPointPointerDown(int x, int y)
+    {
+        PolygonPointHit hit = HitTestEditablePolygonPoint(x, y);
+        if (!hit.hit)
+            return false;
+
+        SetCapture(m_hwnd);
+        m_draggingPolygonPoint = true;
+        m_draggingPolygonIndex = hit.polygonIndex;
+        m_draggingPolygonPointIndex = hit.pointIndex;
+        m_mouseDown.x = x;
+        m_mouseDown.y = y;
+        m_lastMouse = m_mouseDown;
+        m_dragging = true;
+        return true;
+    }
+
+    static bool PointInGeoPolygon(double lat, double lon, const std::vector<GeoPoint>& points)
+    {
+        if (points.size() < 3)
+            return false;
+
+        bool inside = false;
+        for (size_t i = 0, j = points.size() - 1; i < points.size(); j = i++) {
+            const GeoPoint& a = points[i];
+            const GeoPoint& b = points[j];
+            const bool intersects = ((a.lat > lat) != (b.lat > lat)) &&
+                (lon < (b.lon - a.lon) * (lat - a.lat) / ((b.lat - a.lat) == 0.0 ? 1e-12 : (b.lat - a.lat)) + a.lon);
+            if (intersects)
+                inside = !inside;
+        }
+        return inside;
+    }
+
+    bool HandlePolygonRightClick(int x, int y)
+    {
+        if (!m_polygonCaptureActive ||
+            m_activeNotificationPolygonIndex >= m_notificationPolygons.size())
+            return false;
+
+        PolygonPointHit hit = HitTestEditablePolygonPoint(x, y);
+        if (hit.hit) {
+            if (hit.polygonIndex < m_notificationPolygons.size() &&
+                hit.pointIndex < m_notificationPolygons[hit.polygonIndex].points.size())
+            {
+                m_notificationPolygons[hit.polygonIndex].points.erase(m_notificationPolygons[hit.polygonIndex].points.begin() + hit.pointIndex);
+                if (m_onPolygonPointDelete)
+                    m_onPolygonPointDelete(hit.polygonIndex, hit.pointIndex);
+                InvalidateSceneCache();
+                Invalidate();
+            }
+            return true;
+        }
+
+        GeoPoint geo = ScreenToGeo(x, y);
+        if (PointInGeoPolygon(geo.lat, geo.lon, m_notificationPolygons[m_activeNotificationPolygonIndex].points)) {
+            m_notificationPolygons[m_activeNotificationPolygonIndex].points.clear();
+            if (m_onPolygonClear)
+                m_onPolygonClear(m_activeNotificationPolygonIndex);
+            InvalidateSceneCache();
+            Invalidate();
+            return true;
+        }
+
+        return false;
+    }
+
     void OnMouseMove(int x, int y, UINT buttons)
     {
+        if (m_draggingPolygonPoint && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            if (m_draggingPolygonIndex < m_notificationPolygons.size() &&
+                m_draggingPolygonPointIndex < m_notificationPolygons[m_draggingPolygonIndex].points.size())
+            {
+                GeoPoint geo = ScreenToGeo(x, y);
+                m_notificationPolygons[m_draggingPolygonIndex].points[m_draggingPolygonPointIndex] = geo;
+                if (m_onPolygonPointMove)
+                    m_onPolygonPointMove(m_draggingPolygonIndex, m_draggingPolygonPointIndex, geo.lat, geo.lon);
+                InvalidateSceneCache();
+                Invalidate();
+            }
+            return;
+        }
+
         if (m_notificationUiMouseDown || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
             if (!m_hoveredAlertId.empty()) {
                 m_hoveredAlertId.clear();
@@ -1144,6 +1307,17 @@ private:
     {
         if (GetCapture() == m_hwnd)
             ReleaseCapture();
+
+        if (m_draggingPolygonPoint) {
+            m_draggingPolygonPoint = false;
+            m_draggingPolygonIndex = static_cast<size_t>(-1);
+            m_draggingPolygonPointIndex = static_cast<size_t>(-1);
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            Invalidate();
+            return;
+        }
 
         if (m_notificationUiMouseDown || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
             m_notificationUiMouseDown = false;
@@ -1422,7 +1596,7 @@ private:
 
         HWND hwnd = m_hwnd;
 
-        std::thread([hwnd, key, entry]() {
+        ScheduleMapTask([hwnd, key, entry]() {
             std::vector<BYTE> bytes;
             std::wstring error;
             bool ok = HttpGetBinary(BuildTileUrl(key.z, key.x, key.y), bytes, error);
@@ -1444,7 +1618,7 @@ private:
 
             if (hwnd && !g_appQuitting.load() && IsWindow(hwnd))
                 PostMessageW(hwnd, WM_APP_TILE_READY, 0, 0);
-            }).detach();
+            });
     }
 
     ComPtr<ID2D1Bitmap> CreateBitmapFromBytes(const std::vector<BYTE>& bytes)
@@ -1587,8 +1761,18 @@ private:
 
     void DrawNotificationPolygons(const ViewState& view)
     {
-        for (const GeoPolygon& polygon : m_notificationPolygons)
-            DrawPolygonPath(view, polygon.points, true, m_polygonFillBrush.Get(), m_polygonStrokeBrush.Get(), 2.0f);
+        for (size_t i = 0; i < m_notificationPolygons.size(); ++i) {
+            const bool active = m_polygonCaptureActive && i == m_activeNotificationPolygonIndex;
+            const GeoPolygon& polygon = m_notificationPolygons[i];
+            DrawPolygonPath(view, polygon.points, true, m_polygonFillBrush.Get(), active ? m_draftStrokeBrush.Get() : m_polygonStrokeBrush.Get(), active ? 3.0f : 2.0f);
+            if (active) {
+                for (const GeoPoint& point : polygon.points) {
+                    D2D1_POINT_2F screen = GeoToScreen(view, point.lat, point.lon);
+                    m_rt->FillEllipse(D2D1::Ellipse(screen, 7.0f, 7.0f), m_selectedBrush.Get());
+                    m_rt->DrawEllipse(D2D1::Ellipse(screen, 7.0f, 7.0f), m_draftStrokeBrush.Get(), 2.0f);
+                }
+            }
+        }
 
         DrawPolygonPath(view, m_draftPolygon, m_draftPolygon.size() >= 3, m_draftFillBrush.Get(), m_draftStrokeBrush.Get(), 2.0f);
     }
@@ -1597,6 +1781,44 @@ private:
     {
         if (!m_rt || m_earthquakes.empty())
             return;
+
+        if (m_zoom <= 4 && m_earthquakes.size() > 800) {
+            struct EarthquakeCell
+            {
+                D2D1_POINT_2F point{};
+                double magnitude = 0.0;
+                int count = 0;
+            };
+
+            const float cellSize = m_zoom <= 2 ? 18.0f : 12.0f;
+            std::unordered_map<long long, EarthquakeCell> cells;
+            cells.reserve(1024);
+
+            for (const EarthquakeEvent& event : m_earthquakes) {
+                if (!event.hasLocation || !IsGeoPointInView(view, event.latitude, event.longitude))
+                    continue;
+
+                D2D1_POINT_2F p = GeoToScreen(view, event.latitude, event.longitude);
+                int cellX = static_cast<int>(std::floor(p.x / cellSize));
+                int cellY = static_cast<int>(std::floor(p.y / cellSize));
+                long long key = (static_cast<long long>(static_cast<unsigned int>(cellX)) << 32) ^
+                    static_cast<unsigned int>(cellY);
+                EarthquakeCell& cell = cells[key];
+                ++cell.count;
+                if (cell.count == 1 || event.magnitude > cell.magnitude) {
+                    cell.point = p;
+                    cell.magnitude = event.magnitude;
+                }
+            }
+
+            for (const auto& item : cells) {
+                const EarthquakeCell& cell = item.second;
+                float radius = static_cast<float>(ClampValue(4.0 + cell.magnitude * 1.65 + std::log2(static_cast<double>(std::max(1, cell.count))) * 0.85, 5.0, 18.0));
+                m_rt->FillEllipse(D2D1::Ellipse(cell.point, radius, radius), m_earthquakeBrush.Get());
+                m_rt->DrawEllipse(D2D1::Ellipse(cell.point, radius, radius), m_borderBrush.Get(), 1.15f);
+            }
+            return;
+        }
 
         for (const EarthquakeEvent& event : m_earthquakes) {
             if (!event.hasLocation || !IsGeoPointInView(view, event.latitude, event.longitude))
@@ -1703,6 +1925,15 @@ private:
             panelRect.bottom - kOverlayUiPadding);
     }
 
+    D2D1_RECT_F NotificationHistoryClearRect(const D2D1_RECT_F& panelRect) const
+    {
+        return D2D1::RectF(
+            panelRect.right - kOverlayUiPadding - 70.0f,
+            panelRect.top + kOverlayUiPadding - 2.0f,
+            panelRect.right - kOverlayUiPadding,
+            panelRect.top + kOverlayUiPadding + 25.0f);
+    }
+
     float NotificationItemHeight(const AppNotification& notification, float width) const
     {
         width = MaxValue(1.0f, width);
@@ -1761,6 +1992,26 @@ private:
             fallback.bottom = fallback.top + 160.0f;
             return PointInRect(x, y, fallback);
         }
+        return false;
+    }
+
+    bool HandleNotificationPointerDown(int x, int y)
+    {
+        if (!m_showNotificationHistory)
+            return false;
+
+        const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
+        if (!layout.hasHistory || !PointInRect(x, y, layout.historyRect))
+            return false;
+
+        if (PointInRect(x, y, NotificationHistoryClearRect(layout.historyRect))) {
+            m_notificationHistoryScroll = 0.0f;
+            if (m_onNotificationHistoryClear)
+                m_onNotificationHistoryClear();
+            Invalidate();
+            return true;
+        }
+
         return false;
     }
 
@@ -1845,9 +2096,10 @@ private:
         D2D1_RECT_F titleRect = D2D1::RectF(
             rect.left + kOverlayUiPadding,
             rect.top + kOverlayUiPadding - 1.0f,
-            rect.right - kOverlayUiPadding,
+            rect.right - kOverlayUiPadding - 78.0f,
             rect.top + kOverlayUiPadding + 22.0f);
         m_overlayUi.DrawLabel(L"Notification History", m_overlayUi.TitleFormat(), titleRect);
+        m_overlayUi.DrawButton(OverlayButton{ 0, L"Clear", NotificationHistoryClearRect(rect), !m_notificationHistory.empty(), false, false });
 
         std::wstring countText = m_notificationHistory.empty()
             ? L"No notifications yet"
@@ -2826,7 +3078,11 @@ private:
     NoteUpdateCallback m_onNoteUpdate;
     NoteDeleteCallback m_onNoteDelete;
     PolygonPointCallback m_onPolygonPoint;
+    PolygonPointMoveCallback m_onPolygonPointMove;
+    PolygonPointDeleteCallback m_onPolygonPointDelete;
+    PolygonClearCallback m_onPolygonClear;
     RefreshCallback m_onRefresh;
+    NotificationHistoryClearCallback m_onNotificationHistoryClear;
 
     int m_zoom = kDefaultZoom;
     double m_centerLat = kDefaultCenterLat;
@@ -2839,6 +3095,10 @@ private:
     bool m_notificationUiMouseDown = false;
     bool m_addNoteMode = false;
     bool m_polygonCaptureActive = false;
+    bool m_draggingPolygonPoint = false;
+    size_t m_activeNotificationPolygonIndex = static_cast<size_t>(-1);
+    size_t m_draggingPolygonIndex = static_cast<size_t>(-1);
+    size_t m_draggingPolygonPointIndex = static_cast<size_t>(-1);
     bool m_trackingMouseLeave = false;
     int m_interactiveTileRequestsThisFrame = 0;
     std::wstring m_hoveredAlertId;
@@ -2937,9 +3197,29 @@ void MapView::SetPolygonPointCallback(PolygonPointCallback cb)
     m_impl->SetPolygonPointCallback(std::move(cb));
 }
 
+void MapView::SetPolygonPointMoveCallback(PolygonPointMoveCallback cb)
+{
+    m_impl->SetPolygonPointMoveCallback(std::move(cb));
+}
+
+void MapView::SetPolygonPointDeleteCallback(PolygonPointDeleteCallback cb)
+{
+    m_impl->SetPolygonPointDeleteCallback(std::move(cb));
+}
+
+void MapView::SetPolygonClearCallback(PolygonClearCallback cb)
+{
+    m_impl->SetPolygonClearCallback(std::move(cb));
+}
+
 void MapView::SetRefreshCallback(RefreshCallback cb)
 {
     m_impl->SetRefreshCallback(std::move(cb));
+}
+
+void MapView::SetNotificationHistoryClearCallback(NotificationHistoryClearCallback cb)
+{
+    m_impl->SetNotificationHistoryClearCallback(std::move(cb));
 }
 
 void MapView::SetAlerts(const std::vector<TrafficAlert>& alerts)
@@ -2955,6 +3235,11 @@ void MapView::SetNotes(const std::vector<MapNote>& notes)
 void MapView::SetNotificationPolygons(const std::vector<GeoPolygon>& polygons)
 {
     m_impl->SetNotificationPolygons(polygons);
+}
+
+void MapView::SetActiveNotificationPolygonIndex(size_t index)
+{
+    m_impl->SetActiveNotificationPolygonIndex(index);
 }
 
 void MapView::SetDraftPolygon(const std::vector<GeoPoint>& points)

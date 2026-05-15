@@ -35,6 +35,8 @@ constexpr int IDM_SHOW_EARTHQUAKES = 2008;
 constexpr int IDM_VIEW_NOTIFICATION_HISTORY = 2009;
 constexpr int IDM_ROADS_TEMPLATES_WIZARD = 2010;
 constexpr int IDM_ROADS_EDIT_TEMPLATES = 2011;
+constexpr int IDM_EARTHQUAKES_TEMPLATES_WIZARD = 2012;
+constexpr int IDM_EARTHQUAKES_EDIT_TEMPLATES = 2013;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -107,6 +109,7 @@ constexpr int IDC_TEMPLATES_WIZARD_PREV = 2606;
 constexpr int IDC_TEMPLATES_WIZARD_NEXT = 2607;
 constexpr int IDC_TEMPLATES_WIZARD_COPY = 2608;
 constexpr int IDC_TEMPLATES_WIZARD_CLOSE = 2609;
+constexpr int IDC_TEMPLATES_WIZARD_COPY_LOCATION = 2610;
 constexpr int IDC_TEMPLATES_EDITOR_LIST = 2621;
 constexpr int IDC_TEMPLATES_EDITOR_NAME = 2622;
 constexpr int IDC_TEMPLATES_EDITOR_BODY = 2623;
@@ -190,6 +193,18 @@ struct IncidentNotificationState
 {
     std::wstring signature;
     std::wstring line;
+};
+
+struct EarthquakeNotificationState
+{
+    std::wstring signature;
+    std::wstring line;
+};
+
+enum class TemplateContext
+{
+    Roads,
+    Earthquakes
 };
 
 enum class PolygonCaptureTarget
@@ -285,6 +300,18 @@ static constexpr COLORREF kUiSurface = RGB(255, 255, 255);
 static constexpr COLORREF kUiText = RGB(22, 34, 49);
 static constexpr COLORREF kUiMutedText = RGB(86, 99, 115);
 static constexpr COLORREF kUiSelection = RGB(226, 240, 255);
+
+static COLORREF SeverityLabelColor(const std::wstring& severity)
+{
+    std::wstring bucket = SeverityBucket(severity);
+    if (bucket == L"severe")
+        return RGB(190, 44, 44);
+    if (bucket == L"moderate")
+        return RGB(190, 111, 23);
+    if (bucket == L"minor")
+        return RGB(24, 114, 205);
+    return RGB(74, 124, 102);
+}
 
 static HBRUSH ModernWindowBrush()
 {
@@ -406,6 +433,60 @@ static void MoveLabelToText(HWND hwnd, int x, int y, int maximumWidth = 0)
 {
     const int width = AutoLabelWidth(hwnd, maximumWidth);
     MoveWindow(hwnd, x, y, width, AutoLabelHeight(hwnd, 22, width), TRUE);
+}
+
+static BOOL CALLBACK AutoFitChildEnumProc(HWND child, LPARAM param)
+{
+    RECT childRect{};
+    if (!IsWindowVisible(child) || !GetWindowRect(child, &childRect))
+        return TRUE;
+
+    HWND parent = GetParent(child);
+    POINT topLeft{ childRect.left, childRect.top };
+    POINT bottomRight{ childRect.right, childRect.bottom };
+    ScreenToClient(parent, &topLeft);
+    ScreenToClient(parent, &bottomRight);
+
+    RECT* bounds = reinterpret_cast<RECT*>(param);
+    bounds->right = MaxLong(bounds->right, bottomRight.x);
+    bounds->bottom = MaxLong(bounds->bottom, bottomRight.y);
+    return TRUE;
+}
+
+static void AutoFitWindowToChildren(HWND hwnd, int padding = 28)
+{
+    if (!hwnd)
+        return;
+
+    RECT childBounds{ 0, 0, 0, 0 };
+    EnumChildWindows(hwnd, AutoFitChildEnumProc, reinterpret_cast<LPARAM>(&childBounds));
+    if (childBounds.right <= 0 || childBounds.bottom <= 0)
+        return;
+
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    int desiredClientW = MaxInt(client.right - client.left, childBounds.right + padding);
+    int desiredClientH = MaxInt(client.bottom - client.top, childBounds.bottom + padding);
+
+    RECT windowRect{ 0, 0, desiredClientW, desiredClientH };
+    DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+    DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+    AdjustWindowRectEx(&windowRect, style, GetMenu(hwnd) != nullptr, exStyle);
+
+    SetWindowPos(
+        hwnd,
+        nullptr,
+        0,
+        0,
+        windowRect.right - windowRect.left,
+        windowRect.bottom - windowRect.top,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+template <typename Fn>
+static void ScheduleBackgroundTask(Fn&& fn)
+{
+    std::thread(std::forward<Fn>(fn)).detach();
 }
 
 static bool TryParseRefreshIntervalMilliseconds(const std::wstring& text, UINT& millisecondsOut)
@@ -1164,6 +1245,7 @@ private:
 
         LoadSettings();
         EnsureDefaultReportTemplates();
+        EnsureDefaultEarthquakeReportTemplates();
         ModernizeReportTemplates();
         CreateMainMenu();
 
@@ -1326,6 +1408,18 @@ private:
         m_map.SetPolygonPointCallback([this](double lat, double lon) {
             OnMapPolygonPoint(lat, lon);
             });
+        m_map.SetPolygonPointMoveCallback([this](size_t polygonIndex, size_t pointIndex, double lat, double lon) {
+            OnMapPolygonPointMoved(polygonIndex, pointIndex, lat, lon);
+            });
+        m_map.SetPolygonPointDeleteCallback([this](size_t polygonIndex, size_t pointIndex) {
+            OnMapPolygonPointDeleted(polygonIndex, pointIndex);
+            });
+        m_map.SetPolygonClearCallback([this](size_t polygonIndex) {
+            OnMapPolygonCleared(polygonIndex);
+            });
+        m_map.SetNotificationHistoryClearCallback([this]() {
+            ClearNotificationHistory();
+            });
         m_map.SetNotificationPolygons(m_incidentNotificationRegions);
         m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
         RenderNotificationHistory();
@@ -1472,6 +1566,14 @@ private:
             ShowEarthquakeNotificationsWindow();
             break;
 
+        case IDM_EARTHQUAKES_TEMPLATES_WIZARD:
+            ShowEarthquakeTemplatesWizardWindow();
+            break;
+
+        case IDM_EARTHQUAKES_EDIT_TEMPLATES:
+            ShowEarthquakeTemplatesEditorWindow();
+            break;
+
         case IDM_SHOW_EARTHQUAKES:
             ToggleShowEarthquakes();
             break;
@@ -1530,6 +1632,17 @@ private:
             const bool hot = (cd->nmcd.uItemState & CDIS_HOT) != 0;
             cd->clrText = selected ? RGB(12, 75, 142) : kUiText;
             cd->clrTextBk = selected ? kUiSelection : (hot ? RGB(240, 246, 253) : kUiSurface);
+            return CDRF_NOTIFYSUBITEMDRAW;
+        }
+        case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
+        {
+            const int row = static_cast<int>(cd->nmcd.dwItemSpec);
+            const bool selected = (cd->nmcd.uItemState & CDIS_SELECTED) != 0;
+            if (row >= 0 && row < static_cast<int>(m_filteredAlerts.size()) && cd->iSubItem == 0 && !selected)
+                cd->clrText = SeverityLabelColor(m_filteredAlerts[static_cast<size_t>(row)].severity);
+            else
+                cd->clrText = selected ? RGB(12, 75, 142) : kUiText;
+            cd->clrTextBk = selected ? kUiSelection : kUiSurface;
             return CDRF_DODEFAULT;
         }
         }
@@ -1653,6 +1766,24 @@ private:
                         m_reportTemplates.push_back(std::move(reportTemplate));
                 }
             }
+            auto earthquakeTemplatesIt = settings->find("earthquakeReportTemplates");
+            if (earthquakeTemplatesIt != settings->end() && earthquakeTemplatesIt->is_array()) {
+                m_earthquakeReportTemplatesConfigured = true;
+                m_earthquakeReportTemplates.clear();
+                for (const json& item : *earthquakeTemplatesIt) {
+                    if (!item.is_object())
+                        continue;
+                    ReportTemplate reportTemplate;
+                    auto nameIt = item.find("name");
+                    if (nameIt != item.end())
+                        reportTemplate.name = JsonValueToText(*nameIt);
+                    auto bodyIt = item.find("body");
+                    if (bodyIt != item.end())
+                        reportTemplate.body = JsonValueToText(*bodyIt);
+                    if (!reportTemplate.name.empty() || !reportTemplate.body.empty())
+                        m_earthquakeReportTemplates.push_back(std::move(reportTemplate));
+                }
+            }
 
             readBool("showEarthquakes", m_showEarthquakes);
             readString("earthquakeNotificationMagnitudeText", m_earthquakeNotificationMagnitudeText);
@@ -1676,6 +1807,48 @@ private:
         reportTemplate.body = L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION %JUNCTIONS_WITH_DATA with %LANECLOSURES closed. Expect delays and congestion, avoid the area if possible, find alternate routes, monitor local traffic and media for updates. Allow extra time for your journey.";
         m_reportTemplates.push_back(std::move(reportTemplate));
         m_reportTemplatesConfigured = true;
+    }
+
+    void EnsureDefaultEarthquakeReportTemplates()
+    {
+        if (!m_earthquakeReportTemplates.empty() || m_earthquakeReportTemplatesConfigured)
+            return;
+
+        ReportTemplate reportTemplate;
+        reportTemplate.name = L"Earthquake report";
+        reportTemplate.body = L"$DATE: EARTHQUAKE REPORTS: An earthquake of magnitude $MAGNITUDE was recorded near $PLACE at $TIME. Coordinates: %LATITUDE, %LONGITUDE. Depth: %DEPTH km.";
+        m_earthquakeReportTemplates.push_back(std::move(reportTemplate));
+        m_earthquakeReportTemplatesConfigured = true;
+    }
+
+    std::vector<ReportTemplate>& TemplatesForContext(TemplateContext context)
+    {
+        return context == TemplateContext::Earthquakes ? m_earthquakeReportTemplates : m_reportTemplates;
+    }
+
+    const std::vector<ReportTemplate>& TemplatesForContext(TemplateContext context) const
+    {
+        return context == TemplateContext::Earthquakes ? m_earthquakeReportTemplates : m_reportTemplates;
+    }
+
+    bool& TemplatesConfiguredForContext(TemplateContext context)
+    {
+        return context == TemplateContext::Earthquakes ? m_earthquakeReportTemplatesConfigured : m_reportTemplatesConfigured;
+    }
+
+    std::wstring DefaultTemplateBodyForContext(TemplateContext context) const
+    {
+        if (context == TemplateContext::Earthquakes)
+            return L"$DATE: EARTHQUAKE REPORTS: An earthquake of magnitude $MAGNITUDE was recorded near $PLACE at $TIME. Coordinates: %LATITUDE, %LONGITUDE. Depth: %DEPTH km.";
+        return L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION %JUNCTIONS_WITH_DATA with %LANECLOSURES closed. Allow extra time for your journey.";
+    }
+
+    void EnsureDefaultTemplatesForContext(TemplateContext context)
+    {
+        if (context == TemplateContext::Earthquakes)
+            EnsureDefaultEarthquakeReportTemplates();
+        else
+            EnsureDefaultReportTemplates();
     }
 
     void ModernizeReportTemplates()
@@ -1743,6 +1916,13 @@ private:
                 item["body"] = WideToUtf8(reportTemplate.body);
                 settings["roadReportTemplates"].push_back(std::move(item));
             }
+            settings["earthquakeReportTemplates"] = json::array();
+            for (const ReportTemplate& reportTemplate : m_earthquakeReportTemplates) {
+                json item = json::object();
+                item["name"] = WideToUtf8(reportTemplate.name);
+                item["body"] = WideToUtf8(reportTemplate.body);
+                settings["earthquakeReportTemplates"].push_back(std::move(item));
+            }
             settings["showEarthquakes"] = m_showEarthquakes;
             settings["earthquakeNotificationMagnitudeText"] = WideToUtf8(m_earthquakeNotificationMagnitudeText);
             settings["earthquakeNotificationMagnitude"] = m_earthquakeNotificationMagnitude;
@@ -1783,7 +1963,7 @@ private:
         const bool unplannedOnly = m_alertFilterUnplannedOnly;
         const std::wstring order = m_alertOrder;
 
-        std::thread([hwnd, url, unplannedOnly, order]() {
+        ScheduleBackgroundTask([hwnd, url, unplannedOnly, order]() {
             auto* result = new FeedResult{};
             std::string body;
             std::wstring error;
@@ -1832,7 +2012,7 @@ private:
                 delete result;
                 g_fetchInProgress.store(false);
             }
-            }).detach();
+        });
     }
 
     void OnFeedReady(FeedResult* result)
@@ -2093,13 +2273,20 @@ private:
         std::unordered_set<std::wstring> currentIncidentKeys;
         std::vector<std::wstring> newLines;
         std::vector<std::wstring> updateLines;
+        std::vector<std::wstring> removedLines;
 
         for (const TrafficAlert& alert : alerts) {
             std::wstring stableKey = IncidentNotificationStableKey(alert);
             currentIncidentKeys.insert(stableKey);
 
-            if (!AlertMatchesIncidentNotification(alert))
+            if (!AlertMatchesIncidentNotification(alert)) {
+                auto existing = m_notifiedIncidentStates.find(stableKey);
+                if (m_haveIncidentNotificationSnapshot && existing != m_notifiedIncidentStates.end()) {
+                    removedLines.push_back(existing->second.line);
+                    m_notifiedIncidentStates.erase(existing);
+                }
                 continue;
+            }
 
             std::wstring signature = IncidentNotificationSignature(alert);
             std::wstring line = IncidentNotificationLine(alert);
@@ -2115,7 +2302,6 @@ private:
             }
         }
 
-        std::vector<std::wstring> removedLines;
         if (m_haveIncidentNotificationSnapshot) {
             for (auto it = m_notifiedIncidentStates.begin(); it != m_notifiedIncidentStates.end();) {
                 if (currentIncidentKeys.find(it->first) == currentIncidentKeys.end()) {
@@ -2202,6 +2388,13 @@ private:
         m_map.SetNotificationHistory(m_notificationHistory);
     }
 
+    void ClearNotificationHistory()
+    {
+        m_notificationHistory.clear();
+        RenderNotificationHistory();
+        SetStatusText(L"Notification history cleared.");
+    }
+
     void AddNotificationHistory(const std::wstring& title, const std::wstring& body)
     {
         AppNotification entry;
@@ -2239,7 +2432,7 @@ private:
 
         HWND hwnd = m_hwnd;
         HWND mapHwnd = m_map.Hwnd();
-        std::thread([hwnd, mapHwnd, urls = std::move(urls)]() {
+        ScheduleBackgroundTask([hwnd, mapHwnd, urls = std::move(urls)]() {
             for (const std::wstring& url : urls) {
                 if (g_appQuitting.load())
                     return;
@@ -2254,7 +2447,7 @@ private:
                 InvalidateRect(mapHwnd, nullptr, FALSE);
             else if (hwnd && !g_appQuitting.load() && IsWindow(hwnd))
                 InvalidateRect(hwnd, nullptr, FALSE);
-            }).detach();
+        });
     }
 
     bool TextFilterMatches(const TrafficAlert& a) const
@@ -2433,7 +2626,7 @@ private:
         }
 
         HWND hwnd = m_hwnd;
-        std::thread([hwnd, server]() {
+        ScheduleBackgroundTask([hwnd, server]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::Poll;
 
@@ -2476,7 +2669,7 @@ private:
                 return;
             }
             PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
-            }).detach();
+        });
     }
 
     void SendChatAsync()
@@ -2492,7 +2685,7 @@ private:
 
         std::wstring server = ServerBaseUrl();
         HWND hwnd = m_hwnd;
-        std::thread([hwnd, server, text]() {
+        ScheduleBackgroundTask([hwnd, server, text]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::SendChat;
             std::string response;
@@ -2504,7 +2697,7 @@ private:
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
             else
                 delete result;
-            }).detach();
+        });
     }
 
     static bool IsLocalOnlyNoteId(const std::wstring& id)
@@ -2533,7 +2726,7 @@ private:
 
         HWND hwnd = m_hwnd;
         std::string body = BuildNoteJsonBody(note);
-        std::thread([hwnd, server, body]() {
+        ScheduleBackgroundTask([hwnd, server, body]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::SendNote;
             std::string response;
@@ -2544,7 +2737,7 @@ private:
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
             else
                 delete result;
-            }).detach();
+        });
     }
 
     void UpdateMapNote(size_t index, const std::wstring& text)
@@ -2574,7 +2767,7 @@ private:
         HWND hwnd = m_hwnd;
         std::wstring noteId = note.id;
         std::string body = BuildNoteJsonBody(note);
-        std::thread([hwnd, server, noteId, body]() {
+        ScheduleBackgroundTask([hwnd, server, noteId, body]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::UpdateNote;
             std::string response;
@@ -2588,7 +2781,7 @@ private:
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
             else
                 delete result;
-            }).detach();
+        });
     }
 
     void DeleteMapNote(size_t index)
@@ -2614,7 +2807,7 @@ private:
 
         HWND hwnd = m_hwnd;
         std::wstring noteId = note.id;
-        std::thread([hwnd, server, noteId]() {
+        ScheduleBackgroundTask([hwnd, server, noteId]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::DeleteNote;
             std::string response;
@@ -2625,7 +2818,7 @@ private:
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
             else
                 delete result;
-            }).detach();
+        });
     }
 
     void ReconcilePendingNoteEdits(const std::vector<MapNote>& serverNotes)
@@ -2715,7 +2908,7 @@ private:
 
         HWND hwnd = m_hwnd;
 
-        std::thread([hwnd]() {
+        ScheduleBackgroundTask([hwnd]() {
             auto* result = new BoundaryDownloadResult{};
             std::vector<BYTE> bytes;
             std::wstring error;
@@ -2746,7 +2939,7 @@ private:
                 delete result;
                 g_boundaryDownloadInProgress.store(false);
             }
-            }).detach();
+        });
     }
 
     void OnBoundaryReady(BoundaryDownloadResult* result)
@@ -2792,6 +2985,10 @@ private:
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_EDIT_TEMPLATES, L"Edit Templates...");
         AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKES_LIST, L"Earthquakes List...");
         AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKE_NOTIFICATIONS, L"Earthquake Notifications...");
+        AppendMenuW(earthquakesMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKES_TEMPLATES_WIZARD, L"Templates Wizard...");
+        AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKES_EDIT_TEMPLATES, L"Edit Templates...");
+        AppendMenuW(earthquakesMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(earthquakesMenu, m_showEarthquakes ? MF_CHECKED : MF_UNCHECKED, IDM_SHOW_EARTHQUAKES, L"Show Earthquakes");
         MENUITEMINFOW showEarthquakesInfo{};
         showEarthquakesInfo.cbSize = sizeof(showEarthquakesInfo);
@@ -2928,6 +3125,7 @@ private:
         SizeControlToText(m_incidentUnplannedCheck, 34, 6, 180, 0, 24);
         SizeControlToText(m_incidentPlannedCheck, 34, 6, 170, 0, 24);
         SyncIncidentFilterControls();
+        AutoFitWindowToChildren(parent);
     }
 
     void SyncIncidentFilterControls()
@@ -3110,6 +3308,7 @@ private:
         SendMessageW(m_incidentNotifyReasonExclusionsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Road Management"));
         SendMessageW(m_incidentNotifyLocationExclusionsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"entry, exit"));
         SyncIncidentNotificationControls();
+        AutoFitWindowToChildren(parent);
     }
 
     void SyncIncidentNotificationControls()
@@ -3279,6 +3478,7 @@ private:
             ApplyExplorerTheme(h);
         }
         SyncNotificationRegionsList();
+        AutoFitWindowToChildren(parent);
     }
 
     void SyncNotificationRegionsList()
@@ -3470,6 +3670,7 @@ private:
         }
         SendMessageW(roadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M*, A*, A1(M), A2, A52"));
         UpdateNotificationRegionEditorPointsLabel(parent, index);
+        AutoFitWindowToChildren(parent);
     }
 
     void UpdateNotificationRegionEditorPointsLabel(HWND hwnd, size_t index)
@@ -3497,8 +3698,9 @@ private:
             m_polygonCaptureTarget = PolygonCaptureTarget::IncidentRegion;
             m_activeIncidentRegionIndex = ctx->index;
             m_map.SetPolygonCaptureActive(true);
+            m_map.SetActiveNotificationPolygonIndex(ctx->index);
             m_map.SetDraftPolygon({});
-            SetStatusText(L"Editing polygon for " + (polygon.name.empty() ? L"this region" : polygon.name) + L". Click the map to add points; use Undo point to remove the last point.");
+            SetStatusText(L"Editing polygon for " + (polygon.name.empty() ? L"this region" : polygon.name) + L". Click to add points, drag points to move them, right-click a point to delete it.");
             return;
         }
         if (id == IDC_NOTIFICATION_REGION_UNDO_BTN && code == BN_CLICKED) {
@@ -3554,6 +3756,7 @@ private:
         m_polygonCaptureTarget = PolygonCaptureTarget::None;
         m_activeIncidentRegionIndex = static_cast<size_t>(-1);
         m_map.SetPolygonCaptureActive(false);
+        m_map.SetActiveNotificationPolygonIndex(static_cast<size_t>(-1));
         m_map.SetDraftPolygon({});
     }
 
@@ -3579,6 +3782,43 @@ private:
             ApplyEarthquakeListFilters();
             SetStatusText(L"Added earthquake region point " + std::to_wstring(m_earthquakeFilterRegion.size()) + L".");
         }
+    }
+
+    void OnMapPolygonPointMoved(size_t polygonIndex, size_t pointIndex, double lat, double lon)
+    {
+        if (polygonIndex >= m_incidentNotificationRegions.size() ||
+            pointIndex >= m_incidentNotificationRegions[polygonIndex].points.size())
+            return;
+
+        m_incidentNotificationRegions[polygonIndex].points[pointIndex] = { lat, lon };
+        m_map.SetNotificationPolygons(m_incidentNotificationRegions);
+        SyncNotificationRegionsList();
+        SaveSettings();
+    }
+
+    void OnMapPolygonPointDeleted(size_t polygonIndex, size_t pointIndex)
+    {
+        if (polygonIndex >= m_incidentNotificationRegions.size() ||
+            pointIndex >= m_incidentNotificationRegions[polygonIndex].points.size())
+            return;
+
+        m_incidentNotificationRegions[polygonIndex].points.erase(m_incidentNotificationRegions[polygonIndex].points.begin() + pointIndex);
+        m_map.SetNotificationPolygons(m_incidentNotificationRegions);
+        SyncNotificationRegionsList();
+        SaveSettings();
+        SetStatusText(L"Removed polygon point.");
+    }
+
+    void OnMapPolygonCleared(size_t polygonIndex)
+    {
+        if (polygonIndex >= m_incidentNotificationRegions.size())
+            return;
+
+        m_incidentNotificationRegions[polygonIndex].points.clear();
+        m_map.SetNotificationPolygons(m_incidentNotificationRegions);
+        SyncNotificationRegionsList();
+        SaveSettings();
+        SetStatusText(L"Cleared notification polygon.");
     }
 
     const TrafficAlert* FindSelectedAlert() const
@@ -3612,6 +3852,21 @@ private:
             }
         }
         return FindSelectedAlert();
+    }
+
+    const EarthquakeEvent* FindSelectedEarthquake() const
+    {
+        if (m_earthquakeListView) {
+            int selected = static_cast<int>(SendMessageW(m_earthquakeListView, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED));
+            if (selected >= 0 && selected < static_cast<int>(m_filteredEarthquakes.size()))
+                return &m_filteredEarthquakes[static_cast<size_t>(selected)];
+        }
+
+        if (!m_filteredEarthquakes.empty())
+            return &m_filteredEarthquakes.front();
+        if (!m_allEarthquakes.empty())
+            return &m_allEarthquakes.front();
+        return nullptr;
     }
 
     static std::wstring CurrentDateText()
@@ -3859,31 +4114,22 @@ private:
                 signPanels.push_back((*it)[2].str());
 
             std::wstring lowerDirection = ToLower(direction);
+            const bool forwardDirection =
+                lowerDirection == L"northbound" || lowerDirection == L"westbound" || lowerDirection == L"anticlockwise";
+            const bool reverseDirection =
+                lowerDirection == L"southbound" || lowerDirection == L"eastbound" || lowerDirection == L"clockwise";
             if (!signPanels.empty() &&
-                (lowerDirection == L"northbound" || lowerDirection == L"westbound" || lowerDirection == L"anticlockwise"))
+                forwardDirection)
             {
                 rowData = ExtractRoadsOrgDataFromFragment(signPanels.front(), road);
             }
             else if (signPanels.size() > 1 &&
-                (lowerDirection == L"southbound" || lowerDirection == L"eastbound" || lowerDirection == L"clockwise"))
+                reverseDirection)
             {
                 rowData = ExtractRoadsOrgDataFromFragment(signPanels[1], road);
             }
-
-            if (rowData.empty())
-                rowData = ExtractRoadsOrgDataFromFragment(rowHtml, road);
-        }
-
-        if (!rowData.empty())
-            return rowData;
-
-        if (!detailHref.empty()) {
-            std::string detailBody;
-            std::wstring error;
-            if (HttpGetText(L"https://www.roads.org.uk" + detailHref, detailBody, error)) {
-                std::wstring detailData = ExtractRoadsOrgDetailOtherRoutes(Utf8ToWide(detailBody), road);
-                if (!detailData.empty())
-                    return detailData;
+            else if (!forwardDirection && !reverseDirection && !signPanels.empty()) {
+                rowData = ExtractRoadsOrgDataFromFragment(signPanels.front(), road);
             }
         }
 
@@ -4021,6 +4267,15 @@ private:
         variables.push_back({ key, value });
     }
 
+    std::wstring TemplateVariableValue(const std::wstring& key) const
+    {
+        for (const auto& item : m_templateWizardVariables) {
+            if (item.first == key)
+                return item.second;
+        }
+        return L"";
+    }
+
     std::vector<std::pair<std::wstring, std::wstring>> BuildTemplateVariables(const TrafficAlert& alert) const
     {
         std::vector<std::pair<std::wstring, std::wstring>> variables;
@@ -4073,6 +4328,28 @@ private:
         return variables;
     }
 
+    std::vector<std::pair<std::wstring, std::wstring>> BuildEarthquakeTemplateVariables(const EarthquakeEvent& event) const
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> variables;
+        wchar_t magnitude[32]{};
+        wchar_t latitude[48]{};
+        wchar_t longitude[48]{};
+        wchar_t depth[32]{};
+        swprintf_s(magnitude, L"%.1f", event.magnitude);
+        swprintf_s(latitude, L"%.5f", event.latitude);
+        swprintf_s(longitude, L"%.5f", event.longitude);
+        swprintf_s(depth, L"%.1f", event.depthKm);
+
+        SetTemplateVariable(variables, L"$DATE", CurrentDateText());
+        SetTemplateVariable(variables, L"$MAGNITUDE", magnitude);
+        SetTemplateVariable(variables, L"$PLACE", event.place.empty() ? L"unknown region" : event.place);
+        SetTemplateVariable(variables, L"$TIME", event.timeText);
+        SetTemplateVariable(variables, L"%LATITUDE", latitude);
+        SetTemplateVariable(variables, L"%LONGITUDE", longitude);
+        SetTemplateVariable(variables, L"%DEPTH", depth);
+        return variables;
+    }
+
     std::wstring FormatTemplateVariablesForEdit() const
     {
         std::wstring text;
@@ -4112,6 +4389,74 @@ private:
         }
     }
 
+    static bool HasPrefixNoCase(const std::wstring& value, const std::wstring& prefix)
+    {
+        return StartsWithNoCase(value, prefix);
+    }
+
+    static bool NeedsAnArticle(const std::wstring& nextWord)
+    {
+        std::wstring word = ToLower(Trim(nextWord));
+        if (word.empty())
+            return false;
+
+        while (!word.empty() && !iswalnum(word.front()))
+            word.erase(word.begin());
+        if (word.empty())
+            return false;
+
+        if (HasPrefixNoCase(word, L"honest") || HasPrefixNoCase(word, L"honour") ||
+            HasPrefixNoCase(word, L"hour") || HasPrefixNoCase(word, L"heir"))
+            return true;
+
+        if (HasPrefixNoCase(word, L"user") || HasPrefixNoCase(word, L"unit") ||
+            HasPrefixNoCase(word, L"university") || HasPrefixNoCase(word, L"unicorn") ||
+            HasPrefixNoCase(word, L"euro") || HasPrefixNoCase(word, L"one"))
+            return false;
+
+        if (word.size() == 1) {
+            wchar_t ch = static_cast<wchar_t>(towupper(word[0]));
+            return wcschr(L"AEFHILMNORSX", ch) != nullptr;
+        }
+
+        bool allCaps = true;
+        for (wchar_t ch : nextWord) {
+            if (iswalpha(ch) && !iswupper(ch)) {
+                allCaps = false;
+                break;
+            }
+        }
+        if (allCaps) {
+            wchar_t ch = static_cast<wchar_t>(towupper(nextWord[0]));
+            return wcschr(L"AEFHILMNORSX", ch) != nullptr;
+        }
+
+        wchar_t first = word[0];
+        return first == L'a' || first == L'e' || first == L'i' || first == L'o' || first == L'u';
+    }
+
+    static std::wstring FixIndefiniteArticles(std::wstring text)
+    {
+        std::wregex articleRe(LR"(\b(A|An|a|an)\s+([A-Za-z0-9][A-Za-z0-9'\-]*))");
+        std::wstring output;
+        size_t cursor = 0;
+        for (std::wsregex_iterator it(text.begin(), text.end(), articleRe), end; it != end; ++it) {
+            const auto& match = *it;
+            const size_t pos = static_cast<size_t>(match.position(0));
+            output.append(text, cursor, pos - cursor);
+            std::wstring originalArticle = match[1].str();
+            std::wstring word = match[2].str();
+            bool useAn = NeedsAnArticle(word);
+            bool upper = !originalArticle.empty() && iswupper(originalArticle[0]);
+            output += upper ? (useAn ? L"An" : L"A") : (useAn ? L"an" : L"a");
+            output += L" ";
+            output += word;
+            cursor = pos + static_cast<size_t>(match.length(0));
+        }
+        output.append(text, cursor, std::wstring::npos);
+        return output;
+    }
+
     std::wstring RenderReportTemplate(const ReportTemplate& reportTemplate) const
     {
         std::wstring output = reportTemplate.body;
@@ -4121,7 +4466,7 @@ private:
             });
         for (const auto& item : variables)
             ReplaceAllText(output, item.first, item.second);
-        return output;
+        return FixIndefiniteArticles(output);
     }
 
     bool CopyTextToClipboard(const std::wstring& text, HWND owner)
@@ -4191,8 +4536,10 @@ private:
 
     void ShowTemplatesWizardWindow()
     {
-        EnsureDefaultReportTemplates();
-        if (m_reportTemplates.empty()) {
+        m_templateWizardContext = TemplateContext::Roads;
+        EnsureDefaultTemplatesForContext(m_templateWizardContext);
+        const auto& templates = TemplatesForContext(m_templateWizardContext);
+        if (templates.empty()) {
             MessageBoxW(m_hwnd, L"No templates are configured. Open Roads > Edit Templates to add one.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
             return;
         }
@@ -4204,10 +4551,41 @@ private:
         }
 
         m_templateWizardAlertId = alert->id;
+        m_templateWizardEarthquakeId.clear();
         m_templateWizardStep = 0;
         m_templateWizardTemplateIndex = 0;
         m_templateWizardVariables = BuildTemplateVariables(*alert);
 
+        ShowTemplatesWizardWindowShell(L"Road Templates Wizard");
+    }
+
+    void ShowEarthquakeTemplatesWizardWindow()
+    {
+        m_templateWizardContext = TemplateContext::Earthquakes;
+        EnsureDefaultTemplatesForContext(m_templateWizardContext);
+        const auto& templates = TemplatesForContext(m_templateWizardContext);
+        if (templates.empty()) {
+            MessageBoxW(m_hwnd, L"No templates are configured. Open Earthquakes > Edit Templates to add one.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        const EarthquakeEvent* event = FindSelectedEarthquake();
+        if (!event) {
+            MessageBoxW(m_hwnd, L"Select an earthquake in the Earthquakes List first, then open the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        m_templateWizardAlertId.clear();
+        m_templateWizardEarthquakeId = EarthquakeStableKey(*event);
+        m_templateWizardStep = 0;
+        m_templateWizardTemplateIndex = 0;
+        m_templateWizardVariables = BuildEarthquakeTemplateVariables(*event);
+
+        ShowTemplatesWizardWindowShell(L"Earthquake Templates Wizard");
+    }
+
+    void ShowTemplatesWizardWindowShell(const wchar_t* title)
+    {
         static bool registered = false;
         if (!registered) {
             WNDCLASSEXW wc{};
@@ -4225,16 +4603,19 @@ private:
             m_templatesWizardWnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 kTemplatesWizardClassName,
-                L"Templates Wizard",
+                title,
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                640,
+                720,
                 460,
                 m_hwnd,
                 nullptr,
                 m_hInst,
                 this);
+        }
+        else {
+            SetWindowTextSafe(m_templatesWizardWnd, title);
         }
 
         PopulateTemplatesWizardList();
@@ -4251,29 +4632,32 @@ private:
         m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 92, 584, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
         m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 18, 92, 584, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
         m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 92, 584, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
-        m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 234, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
-        m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 344, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
-        m_templateWizardCopyBtn = CreateWindowExW(0, L"BUTTON", L"Copy", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 454, 344, 72, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 534, 344, 68, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_CLOSE), m_hInst, nullptr);
+        m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 188, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
+        m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 298, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
+        m_templateWizardCopyBtn = CreateWindowExW(0, L"BUTTON", L"Copy", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 408, 344, 72, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY), m_hInst, nullptr);
+        m_templateWizardCopyLocationBtn = CreateWindowExW(0, L"BUTTON", L"Copy Location", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 488, 344, 118, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_LOCATION), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 614, 344, 68, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_CLOSE), m_hInst, nullptr);
 
-        for (HWND h : { m_templateWizardDesc, m_templateWizardList, m_templateWizardVariablesEdit, m_templateWizardPreviewEdit, m_templateWizardPrevBtn, m_templateWizardNextBtn, m_templateWizardCopyBtn, close }) {
+        for (HWND h : { m_templateWizardDesc, m_templateWizardList, m_templateWizardVariablesEdit, m_templateWizardPreviewEdit, m_templateWizardPrevBtn, m_templateWizardNextBtn, m_templateWizardCopyBtn, m_templateWizardCopyLocationBtn, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
 
         PopulateTemplatesWizardList();
         RenderTemplatesWizardStep();
+        AutoFitWindowToChildren(parent);
     }
 
     void PopulateTemplatesWizardList()
     {
         if (!m_templateWizardList)
             return;
+        const auto& templates = TemplatesForContext(m_templateWizardContext);
         SendMessageW(m_templateWizardList, LB_RESETCONTENT, 0, 0);
-        for (const ReportTemplate& reportTemplate : m_reportTemplates)
+        for (const ReportTemplate& reportTemplate : templates)
             SendMessageW(m_templateWizardList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(reportTemplate.name.c_str()));
-        if (!m_reportTemplates.empty()) {
-            m_templateWizardTemplateIndex = MinValue<size_t>(m_templateWizardTemplateIndex, m_reportTemplates.size() - 1);
+        if (!templates.empty()) {
+            m_templateWizardTemplateIndex = MinValue<size_t>(m_templateWizardTemplateIndex, templates.size() - 1);
             SendMessageW(m_templateWizardList, LB_SETCURSEL, static_cast<WPARAM>(m_templateWizardTemplateIndex), 0);
         }
     }
@@ -4290,18 +4674,20 @@ private:
         ShowWindow(m_templateWizardVariablesEdit, variableStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardPreviewEdit, reviewStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardCopyBtn, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardCopyLocationBtn, reviewStep ? SW_SHOW : SW_HIDE);
         EnableWindow(m_templateWizardPrevBtn, m_templateWizardStep > 0);
         SetWindowTextSafe(m_templateWizardNextBtn, reviewStep ? L"Finish" : L"Next");
 
         if (chooseStep)
-            SetWindowTextSafe(m_templateWizardDesc, L"Choose the report template to use for the selected incident.");
+            SetWindowTextSafe(m_templateWizardDesc, m_templateWizardContext == TemplateContext::Earthquakes ? L"Choose the report template to use for the selected earthquake." : L"Choose the report template to use for the selected incident.");
         else if (variableStep)
             SetWindowTextSafe(m_templateWizardDesc, L"Review and edit the variables only. Leave the template text itself unchanged here.");
         else {
             SetWindowTextSafe(m_templateWizardDesc, L"Review the completed message, then copy it to the clipboard.");
-            if (!m_reportTemplates.empty()) {
-                m_templateWizardTemplateIndex = MinValue<size_t>(m_templateWizardTemplateIndex, m_reportTemplates.size() - 1);
-                SetWindowTextSafe(m_templateWizardPreviewEdit, RenderReportTemplate(m_reportTemplates[m_templateWizardTemplateIndex]));
+            const auto& templates = TemplatesForContext(m_templateWizardContext);
+            if (!templates.empty()) {
+                m_templateWizardTemplateIndex = MinValue<size_t>(m_templateWizardTemplateIndex, templates.size() - 1);
+                SetWindowTextSafe(m_templateWizardPreviewEdit, RenderReportTemplate(templates[m_templateWizardTemplateIndex]));
             }
         }
     }
@@ -4314,7 +4700,8 @@ private:
         }
         if (id == IDC_TEMPLATES_WIZARD_LIST && code == LBN_SELCHANGE) {
             int selected = static_cast<int>(SendMessageW(m_templateWizardList, LB_GETCURSEL, 0, 0));
-            if (selected >= 0 && selected < static_cast<int>(m_reportTemplates.size()))
+            const auto& templates = TemplatesForContext(m_templateWizardContext);
+            if (selected >= 0 && selected < static_cast<int>(templates.size()))
                 m_templateWizardTemplateIndex = static_cast<size_t>(selected);
             return;
         }
@@ -4327,7 +4714,8 @@ private:
         if (id == IDC_TEMPLATES_WIZARD_NEXT && code == BN_CLICKED) {
             if (m_templateWizardStep == 0) {
                 int selected = static_cast<int>(SendMessageW(m_templateWizardList, LB_GETCURSEL, 0, 0));
-                if (selected >= 0 && selected < static_cast<int>(m_reportTemplates.size()))
+                const auto& templates = TemplatesForContext(m_templateWizardContext);
+                if (selected >= 0 && selected < static_cast<int>(templates.size()))
                     m_templateWizardTemplateIndex = static_cast<size_t>(selected);
                 SetWindowTextSafe(m_templateWizardVariablesEdit, FormatTemplateVariablesForEdit());
                 m_templateWizardStep = 1;
@@ -4348,6 +4736,14 @@ private:
                 SetStatusText(L"Template message copied to clipboard.");
             else
                 SetStatusText(L"Could not copy template message to clipboard.");
+            return;
+        }
+        if (id == IDC_TEMPLATES_WIZARD_COPY_LOCATION && code == BN_CLICKED) {
+            std::wstring location = TemplateVariableValue(m_templateWizardContext == TemplateContext::Earthquakes ? L"$PLACE" : L"%LOCATION");
+            if (CopyTextToClipboard(location, m_templatesWizardWnd))
+                SetStatusText(m_templateWizardContext == TemplateContext::Earthquakes ? L"Earthquake place copied to clipboard." : L"Incident location copied to clipboard.");
+            else
+                SetStatusText(L"Could not copy location to clipboard.");
             return;
         }
     }
@@ -4388,7 +4784,20 @@ private:
 
     void ShowTemplatesEditorWindow()
     {
-        EnsureDefaultReportTemplates();
+        m_templateEditorContext = TemplateContext::Roads;
+        EnsureDefaultTemplatesForContext(m_templateEditorContext);
+        ShowTemplatesEditorWindowShell(L"Edit Road Templates");
+    }
+
+    void ShowEarthquakeTemplatesEditorWindow()
+    {
+        m_templateEditorContext = TemplateContext::Earthquakes;
+        EnsureDefaultTemplatesForContext(m_templateEditorContext);
+        ShowTemplatesEditorWindowShell(L"Edit Earthquake Templates");
+    }
+
+    void ShowTemplatesEditorWindowShell(const wchar_t* title)
+    {
         static bool registered = false;
         if (!registered) {
             WNDCLASSEXW wc{};
@@ -4406,7 +4815,7 @@ private:
             m_templatesEditorWnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 kTemplatesEditorClassName,
-                L"Edit Templates",
+                title,
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -4416,6 +4825,9 @@ private:
                 nullptr,
                 m_hInst,
                 this);
+        }
+        else {
+            SetWindowTextSafe(m_templatesEditorWnd, title);
         }
 
         SyncTemplatesEditorList();
@@ -4442,6 +4854,7 @@ private:
         }
 
         SyncTemplatesEditorList();
+        AutoFitWindowToChildren(parent);
     }
 
     int SelectedTemplateEditorIndex() const
@@ -4449,7 +4862,7 @@ private:
         if (!m_templateEditorList)
             return -1;
         int selected = static_cast<int>(SendMessageW(m_templateEditorList, LB_GETCURSEL, 0, 0));
-        if (selected < 0 || selected >= static_cast<int>(m_reportTemplates.size()))
+        if (selected < 0 || selected >= static_cast<int>(TemplatesForContext(m_templateEditorContext).size()))
             return -1;
         return selected;
     }
@@ -4460,12 +4873,13 @@ private:
             return;
 
         int previous = SelectedTemplateEditorIndex();
+        const auto& templates = TemplatesForContext(m_templateEditorContext);
         SendMessageW(m_templateEditorList, LB_RESETCONTENT, 0, 0);
-        for (const ReportTemplate& reportTemplate : m_reportTemplates)
+        for (const ReportTemplate& reportTemplate : templates)
             SendMessageW(m_templateEditorList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(reportTemplate.name.c_str()));
 
-        if (!m_reportTemplates.empty()) {
-            previous = ClampValue(previous, 0, static_cast<int>(m_reportTemplates.size()) - 1);
+        if (!templates.empty()) {
+            previous = ClampValue(previous, 0, static_cast<int>(templates.size()) - 1);
             SendMessageW(m_templateEditorList, LB_SETCURSEL, previous, 0);
             LoadSelectedTemplateIntoEditor();
         }
@@ -4480,7 +4894,7 @@ private:
         int selected = SelectedTemplateEditorIndex();
         if (selected < 0)
             return;
-        const ReportTemplate& reportTemplate = m_reportTemplates[static_cast<size_t>(selected)];
+        const ReportTemplate& reportTemplate = TemplatesForContext(m_templateEditorContext)[static_cast<size_t>(selected)];
         SetWindowTextSafe(m_templateEditorNameEdit, reportTemplate.name);
         SetWindowTextSafe(m_templateEditorBodyEdit, reportTemplate.body);
     }
@@ -4499,21 +4913,22 @@ private:
             return;
 
         if (id == IDC_TEMPLATES_EDITOR_NEW) {
+            auto& templates = TemplatesForContext(m_templateEditorContext);
             ReportTemplate reportTemplate;
-            reportTemplate.name = L"Template " + std::to_wstring(m_reportTemplates.size() + 1);
-            reportTemplate.body = L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION %JUNCTIONS_WITH_DATA with %LANECLOSURES closed. Allow extra time for your journey.";
-            m_reportTemplates.push_back(std::move(reportTemplate));
-            m_reportTemplatesConfigured = true;
+            reportTemplate.name = L"Template " + std::to_wstring(templates.size() + 1);
+            reportTemplate.body = DefaultTemplateBodyForContext(m_templateEditorContext);
+            templates.push_back(std::move(reportTemplate));
+            TemplatesConfiguredForContext(m_templateEditorContext) = true;
             SaveSettings();
             SyncTemplatesEditorList();
-            SendMessageW(m_templateEditorList, LB_SETCURSEL, static_cast<WPARAM>(m_reportTemplates.size() - 1), 0);
+            SendMessageW(m_templateEditorList, LB_SETCURSEL, static_cast<WPARAM>(templates.size() - 1), 0);
             LoadSelectedTemplateIntoEditor();
         }
         else if (id == IDC_TEMPLATES_EDITOR_SAVE) {
             int selected = SelectedTemplateEditorIndex();
             if (selected < 0)
                 return;
-            ReportTemplate& reportTemplate = m_reportTemplates[static_cast<size_t>(selected)];
+            ReportTemplate& reportTemplate = TemplatesForContext(m_templateEditorContext)[static_cast<size_t>(selected)];
             reportTemplate.name = Trim(GetWindowTextString(m_templateEditorNameEdit));
             reportTemplate.body = GetWindowTextString(m_templateEditorBodyEdit);
             if (reportTemplate.name.empty())
@@ -4527,8 +4942,9 @@ private:
             int selected = SelectedTemplateEditorIndex();
             if (selected < 0)
                 return;
-            m_reportTemplates.erase(m_reportTemplates.begin() + selected);
-            m_reportTemplatesConfigured = true;
+            auto& templates = TemplatesForContext(m_templateEditorContext);
+            templates.erase(templates.begin() + selected);
+            TemplatesConfiguredForContext(m_templateEditorContext) = true;
             SaveSettings();
             SyncTemplatesEditorList();
             SetStatusText(L"Template removed.");
@@ -4569,7 +4985,7 @@ private:
 
         HWND hwnd = m_hwnd;
         std::wstring url = EarthquakeQueryUrl();
-        std::thread([hwnd, url, notify]() {
+        ScheduleBackgroundTask([hwnd, url, notify]() {
             auto* result = new EarthquakeResult{};
             result->notify = notify;
             std::string body;
@@ -4595,7 +5011,7 @@ private:
             }
             if (!PostMessageW(hwnd, WM_APP_EARTHQUAKE_READY, 0, reinterpret_cast<LPARAM>(result)))
                 delete result;
-            }).detach();
+        });
     }
 
     void OnEarthquakeReady(EarthquakeResult* result)
@@ -4683,39 +5099,112 @@ private:
         return line;
     }
 
-    void NotifyForMatchingEarthquakes(const std::vector<EarthquakeEvent>& events)
+    std::wstring EarthquakeStableKey(const EarthquakeEvent& event) const
     {
-        std::vector<const EarthquakeEvent*> matches;
-        for (const EarthquakeEvent& event : events) {
-            if (!EarthquakeMatchesNotification(event))
-                continue;
-            std::wstring key = event.id + L"|" + std::to_wstring(event.timeMs);
-            if (m_notifiedEarthquakeKeys.insert(key).second)
-                matches.push_back(&event);
-        }
+        if (!event.id.empty())
+            return event.id;
+        std::wstring key = event.place;
+        key += L"|";
+        key += std::to_wstring(event.timeMs);
+        return key;
+    }
 
-        if (matches.empty())
+    std::wstring EarthquakeSignature(const EarthquakeEvent& event) const
+    {
+        std::wstring signature = std::to_wstring(event.timeMs);
+        signature += L"|";
+        signature += event.place;
+        signature += L"|";
+        signature += std::to_wstring(static_cast<int>(std::round(event.magnitude * 100.0)));
+        signature += L"|";
+        signature += std::to_wstring(static_cast<int>(std::round(event.latitude * 100000.0)));
+        signature += L"|";
+        signature += std::to_wstring(static_cast<int>(std::round(event.longitude * 100000.0)));
+        signature += L"|";
+        signature += std::to_wstring(static_cast<int>(std::round(event.depthKm * 10.0)));
+        return signature;
+    }
+
+    void PublishEarthquakeNotificationBatch(
+        const std::vector<std::wstring>& lines,
+        const std::wstring& singleTitle,
+        const std::wstring& pluralSuffix)
+    {
+        if (lines.empty())
             return;
 
         std::wstring title;
         std::wstring body;
-        if (matches.size() == 1) {
-            title = L"Earthquake notification";
-            body = EarthquakeNotificationLine(*matches.front());
+        if (lines.size() == 1) {
+            title = singleTitle;
+            body = lines.front();
         }
         else {
-            title = std::to_wstring(matches.size()) + L" earthquake notifications";
-            const size_t displayCount = MinValue<size_t>(matches.size(), 3);
+            title = std::to_wstring(lines.size()) + L" " + pluralSuffix;
+            const size_t displayCount = MinValue<size_t>(lines.size(), 3);
             for (size_t i = 0; i < displayCount; ++i) {
                 if (!body.empty())
                     body += L"\r\n";
-                body += EarthquakeNotificationLine(*matches[i]);
+                body += lines[i];
             }
-            if (matches.size() > displayCount)
+            if (lines.size() > displayCount)
                 body += L"\r\n...";
         }
 
         PublishNotification(title, body);
+    }
+
+    void NotifyForMatchingEarthquakes(const std::vector<EarthquakeEvent>& events)
+    {
+        std::unordered_set<std::wstring> currentKeys;
+        std::vector<std::wstring> newLines;
+        std::vector<std::wstring> updateLines;
+        std::vector<std::wstring> removedLines;
+
+        for (const EarthquakeEvent& event : events) {
+            std::wstring key = EarthquakeStableKey(event);
+            currentKeys.insert(key);
+
+            if (!EarthquakeMatchesNotification(event)) {
+                auto existing = m_notifiedEarthquakeStates.find(key);
+                if (m_haveEarthquakeNotificationSnapshot && existing != m_notifiedEarthquakeStates.end()) {
+                    removedLines.push_back(existing->second.line);
+                    m_notifiedEarthquakeStates.erase(existing);
+                }
+                continue;
+            }
+
+            std::wstring signature = EarthquakeSignature(event);
+            std::wstring line = EarthquakeNotificationLine(event);
+            auto existing = m_notifiedEarthquakeStates.find(key);
+            if (existing == m_notifiedEarthquakeStates.end()) {
+                newLines.push_back(line);
+                m_notifiedEarthquakeStates[key] = EarthquakeNotificationState{ signature, line };
+            }
+            else if (existing->second.signature != signature) {
+                updateLines.push_back(line);
+                existing->second.signature = std::move(signature);
+                existing->second.line = std::move(line);
+            }
+        }
+
+        if (m_haveEarthquakeNotificationSnapshot) {
+            for (auto it = m_notifiedEarthquakeStates.begin(); it != m_notifiedEarthquakeStates.end();) {
+                if (currentKeys.find(it->first) == currentKeys.end()) {
+                    removedLines.push_back(it->second.line);
+                    it = m_notifiedEarthquakeStates.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+
+        m_haveEarthquakeNotificationSnapshot = true;
+
+        PublishEarthquakeNotificationBatch(newLines, L"Earthquake notification", L"earthquake notifications");
+        PublishEarthquakeNotificationBatch(updateLines, L"Earthquake update", L"earthquake updates");
+        PublishEarthquakeNotificationBatch(removedLines, L"Earthquake removed", L"earthquake removals");
     }
 
     static LRESULT CALLBACK EarthquakeListWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -4830,6 +5319,7 @@ private:
         col.pszText = const_cast<LPWSTR>(c3.c_str());
         col.cx = 90;
         SendMessageW(m_earthquakeListView, LVM_INSERTCOLUMNW, 3, reinterpret_cast<LPARAM>(&col));
+        AutoFitWindowToChildren(parent);
     }
 
     bool EarthquakeMatchesListFilters(const EarthquakeEvent& event) const
@@ -4862,11 +5352,13 @@ private:
             return;
 
         SendMessageW(m_earthquakeListView, LVM_DELETEALLITEMS, 0, 0);
+        m_filteredEarthquakes.clear();
         int row = 0;
         for (const EarthquakeEvent& event : m_allEarthquakes) {
             if (!EarthquakeMatchesListFilters(event))
                 continue;
 
+            m_filteredEarthquakes.push_back(event);
             wchar_t magText[32]{};
             swprintf_s(magText, L"%.1f", event.magnitude);
             LVITEMW item{};
@@ -4908,6 +5400,7 @@ private:
             m_earthquakeFilterRegion.clear();
             m_polygonCaptureTarget = PolygonCaptureTarget::EarthquakeRegion;
             m_activeIncidentRegionIndex = static_cast<size_t>(-1);
+            m_map.SetActiveNotificationPolygonIndex(static_cast<size_t>(-1));
             m_map.SetDraftPolygon(m_earthquakeFilterRegion);
             m_map.SetPolygonCaptureActive(true);
             SetStatusText(L"Click the map to draw the earthquake filter region. Drag to pan.");
@@ -5011,6 +5504,7 @@ private:
         }
         SendMessageW(m_earthquakeNotificationMagnitudeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"4.0"));
         SyncEarthquakeNotificationControls();
+        AutoFitWindowToChildren(parent);
     }
 
     void SyncEarthquakeNotificationControls()
@@ -5202,6 +5696,7 @@ private:
         SendMessageW(m_settingsOrderCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Updated"));
         SendMessageW(m_settingsOrderCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Title"));
         SyncSettingsControls();
+        AutoFitWindowToChildren(parent);
     }
 
     void SyncSettingsControls()
@@ -5356,6 +5851,7 @@ private:
     HWND m_templateWizardPrevBtn = nullptr;
     HWND m_templateWizardNextBtn = nullptr;
     HWND m_templateWizardCopyBtn = nullptr;
+    HWND m_templateWizardCopyLocationBtn = nullptr;
     HWND m_templateEditorList = nullptr;
     HWND m_templateEditorNameEdit = nullptr;
     HWND m_templateEditorBodyEdit = nullptr;
@@ -5373,13 +5869,18 @@ private:
     std::vector<AppNotification> m_notificationHistory;
     std::vector<GeoPolygon> m_incidentNotificationRegions;
     std::vector<ReportTemplate> m_reportTemplates;
+    std::vector<ReportTemplate> m_earthquakeReportTemplates;
     std::vector<std::pair<std::wstring, std::wstring>> m_templateWizardVariables;
     std::vector<EarthquakeEvent> m_allEarthquakes;
+    std::vector<EarthquakeEvent> m_filteredEarthquakes;
     std::vector<GeoPoint> m_earthquakeFilterRegion;
     std::wstring m_selectedId;
     std::wstring m_templateWizardAlertId;
+    std::wstring m_templateWizardEarthquakeId;
     size_t m_templateWizardStep = 0;
     size_t m_templateWizardTemplateIndex = 0;
+    TemplateContext m_templateWizardContext = TemplateContext::Roads;
+    TemplateContext m_templateEditorContext = TemplateContext::Roads;
     bool m_programmaticSelection = false;
     bool m_syncingControls = false;
     bool m_isSidePanelVisible = true;
@@ -5412,9 +5913,11 @@ private:
     std::atomic_bool m_earthquakeFetchInProgress{ false };
     bool m_notificationIconAdded = false;
     bool m_haveIncidentNotificationSnapshot = false;
+    bool m_haveEarthquakeNotificationSnapshot = false;
     bool m_reportTemplatesConfigured = false;
+    bool m_earthquakeReportTemplatesConfigured = false;
     std::unordered_map<std::wstring, IncidentNotificationState> m_notifiedIncidentStates;
-    std::unordered_set<std::wstring> m_notifiedEarthquakeKeys;
+    std::unordered_map<std::wstring, EarthquakeNotificationState> m_notifiedEarthquakeStates;
     PolygonCaptureTarget m_polygonCaptureTarget = PolygonCaptureTarget::None;
     size_t m_activeIncidentRegionIndex = static_cast<size_t>(-1);
     std::unordered_set<std::wstring> m_deletedNoteIds;

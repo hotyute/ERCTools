@@ -15,7 +15,11 @@ public:
     using NoteUpdateCallback = std::function<void(size_t index, const std::wstring& text)>;
     using NoteDeleteCallback = std::function<void(size_t index)>;
     using PolygonPointCallback = std::function<void(double lat, double lon)>;
+    using PolygonPointMoveCallback = std::function<void(size_t polygonIndex, size_t pointIndex, double lat, double lon)>;
+    using PolygonPointDeleteCallback = std::function<void(size_t polygonIndex, size_t pointIndex)>;
+    using PolygonClearCallback = std::function<void(size_t polygonIndex)>;
     using RefreshCallback = std::function<void()>;
+    using NotificationHistoryClearCallback = std::function<void()>;
 
     MapView();
     ~MapView();
@@ -32,10 +36,15 @@ public:
     void SetNoteUpdateCallback(NoteUpdateCallback cb);
     void SetNoteDeleteCallback(NoteDeleteCallback cb);
     void SetPolygonPointCallback(PolygonPointCallback cb);
+    void SetPolygonPointMoveCallback(PolygonPointMoveCallback cb);
+    void SetPolygonPointDeleteCallback(PolygonPointDeleteCallback cb);
+    void SetPolygonClearCallback(PolygonClearCallback cb);
     void SetRefreshCallback(RefreshCallback cb);
+    void SetNotificationHistoryClearCallback(NotificationHistoryClearCallback cb);
     void SetAlerts(const std::vector<TrafficAlert>& alerts);
     void SetNotes(const std::vector<MapNote>& notes);
     void SetNotificationPolygons(const std::vector<GeoPolygon>& polygons);
+    void SetActiveNotificationPolygonIndex(size_t index);
     void SetDraftPolygon(const std::vector<GeoPoint>& points);
     void SetPolygonCaptureActive(bool active);
     void SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes);
