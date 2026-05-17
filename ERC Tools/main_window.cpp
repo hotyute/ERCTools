@@ -2010,7 +2010,7 @@ private:
                 delete result;
                 g_fetchInProgress.store(false);
             }
-        });
+            });
     }
 
     void OnFeedReady(FeedResult* result)
@@ -2445,7 +2445,7 @@ private:
                 InvalidateRect(mapHwnd, nullptr, FALSE);
             else if (hwnd && !g_appQuitting.load() && IsWindow(hwnd))
                 InvalidateRect(hwnd, nullptr, FALSE);
-        });
+            });
     }
 
     bool TextFilterMatches(const TrafficAlert& a) const
@@ -2667,7 +2667,7 @@ private:
                 return;
             }
             PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
-        });
+            });
     }
 
     void SendChatAsync()
@@ -2695,7 +2695,7 @@ private:
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
             else
                 delete result;
-        });
+            });
     }
 
     static bool IsLocalOnlyNoteId(const std::wstring& id)
@@ -2735,7 +2735,7 @@ private:
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
             else
                 delete result;
-        });
+            });
     }
 
     void UpdateMapNote(size_t index, const std::wstring& text)
@@ -2779,7 +2779,7 @@ private:
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
             else
                 delete result;
-        });
+            });
     }
 
     void DeleteMapNote(size_t index)
@@ -2816,7 +2816,7 @@ private:
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
             else
                 delete result;
-        });
+            });
     }
 
     void ReconcilePendingNoteEdits(const std::vector<MapNote>& serverNotes)
@@ -2937,7 +2937,7 @@ private:
                 delete result;
                 g_boundaryDownloadInProgress.store(false);
             }
-        });
+            });
     }
 
     void OnBoundaryReady(BoundaryDownloadResult* result)
@@ -3935,6 +3935,38 @@ private:
         return true;
     }
 
+    static std::wstring CompactTemplateWhitespace(const std::wstring& text)
+    {
+        std::wstring compact;
+        compact.reserve(text.size());
+        bool lastSpace = false;
+        for (wchar_t ch : text) {
+            bool isSpace = iswspace(ch) != 0;
+            if (isSpace) {
+                if (!lastSpace)
+                    compact.push_back(L' ');
+                lastSpace = true;
+            }
+            else {
+                compact.push_back(ch);
+                lastSpace = false;
+            }
+        }
+        std::wstring value = Trim(compact);
+        std::wstring normalized;
+        normalized.reserve(value.size());
+        for (size_t i = 0; i < value.size(); ++i) {
+            if (value[i] == L' ') {
+                wchar_t previous = normalized.empty() ? L'\0' : normalized.back();
+                wchar_t next = (i + 1 < value.size()) ? value[i + 1] : L'\0';
+                if (previous == L'(' || next == L')' || next == L',' || next == L';')
+                    continue;
+            }
+            normalized.push_back(value[i]);
+        }
+        return Trim(normalized);
+    }
+
     static std::vector<std::wstring> ExtractRoadRefsFromText(const std::wstring& text, const std::wstring& currentRoad)
     {
         std::vector<std::wstring> refs;
@@ -3949,13 +3981,21 @@ private:
         return refs;
     }
 
+    static bool IsBracketedRoadSignItem(const std::wstring& item)
+    {
+        static const std::wregex bracketedRoadRe(LR"(^\s*\([AMB]\d{1,4}[A-Z]?(?:\([A-Z]+\))?\)\s*$)", std::regex_constants::icase);
+        return std::regex_match(item, bracketedRoadRe);
+    }
+
     static std::vector<std::wstring> ExtractRoadsOrgSignPanelItems(const std::wstring& fragment, const std::wstring& currentRoad)
     {
         std::wstring text = fragment;
+        text = std::regex_replace(text, std::wregex(LR"(<\s*span\b[^>]*\bclass\s*=\s*(['"])[^'"]*\bsr-only\b[^'"]*\1[^>]*>[\s\S]*?</\s*span\s*>)", std::regex_constants::icase), L" ");
+        text = std::regex_replace(text, std::wregex(LR"(<\s*i\b[^>]*>[\s\S]*?</\s*i\s*>)", std::regex_constants::icase), L" ");
         text = std::regex_replace(text, std::wregex(LR"(<\s*img\b[^>]*>)", std::regex_constants::icase), L" ");
         text = std::regex_replace(text, std::wregex(LR"(<\s*hr\b[^>]*>)", std::regex_constants::icase), L"\n");
         text = std::regex_replace(text, std::wregex(LR"(<\s*br\b[^>]*>)", std::regex_constants::icase), L"\n");
-        text = std::regex_replace(text, std::wregex(LR"(<\s*/\s*(?:div|p|span|li)\s*>)", std::regex_constants::icase), L"\n");
+        text = std::regex_replace(text, std::wregex(LR"(<\s*/\s*(?:div|p|li)\s*>)", std::regex_constants::icase), L"\n");
         text = std::regex_replace(text, std::wregex(LR"(<[^>]+>)"), L" ");
         text = DecodeBasicHtmlEntities(text);
 
@@ -3963,13 +4003,20 @@ private:
         size_t pos = 0;
         while (pos <= text.size()) {
             size_t next = text.find_first_of(L"\r\n", pos);
-            std::wstring line = Trim(text.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos));
+            std::wstring line = CompactTemplateWhitespace(text.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos));
             if (!line.empty()) {
                 std::wstring lower = ToLower(line);
                 if (lower != L"link" && lower != L"details" && lower != L"lanes" && lower != L"signs" &&
                     lower != L"image" && lower.find(L"image:") != 0)
                 {
-                    PushUniqueText(items, line);
+                    if (IsBracketedRoadSignItem(line) && !items.empty()) {
+                        std::wstring previous = items.back();
+                        items.pop_back();
+                        PushUniqueText(items, previous + L" " + line);
+                    }
+                    else {
+                        PushUniqueText(items, line);
+                    }
                 }
             }
             if (next == std::wstring::npos)
@@ -3992,12 +4039,12 @@ private:
 
     static bool TryStandaloneSignRoad(const std::wstring& item, std::wstring& roadOut)
     {
-        std::wregex roadRe(LR"(^\s*([AMB]\d{1,4}[A-Z]?(?:\([A-Z]+\))?)\s*(?:Link)?\s*$)", std::regex_constants::icase);
-        std::wsmatch m;
-        if (!std::regex_match(item, m, roadRe) || m.size() <= 1)
+        std::wstring value = CompactTemplateWhitespace(item);
+        std::wregex roadRe(LR"(^\s*[AMB]\d{1,4}[A-Z]?(?:\([A-Z]+\))?(?:\s+\([AMB]\d{1,4}[A-Z]?(?:\([A-Z]+\))?\))*\s*$)", std::regex_constants::icase);
+        if (!std::regex_match(value, roadRe))
             return false;
 
-        roadOut = Trim(m[1].str());
+        roadOut = std::move(value);
         return !roadOut.empty();
     }
 
@@ -5071,7 +5118,7 @@ private:
             }
             if (!PostMessageW(hwnd, WM_APP_EARTHQUAKE_READY, 0, reinterpret_cast<LPARAM>(result)))
                 delete result;
-        });
+            });
     }
 
     void OnEarthquakeReady(EarthquakeResult* result)

@@ -1237,8 +1237,8 @@ std::vector<TrafficAlert> SampleAlerts()
 
     TrafficAlert a2;
     a2.id = L"sample-2";
-    a2.title = L"Lane closed on the M25";
-    a2.description = L"Location : The M25 clockwise near junction 16\r\nReason : Broken down vehicle\r\nLanes Closed : 2 of 4";
+    a2.title = L"Road Traffic Collision";
+    a2.description = L"Location : The M25 anticlockwise between J5 and J1A\r\nReason : Road Traffic Collision\r\nLanes Closed : 2 of 4";
     a2.road = L"M25";
     a2.region = L"Greater London";
     a2.severity = L"Severe";
