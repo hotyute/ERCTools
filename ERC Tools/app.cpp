@@ -5,6 +5,7 @@
 
 #include "common.h"
 #include "app_state.h"
+#include "login_dialog.h"
 #include "main_window.h"
 #include "util.h"
 
@@ -59,7 +60,13 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
         return 0;
     }
 
-    const int rc = RunMainWindow(hInstance, nCmdShow);
+    ClientSession session;
+    if (!ShowLoginDialog(hInstance, session)) {
+        CoUninitialize();
+        return 0;
+    }
+
+    const int rc = RunMainWindow(hInstance, nCmdShow, session);
 
     g_dwriteFactory.Reset();
     g_wicFactory.Reset();

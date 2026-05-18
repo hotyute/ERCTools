@@ -5,6 +5,7 @@
 
 #include "main_window.h"
 #include "app_state.h"
+#include "client_update.h"
 #include "http.h"
 #include "map_view.h"
 #include "parsing.h"
@@ -127,6 +128,7 @@ constexpr const wchar_t* kEarthquakeNotificationsClassName = L"TrafficEnglandEar
 constexpr const wchar_t* kTemplatesWizardClassName = L"TrafficEnglandTemplatesWizardWindow";
 constexpr const wchar_t* kTemplatesEditorClassName = L"TrafficEnglandTemplatesEditorWindow";
 constexpr UINT WM_APP_NOTIFY_ICON = WM_APP + 20;
+constexpr UINT WM_APP_UPDATE_READY = WM_APP + 21;
 constexpr UINT kNotificationIconId = 1;
 constexpr UINT_PTR kAlertRefreshTimerId = 1;
 constexpr UINT_PTR kServerPollTimerId = 2;
@@ -1043,6 +1045,8 @@ static bool FetchTrafficEnglandAlerts(std::vector<TrafficAlert>& alertsOut, std:
 class MainWindow
 {
 public:
+    explicit MainWindow(ClientSession session) : m_session(std::move(session)) {}
+
     bool Create(HINSTANCE hInst)
     {
         m_hInst = hInst;
@@ -1204,6 +1208,10 @@ private:
 
         case WM_APP_EARTHQUAKE_READY:
             OnEarthquakeReady(reinterpret_cast<EarthquakeResult*>(lParam));
+            return 0;
+
+        case WM_APP_UPDATE_READY:
+            OnClientUpdateReady(reinterpret_cast<ClientUpdateResult*>(lParam));
             return 0;
 
         case WM_DESTROY:
@@ -1431,6 +1439,7 @@ private:
         RefreshFeedAsync();
         FetchEarthquakesAsync(true);
         PollServerAsync();
+        CheckForClientUpdateAsync();
     }
 
     void Layout()
@@ -1660,6 +1669,15 @@ private:
             SendMessageW(m_statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
     }
 
+    std::wstring SessionDisplayName() const
+    {
+        if (!m_session.displayName.empty())
+            return m_session.displayName;
+        if (!m_session.username.empty())
+            return m_session.username;
+        return L"ERCTools";
+    }
+
     void LoadSettings()
     {
         std::ifstream in(GetSettingsPath(), std::ios::binary);
@@ -1784,11 +1802,29 @@ private:
             }
 
             readBool("showEarthquakes", m_showEarthquakes);
+            readString("earthquakeListMagnitudeText", m_earthquakeListMagnitudeText);
+            readString("earthquakeListTimeText", m_earthquakeListTimeText);
             readString("earthquakeNotificationMagnitudeText", m_earthquakeNotificationMagnitudeText);
             readDouble("earthquakeNotificationMagnitude", m_earthquakeNotificationMagnitude);
             double parsedMag = 0.0;
             if (TryParseDoubleText(m_earthquakeNotificationMagnitudeText, parsedMag))
                 m_earthquakeNotificationMagnitude = parsedMag;
+
+            auto earthquakeRegionIt = settings->find("earthquakeFilterRegion");
+            if (earthquakeRegionIt != settings->end() && earthquakeRegionIt->is_array()) {
+                m_earthquakeFilterRegion.clear();
+                for (const json& item : *earthquakeRegionIt) {
+                    if (!item.is_object())
+                        continue;
+                    double lat = 0.0;
+                    double lon = 0.0;
+                    if (PickDouble(item, { "lat", "latitude" }, lat) &&
+                        PickDouble(item, { "lon", "longitude" }, lon))
+                    {
+                        m_earthquakeFilterRegion.push_back({ lat, lon });
+                    }
+                }
+            }
         }
         catch (...) {
             OutputDebugStringW(L"Settings file could not be parsed; using defaults.\n");
@@ -1922,6 +1958,15 @@ private:
                 settings["earthquakeReportTemplates"].push_back(std::move(item));
             }
             settings["showEarthquakes"] = m_showEarthquakes;
+            settings["earthquakeListMagnitudeText"] = WideToUtf8(m_earthquakeListMagnitudeText);
+            settings["earthquakeListTimeText"] = WideToUtf8(m_earthquakeListTimeText);
+            settings["earthquakeFilterRegion"] = json::array();
+            for (const GeoPoint& point : m_earthquakeFilterRegion) {
+                settings["earthquakeFilterRegion"].push_back({
+                    { "lat", point.lat },
+                    { "lon", point.lon }
+                    });
+            }
             settings["earthquakeNotificationMagnitudeText"] = WideToUtf8(m_earthquakeNotificationMagnitudeText);
             settings["earthquakeNotificationMagnitude"] = m_earthquakeNotificationMagnitude;
 
@@ -2624,13 +2669,14 @@ private:
         }
 
         HWND hwnd = m_hwnd;
-        ScheduleBackgroundTask([hwnd, server]() {
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ScheduleBackgroundTask([hwnd, server, authHeaders]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::Poll;
 
             std::string chatBody;
             std::wstring chatError;
-            if (HttpGetText(AppendPath(server, L"/api/chat"), chatBody, chatError)) {
+            if (HttpGetTextWithHeaders(AppendPath(server, L"/api/chat"), authHeaders, chatBody, chatError)) {
                 try {
                     result->chat = ParseChatMessages(json::parse(chatBody));
                     result->chatOk = true;
@@ -2646,7 +2692,7 @@ private:
 
             std::string noteBody;
             std::wstring noteError;
-            if (HttpGetText(AppendPath(server, L"/api/notes"), noteBody, noteError)) {
+            if (HttpGetTextWithHeaders(AppendPath(server, L"/api/notes"), authHeaders, noteBody, noteError)) {
                 try {
                     result->notes = ParseMapNotes(json::parse(noteBody));
                     result->notesOk = true;
@@ -2670,6 +2716,68 @@ private:
             });
     }
 
+    void CheckForClientUpdateAsync()
+    {
+        std::wstring server = ServerBaseUrl();
+        if (server.empty())
+            return;
+
+        HWND hwnd = m_hwnd;
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, session]() {
+            auto* result = new ClientUpdateResult{};
+            CheckAndStageClientUpdate(server, session, *result);
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_UPDATE_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            });
+    }
+
+    void OnClientUpdateReady(ClientUpdateResult* result)
+    {
+        std::unique_ptr<ClientUpdateResult> holder(result);
+        if (!result)
+            return;
+
+        if (!result->ok) {
+            if (!result->error.empty())
+                SetStatusText(L"Update check failed: " + result->error);
+            return;
+        }
+
+        if (!result->updateAvailable) {
+            SetStatusText(L"Ready.");
+            return;
+        }
+
+        std::wstring error;
+        if (!result->restartRequired) {
+            if (ApplyHotClientUpdate(*result, error)) {
+                SetStatusText(L"Updated to " + result->version + L" while running.");
+            }
+            else {
+                SetStatusText(L"Hot update failed: " + error);
+            }
+            return;
+        }
+
+        std::wstring prompt = L"ERC Tools update " + result->version + L" has been downloaded and requires a restart.\n\nRestart now to apply it?";
+        int choice = MessageBoxW(m_hwnd, prompt.c_str(), L"ERC Tools Update", MB_YESNO | MB_ICONQUESTION);
+        if (choice != IDYES) {
+            SetStatusText(L"Update downloaded; restart deferred.");
+            return;
+        }
+
+        if (!LaunchRestartClientUpdate(*result, error)) {
+            SetStatusText(L"Could not launch updater: " + error);
+            return;
+        }
+
+        SetStatusText(L"Restarting to apply update...");
+        PostMessageW(m_hwnd, WM_CLOSE, 0, 0);
+    }
+
     void SendChatAsync()
     {
         std::wstring text = Trim(GetWindowTextString(m_chatEdit));
@@ -2677,19 +2785,21 @@ private:
             return;
 
         SetWindowTextSafe(m_chatEdit, L"");
-        ChatMessage local{ L"Me", text, L"pending" };
+        std::wstring author = SessionDisplayName();
+        ChatMessage local{ author, text, L"pending" };
         m_chatMessages.push_back(local);
         RenderChatHistory();
 
         std::wstring server = ServerBaseUrl();
         HWND hwnd = m_hwnd;
-        ScheduleBackgroundTask([hwnd, server, text]() {
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ScheduleBackgroundTask([hwnd, server, text, author, authHeaders]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::SendChat;
             std::string response;
             std::wstring error;
-            std::string body = "{\"author\":" + JsonEscape(L"ERCTools") + ",\"text\":" + JsonEscape(text) + "}";
-            result->ok = HttpPostJsonText(AppendPath(server, L"/api/chat"), body, response, error);
+            std::string body = "{\"author\":" + JsonEscape(author) + ",\"text\":" + JsonEscape(text) + "}";
+            result->ok = HttpPostJsonTextWithHeaders(AppendPath(server, L"/api/chat"), body, authHeaders, response, error);
             result->error = error;
             if (!g_appQuitting.load() && IsWindow(hwnd))
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
@@ -2707,7 +2817,7 @@ private:
     {
         MapNote note;
         note.id = L"local-" + std::to_wstring(GetTickCount64());
-        note.author = L"Me";
+        note.author = SessionDisplayName();
         note.text = text;
         note.timestamp = L"pending";
         note.latitude = lat;
@@ -2724,12 +2834,13 @@ private:
 
         HWND hwnd = m_hwnd;
         std::string body = BuildNoteJsonBody(note);
-        ScheduleBackgroundTask([hwnd, server, body]() {
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ScheduleBackgroundTask([hwnd, server, body, authHeaders]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::SendNote;
             std::string response;
             std::wstring error;
-            result->ok = HttpPostJsonText(AppendPath(server, L"/api/notes"), body, response, error);
+            result->ok = HttpPostJsonTextWithHeaders(AppendPath(server, L"/api/notes"), body, authHeaders, response, error);
             result->error = error;
             if (!g_appQuitting.load() && IsWindow(hwnd))
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
@@ -2765,15 +2876,16 @@ private:
         HWND hwnd = m_hwnd;
         std::wstring noteId = note.id;
         std::string body = BuildNoteJsonBody(note);
-        ScheduleBackgroundTask([hwnd, server, noteId, body]() {
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ScheduleBackgroundTask([hwnd, server, noteId, body, authHeaders]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::UpdateNote;
             std::string response;
             std::wstring error;
             std::wstring endpoint = AppendNoteIdPath(server, noteId);
-            result->ok = HttpPutJsonText(endpoint, body, response, error);
+            result->ok = HttpPutJsonTextWithHeaders(endpoint, body, authHeaders, response, error);
             if (!result->ok)
-                result->ok = HttpPatchJsonText(endpoint, body, response, error);
+                result->ok = HttpPatchJsonTextWithHeaders(endpoint, body, authHeaders, response, error);
             result->error = error;
             if (!g_appQuitting.load() && IsWindow(hwnd))
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
@@ -2805,12 +2917,13 @@ private:
 
         HWND hwnd = m_hwnd;
         std::wstring noteId = note.id;
-        ScheduleBackgroundTask([hwnd, server, noteId]() {
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ScheduleBackgroundTask([hwnd, server, noteId, authHeaders]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::DeleteNote;
             std::string response;
             std::wstring error;
-            result->ok = HttpDeleteText(AppendNoteIdPath(server, noteId), response, error);
+            result->ok = HttpDeleteTextWithHeaders(AppendNoteIdPath(server, noteId), authHeaders, response, error);
             result->error = error;
             if (!g_appQuitting.load() && IsWindow(hwnd))
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
@@ -5135,7 +5248,6 @@ private:
         }
 
         m_allEarthquakes = std::move(result->events);
-        ApplyEarthquakeVisibility();
         ApplyEarthquakeListFilters();
         if (result->notify)
             NotifyForMatchingEarthquakes(m_allEarthquakes);
@@ -5145,7 +5257,7 @@ private:
     void ApplyEarthquakeVisibility()
     {
         if (m_showEarthquakes)
-            m_map.SetEarthquakes(m_allEarthquakes);
+            m_map.SetEarthquakes(m_filteredEarthquakes);
         else
             m_map.SetEarthquakes({});
     }
@@ -5177,7 +5289,7 @@ private:
     {
         m_showEarthquakes = !m_showEarthquakes;
         UpdateEarthquakeMenu();
-        ApplyEarthquakeVisibility();
+        ApplyEarthquakeListFilters();
         SaveSettings();
         if (m_showEarthquakes && m_allEarthquakes.empty())
             FetchEarthquakesAsync(false);
@@ -5406,6 +5518,8 @@ private:
         }
         SendMessageW(m_earthquakeListMagnitudeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"2.5"));
         SendMessageW(m_earthquakeListTimeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"2026-05-14 09:00"));
+        SetWindowTextSafe(m_earthquakeListMagnitudeEdit, m_earthquakeListMagnitudeText);
+        SetWindowTextSafe(m_earthquakeListTimeEdit, m_earthquakeListTimeText);
         SendMessageW(m_earthquakeListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
 
         LVCOLUMNW col{};
@@ -5429,20 +5543,30 @@ private:
         AutoFitWindowToChildren(parent);
     }
 
+    void StoreEarthquakeListFiltersFromControls()
+    {
+        if (m_earthquakeListMagnitudeEdit)
+            m_earthquakeListMagnitudeText = Trim(GetWindowTextString(m_earthquakeListMagnitudeEdit));
+        if (m_earthquakeListTimeEdit)
+            m_earthquakeListTimeText = Trim(GetWindowTextString(m_earthquakeListTimeEdit));
+    }
+
     bool EarthquakeMatchesListFilters(const EarthquakeEvent& event) const
     {
         double minMagnitude = 0.0;
-        if (m_earthquakeListMagnitudeEdit) {
-            std::wstring magText = Trim(GetWindowTextString(m_earthquakeListMagnitudeEdit));
-            if (!magText.empty() && TryParseDoubleText(magText, minMagnitude) && event.magnitude + 0.0001 < minMagnitude)
-                return false;
+        if (!m_earthquakeListMagnitudeText.empty() &&
+            TryParseDoubleText(m_earthquakeListMagnitudeText, minMagnitude) &&
+            event.magnitude + 0.0001 < minMagnitude)
+        {
+            return false;
         }
 
         long long afterMs = 0;
-        if (m_earthquakeListTimeEdit) {
-            std::wstring timeText = Trim(GetWindowTextString(m_earthquakeListTimeEdit));
-            if (!timeText.empty() && TryParseDateTimeFilter(timeText, afterMs) && event.timeMs < afterMs)
-                return false;
+        if (!m_earthquakeListTimeText.empty() &&
+            TryParseDateTimeFilter(m_earthquakeListTimeText, afterMs) &&
+            event.timeMs < afterMs)
+        {
+            return false;
         }
 
         if (m_earthquakeFilterRegion.size() >= 3) {
@@ -5453,19 +5577,24 @@ private:
         return true;
     }
 
-    void ApplyEarthquakeListFilters()
+    void RebuildFilteredEarthquakes()
+    {
+        m_filteredEarthquakes.clear();
+        for (const EarthquakeEvent& event : m_allEarthquakes) {
+            if (!EarthquakeMatchesListFilters(event))
+                continue;
+            m_filteredEarthquakes.push_back(event);
+        }
+    }
+
+    void RenderEarthquakeListRows()
     {
         if (!m_earthquakeListView)
             return;
 
         SendMessageW(m_earthquakeListView, LVM_DELETEALLITEMS, 0, 0);
-        m_filteredEarthquakes.clear();
         int row = 0;
-        for (const EarthquakeEvent& event : m_allEarthquakes) {
-            if (!EarthquakeMatchesListFilters(event))
-                continue;
-
-            m_filteredEarthquakes.push_back(event);
+        for (const EarthquakeEvent& event : m_filteredEarthquakes) {
             wchar_t magText[32]{};
             swprintf_s(magText, L"%.1f", event.magnitude);
             LVITEMW item{};
@@ -5490,9 +5619,18 @@ private:
                 ++row;
             }
         }
+    }
+
+    void ApplyEarthquakeListFilters()
+    {
+        StoreEarthquakeListFiltersFromControls();
+        RebuildFilteredEarthquakes();
+        RenderEarthquakeListRows();
+        ApplyEarthquakeVisibility();
+        SaveSettings();
 
         if (m_earthquakeListWnd && IsWindowVisible(m_earthquakeListWnd))
-            SetStatusText(L"Showing " + std::to_wstring(row) + L" earthquake(s).");
+            SetStatusText(L"Showing " + std::to_wstring(m_filteredEarthquakes.size()) + L" earthquake(s).");
     }
 
     void OnEarthquakeListCommand(int id, int code)
@@ -5967,6 +6105,7 @@ private:
     HWND m_chatSendBtn = nullptr;
 
     MapView m_map;
+    ClientSession m_session;
 
     std::vector<TrafficAlert> m_allAlerts;
     std::vector<TrafficAlert> m_filteredAlerts;
@@ -6008,6 +6147,8 @@ private:
     std::wstring m_incidentNotifyReasonExclusions = L"Road Management";
     std::wstring m_incidentNotifyLocationExclusions = L"entry, exit";
     bool m_showEarthquakes = false;
+    std::wstring m_earthquakeListMagnitudeText;
+    std::wstring m_earthquakeListTimeText;
     std::wstring m_earthquakeNotificationMagnitudeText = L"4.0";
     double m_earthquakeNotificationMagnitude = 4.0;
     std::wstring m_alertOrder = L"Road";
@@ -6031,9 +6172,9 @@ private:
 };
 
 
-int RunMainWindow(HINSTANCE hInstance, int nCmdShow)
+int RunMainWindow(HINSTANCE hInstance, int nCmdShow, const ClientSession& session)
 {
-    MainWindow win;
+    MainWindow win(session);
     if (!win.Create(hInstance)) {
         MessageBoxW(nullptr, L"Failed to create main window.", L"Traffic England Alerts Map", MB_ICONERROR);
         return 0;

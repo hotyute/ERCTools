@@ -109,6 +109,15 @@ void ConfigureRedirects(HINTERNET request)
 #endif
 }
 
+static std::wstring NormalizeExtraHeaders(std::wstring headers)
+{
+    if (!headers.empty() && headers.rfind(L"\r\n") != headers.size() - 2)
+        headers += L"\r\n";
+    return headers;
+}
+
+bool HttpJsonMethodText(const std::wstring& method, const std::wstring& inputUrl, const std::string* jsonBody, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut);
+
 bool HttpGetText(const std::wstring& inputUrl, std::string& bodyOut, std::wstring& errorOut)
 {
     bodyOut.clear();
@@ -423,7 +432,7 @@ std::wstring BuildTrafficEnglandAlertsApiUrl(size_t start, size_t step, bool unp
     return url;
 }
 
-bool HttpJsonMethodText(const std::wstring& method, const std::wstring& inputUrl, const std::string* jsonBody, std::string& bodyOut, std::wstring& errorOut)
+bool HttpJsonMethodText(const std::wstring& method, const std::wstring& inputUrl, const std::string* jsonBody, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut)
 {
     bodyOut.clear();
     errorOut.clear();
@@ -511,6 +520,7 @@ bool HttpJsonMethodText(const std::wstring& method, const std::wstring& inputUrl
         L"Content-Type: application/json; charset=utf-8\r\n"
         L"Accept: application/json,text/plain,*/*;q=0.8\r\n"
         L"Accept-Encoding: identity\r\n";
+    headers += NormalizeExtraHeaders(extraHeaders);
 
     const DWORD bodySize = jsonBody ? static_cast<DWORD>(jsonBody->size()) : 0;
     LPVOID optionalData = bodySize ? static_cast<LPVOID>(const_cast<char*>(jsonBody->data())) : WINHTTP_NO_REQUEST_DATA;
@@ -703,15 +713,40 @@ bool HttpPostJsonText(const std::wstring& inputUrl, const std::string& jsonBody,
 
 bool HttpPutJsonText(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, std::wstring& errorOut)
 {
-    return HttpJsonMethodText(L"PUT", inputUrl, &jsonBody, bodyOut, errorOut);
+    return HttpJsonMethodText(L"PUT", inputUrl, &jsonBody, L"", bodyOut, errorOut);
 }
 
 bool HttpPatchJsonText(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, std::wstring& errorOut)
 {
-    return HttpJsonMethodText(L"PATCH", inputUrl, &jsonBody, bodyOut, errorOut);
+    return HttpJsonMethodText(L"PATCH", inputUrl, &jsonBody, L"", bodyOut, errorOut);
 }
 
 bool HttpDeleteText(const std::wstring& inputUrl, std::string& bodyOut, std::wstring& errorOut)
 {
-    return HttpJsonMethodText(L"DELETE", inputUrl, nullptr, bodyOut, errorOut);
+    return HttpJsonMethodText(L"DELETE", inputUrl, nullptr, L"", bodyOut, errorOut);
+}
+
+bool HttpGetTextWithHeaders(const std::wstring& inputUrl, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut)
+{
+    return HttpJsonMethodText(L"GET", inputUrl, nullptr, extraHeaders, bodyOut, errorOut);
+}
+
+bool HttpPostJsonTextWithHeaders(const std::wstring& inputUrl, const std::string& jsonBody, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut)
+{
+    return HttpJsonMethodText(L"POST", inputUrl, &jsonBody, extraHeaders, bodyOut, errorOut);
+}
+
+bool HttpPutJsonTextWithHeaders(const std::wstring& inputUrl, const std::string& jsonBody, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut)
+{
+    return HttpJsonMethodText(L"PUT", inputUrl, &jsonBody, extraHeaders, bodyOut, errorOut);
+}
+
+bool HttpPatchJsonTextWithHeaders(const std::wstring& inputUrl, const std::string& jsonBody, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut)
+{
+    return HttpJsonMethodText(L"PATCH", inputUrl, &jsonBody, extraHeaders, bodyOut, errorOut);
+}
+
+bool HttpDeleteTextWithHeaders(const std::wstring& inputUrl, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut)
+{
+    return HttpJsonMethodText(L"DELETE", inputUrl, nullptr, extraHeaders, bodyOut, errorOut);
 }

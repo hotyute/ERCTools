@@ -1,0 +1,21 @@
+{
+  "version": "1.3.1",
+  "restartRequired": true,
+  "notes": "Example manifest. Copy to manifest.json and update file hashes before release.",
+  "files": [
+    {
+      "id": "erc-tools-exe",
+      "target": "ERC Tools.exe",
+      "serverPath": "ERC Tools.exe",
+      "applyMode": "restart",
+      "sha256": ""
+    },
+    {
+      "id": "hot-settings",
+      "target": "server-managed\\settings.json",
+      "serverPath": "settings.json",
+      "applyMode": "hot-reload",
+      "sha256": ""
+    }
+  ]
+}

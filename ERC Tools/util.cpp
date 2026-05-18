@@ -81,6 +81,13 @@ std::filesystem::path GetSettingsPath()
     return GetTrafficEnglandCacheFolder() / L"settings.json";
 }
 
+std::filesystem::path GetUpdateCacheRoot()
+{
+    std::filesystem::path folder = GetTrafficEnglandCacheFolder() / L"updates";
+    CreateDirectoryW(folder.c_str(), nullptr);
+    return folder;
+}
+
 bool SaveBinaryToFile(const std::filesystem::path& path, const std::vector<BYTE>& bytes)
 {
     std::ofstream out(path, std::ios::binary);

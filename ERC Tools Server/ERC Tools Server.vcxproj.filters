@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{33351F2B-7327-4F4B-8C0B-B4FE77FF1C8D}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx</Extensions>
+    </Filter>
+    <Filter Include="Server Files">
+      <UniqueIdentifier>{B38F1352-89E9-4625-8D37-0CC15A5FB791}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="server.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md">
+      <Filter>Server Files</Filter>
+    </None>
+    <None Include="schema.sql">
+      <Filter>Server Files</Filter>
+    </None>
+    <None Include="server_config.example.json">
+      <Filter>Server Files</Filter>
+    </None>
+    <None Include="updates\manifest.example.json">
+      <Filter>Server Files</Filter>
+    </None>
+  </ItemGroup>
+</Project>

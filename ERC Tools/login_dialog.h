@@ -1,10 +1,8 @@
 // =================================================================================
-// FILE: main_window.h
+// FILE: login_dialog.h
 // =================================================================================
 
-
 #pragma once
-#include "common.h"
 #include "auth_session.h"
 
-int RunMainWindow(HINSTANCE hInstance, int nCmdShow, const ClientSession& session);
+bool ShowLoginDialog(HINSTANCE hInst, ClientSession& sessionOut);

@@ -21,7 +21,13 @@
     <ClCompile Include="app_state.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="client_update.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="http.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="login_dialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="main_window.cpp">
@@ -44,10 +50,19 @@
     <ClInclude Include="app_state.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="auth_session.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="client_update.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="common.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="http.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="login_dialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="main_window.h">
