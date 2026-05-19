@@ -2259,6 +2259,11 @@ private:
             static_cast<float>(y) >= rect.top && static_cast<float>(y) <= rect.bottom;
     }
 
+    static bool RectsOverlap(const D2D1_RECT_F& a, const D2D1_RECT_F& b)
+    {
+        return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    }
+
     struct ResponderChatLayout
     {
         D2D1_RECT_F panelRect{};
@@ -2274,13 +2279,13 @@ private:
         ResponderChatLayout layout;
         const float width = static_cast<float>(view.width);
         const float height = static_cast<float>(view.height);
-        const float panelW = ClampValue(width * 0.52f, 460.0f, 760.0f);
+        const float panelW = ClampValue(width * 0.42f, 420.0f, 680.0f);
         const float clippedPanelW = MinValue(panelW, MaxValue(220.0f, width - kOverlayUiMargin * 2.0f));
         const float panelH = ClampValue(height * 0.27f, 168.0f, 238.0f);
         const float tabH = 38.0f;
         layout.progress = ClampValue(m_responderChatOpenProgress, 0.0f, 1.0f);
         const float offset = (1.0f - layout.progress) * MaxValue(0.0f, panelH - tabH);
-        const float left = kOverlayUiMargin + MaxValue(0.0f, (width - kOverlayUiMargin * 2.0f - clippedPanelW) * 0.5f);
+        const float left = kOverlayUiMargin;
         const float bottom = height - kOverlayUiMargin + offset;
         layout.panelRect = D2D1::RectF(left, bottom - panelH, left + clippedPanelW, bottom);
         layout.toggleRect = D2D1::RectF(
@@ -2306,15 +2311,140 @@ private:
         return layout;
     }
 
-    std::wstring FormatChatLine(const ChatMessage& msg) const
+    static std::wstring ChatPositionKey(std::wstring position)
+    {
+        position = ToLower(Trim(position));
+        if (position == L"admin")
+            return L"administrator";
+        if (position == L"supervisor" || position == L"sup")
+            return L"supervisor";
+        if (position == L"manager" || position == L"mgr")
+            return L"manager";
+        if (position == L"erc")
+            return L"erc";
+        return position;
+    }
+
+    std::wstring ChatRolePrefixText(const ChatMessage& msg) const
+    {
+        const std::wstring role = ChatPositionKey(msg.position);
+        if (role == L"administrator")
+            return L"[ADM]";
+        if (role == L"supervisor")
+            return L"[SUP]";
+        if (role == L"manager")
+            return L"[MGR]";
+        if (role == L"erc")
+            return L"[ERC]";
+        return L"";
+    }
+
+    ID2D1Brush* ChatRoleBrush(const ChatMessage& msg) const
+    {
+        const std::wstring role = ChatPositionKey(msg.position);
+        if (role == L"administrator")
+            return m_severeBrush.Get();
+        if (role == L"supervisor")
+            return m_moderateBrush.Get();
+        if (role == L"manager")
+            return m_weatherSystemBrush.Get();
+        return m_overlayUi.TextBrush();
+    }
+
+    std::wstring ChatTimestampText(const ChatMessage& msg) const
+    {
+        if (!msg.timestamp.empty())
+            return L"[" + msg.timestamp + L"] ";
+        return L"";
+    }
+
+    std::wstring FormatChatLineBody(const ChatMessage& msg) const
     {
         std::wstring line;
-        if (!msg.timestamp.empty())
-            line += L"[" + msg.timestamp + L"] ";
         if (!msg.author.empty())
             line += msg.author + L": ";
         line += msg.text;
         return line;
+    }
+
+    std::wstring ExtractExternalLink(const std::wstring& text) const
+    {
+        static const std::wregex linkRegex(LR"(\bhttps?://[^\s<>"']+)", std::regex_constants::icase);
+        std::wsmatch match;
+        if (!std::regex_search(text, match, linkRegex))
+            return L"";
+
+        std::wstring url = match.str(0);
+        while (!url.empty() && std::wstring(L".,;:!?)]}\"'").find(url.back()) != std::wstring::npos)
+            url.pop_back();
+        return url;
+    }
+
+    float ChatMessageHeight(const ChatMessage& msg, float contentW) const
+    {
+        const std::wstring timestamp = ChatTimestampText(msg);
+        const std::wstring prefix = ChatRolePrefixText(msg);
+        const float timestampW = timestamp.empty()
+            ? 0.0f
+            : m_overlayUi.MeasureTextWidth(timestamp, m_overlayUi.BodyFormat(), contentW);
+        const float prefixW = prefix.empty()
+            ? 0.0f
+            : m_overlayUi.MeasureTextWidth(prefix + L" ", m_overlayUi.BodyFormat(), contentW);
+        const float bodyW = MaxValue(1.0f, contentW - timestampW - prefixW);
+        const float bodyH = m_overlayUi.MeasureTextHeight(FormatChatLineBody(msg), m_overlayUi.BodyFormat(), bodyW);
+        return MaxValue(18.0f, bodyH);
+    }
+
+    void DrawChatMessageLine(const ChatMessage& msg, const D2D1_RECT_F& rect, float contentW)
+    {
+        const std::wstring timestamp = ChatTimestampText(msg);
+        const std::wstring prefix = ChatRolePrefixText(msg);
+        const std::wstring body = FormatChatLineBody(msg);
+        const bool hasLink = !ExtractExternalLink(msg.text).empty();
+        const float timestampW = timestamp.empty()
+            ? 0.0f
+            : m_overlayUi.MeasureTextWidth(timestamp, m_overlayUi.BodyFormat(), contentW);
+        const float prefixW = prefix.empty()
+            ? 0.0f
+            : m_overlayUi.MeasureTextWidth(prefix + L" ", m_overlayUi.BodyFormat(), contentW);
+
+        if (!timestamp.empty()) {
+            D2D1_RECT_F timestampRect = D2D1::RectF(rect.left, rect.top, MinValue(rect.right, rect.left + timestampW), rect.bottom);
+            m_overlayUi.DrawLabel(timestamp, m_overlayUi.BodyFormat(), timestampRect, m_overlayUi.MutedTextBrush());
+        }
+
+        if (!prefix.empty()) {
+            D2D1_RECT_F prefixRect = D2D1::RectF(rect.left + timestampW, rect.top, MinValue(rect.right, rect.left + timestampW + prefixW), rect.bottom);
+            m_overlayUi.DrawLabel(prefix, m_overlayUi.BodyFormat(), prefixRect, ChatRoleBrush(msg));
+        }
+
+        D2D1_RECT_F bodyRect = D2D1::RectF(rect.left + timestampW + prefixW, rect.top, rect.right, rect.bottom);
+        m_overlayUi.DrawLabel(body, m_overlayUi.BodyFormat(), bodyRect, hasLink ? m_overlayUi.AccentBrush() : m_overlayUi.TextBrush());
+    }
+
+    bool TryOpenResponderChatLinkAt(int x, int y, const ResponderChatLayout& layout)
+    {
+        if (!PointInRect(x, y, layout.contentRect))
+            return false;
+
+        const float contentW = MaxValue(1.0f, layout.contentRect.right - layout.contentRect.left);
+        float rowY = layout.contentRect.bottom;
+        for (auto it = m_chatMessages.rbegin(); it != m_chatMessages.rend(); ++it) {
+            const float lineH = ChatMessageHeight(*it, contentW);
+            rowY -= lineH + 6.0f;
+            if (rowY < layout.contentRect.top)
+                break;
+            D2D1_RECT_F lineRect = D2D1::RectF(layout.contentRect.left, rowY, layout.contentRect.right, rowY + lineH + 2.0f);
+            if (PointInRect(x, y, lineRect)) {
+                const std::wstring url = ExtractExternalLink(it->text);
+                if (!url.empty()) {
+                    ShellExecuteW(m_hwnd, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    return true;
+                }
+                return false;
+            }
+        }
+        return false;
     }
 
     bool HitResponderChatInterface(int x, int y) const
@@ -2357,6 +2487,9 @@ private:
             m_responderChatInputFocused = true;
             return true;
         }
+
+        if (TryOpenResponderChatLinkAt(x, y, layout))
+            return true;
 
         m_responderChatInputFocused = PointInRect(x, y, layout.inputRect);
         Invalidate();
@@ -2449,13 +2582,12 @@ private:
         else {
             float y = layout.contentRect.bottom;
             for (auto it = m_chatMessages.rbegin(); it != m_chatMessages.rend(); ++it) {
-                const std::wstring line = FormatChatLine(*it);
-                const float lineH = MaxValue(18.0f, m_overlayUi.MeasureTextHeight(line, m_overlayUi.BodyFormat(), contentW));
+                const float lineH = ChatMessageHeight(*it, contentW);
                 y -= lineH + 6.0f;
                 if (y < layout.contentRect.top)
                     break;
                 D2D1_RECT_F lineRect = D2D1::RectF(layout.contentRect.left, y, layout.contentRect.right, y + lineH + 2.0f);
-                m_overlayUi.DrawLabel(line, m_overlayUi.BodyFormat(), lineRect);
+                DrawChatMessageLine(*it, lineRect, contentW);
             }
         }
         m_rt->PopAxisAlignedClip();
@@ -2501,6 +2633,12 @@ private:
                 layout.historyRect.top + 12.0f,
                 layout.historyRect.left + 31.0f,
                 layout.historyRect.top + 39.0f);
+            const ResponderChatLayout chatLayout = BuildResponderChatLayout(view);
+            if (chatLayout.progress > 0.04f && RectsOverlap(layout.historyRect, chatLayout.panelRect)) {
+                const float clippedBottom = chatLayout.panelRect.top - kOverlayUiGap;
+                if (clippedBottom > layout.historyRect.top + 120.0f)
+                    layout.historyRect.bottom = MinValue(layout.historyRect.bottom, clippedBottom);
+            }
             layout.hasHistory = true;
         }
 
@@ -3347,6 +3485,9 @@ private:
             DrawUkBoundary(boundaryView);
             DrawCityAnchors(overlayView);
         }
+        else {
+            DrawWorldBaseMap(overlayView);
+        }
         DrawNotificationPolygons(overlayView);
         DrawEarthquakes(overlayView);
         DrawWeatherSystems(overlayView);
@@ -3462,8 +3603,8 @@ private:
             DrawMapChrome();
             DrawAlertOverlay(overlayView);
             DrawNoteInterface(view);
-            DrawResponderChat(view);
             DrawNotificationInterface(view);
+            DrawResponderChat(view);
 
             HRESULT hr = m_rt->EndDraw();
             if (hr == D2DERR_RECREATE_TARGET)
@@ -3530,6 +3671,77 @@ private:
 
         DrawClosedPolygon(greatBritain, _countof(greatBritain));
         DrawClosedPolygon(northernIreland, _countof(northernIreland));
+    }
+
+    void DrawWorldPolygon(const ViewState& view, const GeoPoint* pts, size_t count)
+    {
+        if (!m_rt || !g_d2dFactory || !pts || count < 3)
+            return;
+
+        ComPtr<ID2D1PathGeometry> geom;
+        if (FAILED(g_d2dFactory->CreatePathGeometry(&geom)))
+            return;
+
+        ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(geom->Open(&sink)))
+            return;
+
+        sink->BeginFigure(GeoToScreen(view, pts[0].lat, pts[0].lon), D2D1_FIGURE_BEGIN_FILLED);
+        for (size_t i = 1; i < count; ++i)
+            sink->AddLine(GeoToScreen(view, pts[i].lat, pts[i].lon));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+
+        if (FAILED(sink->Close()))
+            return;
+
+        if (m_outlineFillBrush)
+            m_rt->FillGeometry(geom.Get(), m_outlineFillBrush.Get());
+        if (m_outlineStrokeBrush)
+            m_rt->DrawGeometry(geom.Get(), m_outlineStrokeBrush.Get(), 1.5f);
+    }
+
+    void DrawWorldBaseMap(const ViewState& view)
+    {
+        static const GeoPoint northAmerica[] = {
+            { 71.0, -168.0 }, { 72.0, -135.0 }, { 64.0, -90.0 }, { 58.0, -58.0 },
+            { 47.0, -52.0 }, { 31.0, -82.0 }, { 15.0, -83.0 }, { 8.0, -79.0 },
+            { 15.0, -103.0 }, { 32.0, -124.0 }, { 49.0, -126.0 }, { 58.0, -150.0 }
+        };
+        static const GeoPoint southAmerica[] = {
+            { 13.0, -81.0 }, { 10.0, -61.0 }, { -5.0, -43.0 }, { -21.0, -39.0 },
+            { -35.0, -53.0 }, { -55.0, -69.0 }, { -37.0, -73.0 }, { -18.0, -76.0 },
+            { 2.0, -79.0 }
+        };
+        static const GeoPoint greenland[] = {
+            { 83.0, -73.0 }, { 82.0, -18.0 }, { 72.0, -12.0 }, { 59.0, -43.0 },
+            { 63.0, -58.0 }, { 73.0, -62.0 }
+        };
+        static const GeoPoint eurasia[] = {
+            { 72.0, -10.0 }, { 70.0, 35.0 }, { 74.0, 95.0 }, { 67.0, 160.0 },
+            { 52.0, 178.0 }, { 34.0, 140.0 }, { 22.0, 106.0 }, { 6.0, 95.0 },
+            { 9.0, 77.0 }, { 29.0, 67.0 }, { 13.0, 45.0 }, { 30.0, 33.0 },
+            { 37.0, 15.0 }, { 42.0, -8.0 }, { 56.0, -11.0 }
+        };
+        static const GeoPoint africa[] = {
+            { 36.0, -17.0 }, { 32.0, 35.0 }, { 12.0, 50.0 }, { -11.0, 42.0 },
+            { -35.0, 20.0 }, { -30.0, 16.0 }, { -7.0, 9.0 }, { 7.0, -14.0 }
+        };
+        static const GeoPoint australia[] = {
+            { -11.0, 113.0 }, { -12.0, 153.0 }, { -28.0, 154.0 }, { -39.0, 145.0 },
+            { -35.0, 115.0 }, { -22.0, 112.0 }
+        };
+        static const GeoPoint antarctica[] = {
+            { -62.0, -180.0 }, { -66.0, -120.0 }, { -70.0, -45.0 }, { -68.0, 35.0 },
+            { -66.0, 115.0 }, { -63.0, 180.0 }, { -82.0, 180.0 }, { -82.0, -180.0 }
+        };
+
+        DrawWorldPolygon(view, northAmerica, _countof(northAmerica));
+        DrawWorldPolygon(view, southAmerica, _countof(southAmerica));
+        DrawWorldPolygon(view, greenland, _countof(greenland));
+        DrawWorldPolygon(view, eurasia, _countof(eurasia));
+        DrawWorldPolygon(view, africa, _countof(africa));
+        DrawWorldPolygon(view, australia, _countof(australia));
+        DrawWorldPolygon(view, antarctica, _countof(antarctica));
     }
 
     static bool LongitudeRangesIntersect(const ViewState& view, double minLon, double maxLon)

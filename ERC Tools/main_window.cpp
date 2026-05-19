@@ -63,6 +63,7 @@ constexpr int IDC_SETTINGS_REFRESH_INTERVAL_LABEL = 2113;
 constexpr int IDC_SETTINGS_WORLD_LABEL = 2114;
 constexpr int IDC_SETTINGS_WORLD_OFF_RADIO = 2115;
 constexpr int IDC_SETTINGS_WORLD_ON_RADIO = 2116;
+constexpr int IDC_SETTINGS_SYNC_BTN = 2117;
 constexpr int IDC_INCIDENT_FILTERS_TITLE_LABEL = 2201;
 constexpr int IDC_INCIDENT_FILTERS_DESC_LABEL = 2202;
 constexpr int IDC_INCIDENT_FILTERS_SEVERITY_LABEL = 2203;
@@ -150,6 +151,7 @@ constexpr const wchar_t* kTemplatesWizardClassName = L"TrafficEnglandTemplatesWi
 constexpr const wchar_t* kTemplatesEditorClassName = L"TrafficEnglandTemplatesEditorWindow";
 constexpr UINT WM_APP_NOTIFY_ICON = WM_APP + 20;
 constexpr UINT WM_APP_UPDATE_READY = WM_APP + 21;
+constexpr UINT WM_APP_SETTINGS_SYNC_READY = WM_APP + 22;
 constexpr UINT kNotificationIconId = 1;
 constexpr UINT_PTR kAlertRefreshTimerId = 1;
 constexpr UINT_PTR kServerPollTimerId = 2;
@@ -208,6 +210,13 @@ struct ServerResult
     std::wstring error;
     std::vector<ChatMessage> chat;
     std::vector<MapNote> notes;
+};
+
+struct GlobalSettingsResult
+{
+    bool ok = false;
+    std::wstring error;
+    json settings;
 };
 
 struct ReportTemplate
@@ -1061,6 +1070,7 @@ static std::vector<ChatMessage> ParseChatMessages(const json& root)
 
         ChatMessage msg;
         msg.author = PickString(item, { "author", "user", "name" });
+        msg.position = PickString(item, { "position", "role" });
         msg.text = PickString(item, { "text", "message", "body" });
         msg.timestamp = PickString(item, { "timestamp", "time", "createdAt" });
         if (!msg.text.empty())
@@ -1388,6 +1398,10 @@ private:
 
         case WM_APP_UPDATE_READY:
             OnClientUpdateReady(reinterpret_cast<ClientUpdateResult*>(lParam));
+            return 0;
+
+        case WM_APP_SETTINGS_SYNC_READY:
+            OnGlobalSettingsSyncReady(reinterpret_cast<GlobalSettingsResult*>(lParam));
             return 0;
 
         case WM_DESTROY:
@@ -2262,6 +2276,156 @@ private:
         }
     }
 
+    bool MergeSyncedSettingsIntoLocalSettings(const json& syncedSettings, std::wstring& errorOut) const
+    {
+        if (!syncedSettings.is_object()) {
+            errorOut = L"Synced settings response was not an object.";
+            return false;
+        }
+
+        try {
+            json root = json::object();
+            {
+                std::ifstream in(GetSettingsPath(), std::ios::binary);
+                if (in) {
+                    try {
+                        root = json::parse(in);
+                        if (!root.is_object())
+                            root = json::object();
+                    }
+                    catch (...) {
+                        root = json::object();
+                    }
+                }
+            }
+
+            root["version"] = 1;
+            json& localSettings = root["settings"];
+            if (!localSettings.is_object())
+                localSettings = json::object();
+
+            for (auto it = syncedSettings.begin(); it != syncedSettings.end(); ++it)
+                localSettings[it.key()] = it.value();
+
+            std::ofstream out(GetSettingsPath(), std::ios::binary | std::ios::trunc);
+            if (!out) {
+                errorOut = L"Could not write the local settings file.";
+                return false;
+            }
+            out << root.dump();
+            return true;
+        }
+        catch (const std::exception& e) {
+            errorOut = L"Could not merge synced settings: " + Utf8ToWide(e.what());
+            return false;
+        }
+    }
+
+    void ApplySettingsToRuntime()
+    {
+        m_alertsEndpoint = NormalizeUrl(m_alertsEndpoint);
+        m_serverBaseUrl = NormalizeUrl(m_serverBaseUrl);
+        EnsureDefaultReportTemplates();
+        EnsureDefaultEarthquakeReportTemplates();
+        EnsureDefaultWeatherSystemReportTemplates();
+        ModernizeReportTemplates();
+
+        ApplyRefreshTimer();
+        UpdateNotificationHistoryMenu();
+        UpdateEarthquakeMenu();
+        UpdateWeatherSystemsMenu();
+        m_map.SetNotificationPolygons(m_incidentNotificationRegions);
+        m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
+        m_map.SetDisplayWorldMap(m_displayWorldMap);
+
+        SortAlertsForCurrentOrder();
+        if (m_listView)
+            ApplyFilters(false);
+
+        RebuildFilteredEarthquakes();
+        RenderEarthquakeListRows();
+        ApplyEarthquakeVisibility();
+        m_filteredWeatherSystems = m_allWeatherSystems;
+        RenderWeatherSystemsListRows();
+        ApplyWeatherSystemVisibility();
+        RenderNotificationHistory();
+        SyncSettingsControls();
+    }
+
+    void SyncGlobalSettingsFromServerAsync()
+    {
+        if (!IsOnlineMode()) {
+            SetStatusText(L"Sync Settings needs an online session.");
+            return;
+        }
+
+        std::wstring server = ServerBaseUrl();
+        if (server.empty()) {
+            SetStatusText(L"Set the collaboration server before syncing settings.");
+            return;
+        }
+
+        SetStatusText(L"Syncing settings from server...");
+        HWND hwnd = m_hwnd;
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ScheduleBackgroundTask([hwnd, server, authHeaders]() {
+            auto* result = new GlobalSettingsResult{};
+            std::string response;
+            std::wstring error;
+            if (HttpGetTextWithHeaders(AppendPath(server, L"/api/settings/global"), authHeaders, response, error)) {
+                try {
+                    json root = json::parse(response.empty() ? "{}" : response);
+                    if (root.is_object()) {
+                        auto settingsIt = root.find("settings");
+                        result->settings = (settingsIt != root.end() && settingsIt->is_object())
+                            ? *settingsIt
+                            : root;
+                        result->ok = result->settings.is_object();
+                        if (!result->ok)
+                            result->error = L"Server settings response did not include a settings object.";
+                    }
+                    else {
+                        result->error = L"Server settings response was not an object.";
+                    }
+                }
+                catch (const std::exception& e) {
+                    result->error = L"Settings sync parse failed: " + Utf8ToWide(e.what());
+                }
+            }
+            else {
+                result->error = L"Settings sync failed: " + error;
+            }
+
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SETTINGS_SYNC_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            });
+    }
+
+    void OnGlobalSettingsSyncReady(GlobalSettingsResult* result)
+    {
+        std::unique_ptr<GlobalSettingsResult> holder(result);
+        if (!result)
+            return;
+
+        if (!result->ok) {
+            SetStatusText(result->error.empty() ? L"Settings sync failed." : result->error);
+            return;
+        }
+
+        std::wstring error;
+        if (!MergeSyncedSettingsIntoLocalSettings(result->settings, error)) {
+            SetStatusText(error);
+            return;
+        }
+
+        LoadSettings();
+        ApplySettingsToRuntime();
+        SaveSettings();
+        SetStatusText(L"Settings synced from server.");
+    }
+
     void ApplyRefreshTimer()
     {
         KillTimer(m_hwnd, kAlertRefreshTimerId);
@@ -3075,7 +3239,7 @@ private:
             return;
 
         std::wstring author = SessionDisplayName();
-        ChatMessage local{ author, text, L"pending" };
+        ChatMessage local{ author, m_session.position, text, L"pending" };
         m_chatMessages.push_back(local);
         RenderChatHistory();
 
@@ -6928,7 +7092,7 @@ private:
 
         if (!m_settingsWnd || !IsWindow(m_settingsWnd)) {
             m_settingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClassName, L"Settings", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                CW_USEDEFAULT, CW_USEDEFAULT, 470, 535, m_hwnd, nullptr, m_hInst, this);
+                CW_USEDEFAULT, CW_USEDEFAULT, 470, 575, m_hwnd, nullptr, m_hInst, this);
         }
         SyncSettingsControls();
         ShowWindow(m_settingsWnd, SW_SHOW);
@@ -6954,9 +7118,10 @@ private:
         CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 380);
         m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 406, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
         HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 452, 260, 32, parent, ControlId(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 452, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+        m_settingsSyncBtn = CreateWindowExW(0, L"BUTTON", L"Sync Settings", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 492, 150, 32, parent, ControlId(IDC_SETTINGS_SYNC_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 492, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsWorldOffRadio, m_settingsWorldOnRadio, m_settingsFilterCombo, m_settingsOrderCombo, boundary, close }) {
+        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsWorldOffRadio, m_settingsWorldOnRadio, m_settingsFilterCombo, m_settingsOrderCombo, boundary, m_settingsSyncBtn, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -7014,6 +7179,8 @@ private:
             else if (order == L"title") idx = 3;
             SendMessageW(m_settingsOrderCombo, CB_SETCURSEL, idx, 0);
         }
+        if (m_settingsSyncBtn)
+            EnableWindow(m_settingsSyncBtn, IsOnlineMode());
         m_syncingControls = false;
     }
 
@@ -7090,6 +7257,9 @@ private:
         else if (id == IDC_SETTINGS_BOUNDARY_BTN && code == BN_CLICKED) {
             DownloadBoundaryFromGitHubAsync();
         }
+        else if (id == IDC_SETTINGS_SYNC_BTN && code == BN_CLICKED) {
+            SyncGlobalSettingsFromServerAsync();
+        }
         else if (id == IDC_SETTINGS_CLOSE_BTN && code == BN_CLICKED) {
             ShowWindow(m_settingsWnd, SW_HIDE);
         }
@@ -7127,6 +7297,7 @@ private:
     HWND m_settingsRefreshIntervalEdit = nullptr;
     HWND m_settingsWorldOffRadio = nullptr;
     HWND m_settingsWorldOnRadio = nullptr;
+    HWND m_settingsSyncBtn = nullptr;
     HWND m_incidentSevereCheck = nullptr;
     HWND m_incidentModerateCheck = nullptr;
     HWND m_incidentMinorCheck = nullptr;

@@ -51,6 +51,7 @@ struct ServerConfig
         L"DRIVER={MySQL ODBC 8.0 Unicode Driver};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=erc_tools;PWD=change-me;OPTION=3;";
     std::filesystem::path updateRoot = L"updates";
     std::filesystem::path manifestPath = L"updates\\manifest.json";
+    std::filesystem::path globalSettingsPath = L"global_settings.json";
 };
 
 struct UserRecord
@@ -121,6 +122,15 @@ static std::string Trim(std::string s)
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())))
         s.erase(s.begin());
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
+        s.pop_back();
+    return s;
+}
+
+static std::wstring TrimWide(std::wstring s)
+{
+    while (!s.empty() && std::iswspace(s.front()))
+        s.erase(s.begin());
+    while (!s.empty() && std::iswspace(s.back()))
         s.pop_back();
     return s;
 }
@@ -556,7 +566,8 @@ public:
     {
         OdbcConnection db(m_config.databaseConnectionString);
         auto rows = db.Query(
-            L"SELECT author, body, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') FROM chat_messages ORDER BY created_at DESC LIMIT 100",
+            L"SELECT c.author, c.body, DATE_FORMAT(c.created_at, '%Y-%m-%d %H:%i:%s'), COALESCE(u.position, '') "
+            L"FROM chat_messages c LEFT JOIN users u ON u.id = c.user_id ORDER BY c.created_at DESC LIMIT 100",
             {},
             errorOut);
         json messages = json::array();
@@ -564,7 +575,8 @@ public:
             messages.push_back({
                 { "author", WideToUtf8((*it)[0]) },
                 { "text", WideToUtf8((*it)[1]) },
-                { "timestamp", WideToUtf8((*it)[2]) }
+                { "timestamp", WideToUtf8((*it)[2]) },
+                { "position", WideToUtf8((*it)[3]) }
                 });
         }
         return messages;
@@ -751,6 +763,10 @@ public:
                 return HandleUpdateNote(req, user);
             if (req.method == "DELETE" && req.path.rfind("/api/notes/", 0) == 0)
                 return HandleDeleteNote(req, user);
+            if (req.method == "GET" && req.path == "/api/settings/global")
+                return HandleGetGlobalSettings();
+            if ((req.method == "POST" || req.method == "PUT" || req.method == "PATCH") && req.path == "/api/settings/global")
+                return HandleSetGlobalSettings(req, user);
             if (req.method == "GET" && req.path == "/api/updates/manifest")
                 return HandleUpdateManifest(req);
             if (req.method == "GET" && req.path.rfind("/api/updates/files/", 0) == 0)
@@ -862,6 +878,70 @@ private:
         if (!m_database.DeleteNote(user, id, error))
             return ErrorResponse(500, error);
         return JsonResponse(200, { { "ok", true } });
+    }
+
+    static bool CanEditGlobalSettings(const UserRecord& user)
+    {
+        std::wstring role = ToLower(TrimWide(user.position));
+        return role == L"administrator" || role == L"admin" || role == L"supervisor" || role == L"sup";
+    }
+
+    HttpResponse HandleGetGlobalSettings()
+    {
+        std::ifstream in(m_config.globalSettingsPath, std::ios::binary);
+        if (!in)
+            return JsonResponse(200, { { "ok", true }, { "settings", json::object() } });
+
+        try {
+            json settings = json::parse(in);
+            if (!settings.is_object())
+                settings = json::object();
+            auto nested = settings.find("settings");
+            if (nested != settings.end() && nested->is_object())
+                settings = *nested;
+            return JsonResponse(200, { { "ok", true }, { "settings", settings } });
+        }
+        catch (const std::exception& e) {
+            return ErrorResponse(500, L"Global settings parse failed: " + Utf8ToWide(e.what()));
+        }
+    }
+
+    HttpResponse HandleSetGlobalSettings(const HttpRequest& req, const UserRecord& user)
+    {
+        if (!CanEditGlobalSettings(user))
+            return ErrorResponse(403, L"Only Administrators and Supervisors can update global settings.");
+
+        json body;
+        try {
+            body = json::parse(req.body.empty() ? "{}" : req.body);
+        }
+        catch (const std::exception& e) {
+            return ErrorResponse(400, L"Invalid global settings JSON: " + Utf8ToWide(e.what()));
+        }
+
+        json settings = json::object();
+        auto settingsIt = body.find("settings");
+        if (settingsIt != body.end() && settingsIt->is_object())
+            settings = *settingsIt;
+        else if (body.is_object())
+            settings = body;
+        else
+            return ErrorResponse(400, L"Global settings must be a JSON object.");
+
+        try {
+            std::filesystem::path parent = m_config.globalSettingsPath.parent_path();
+            if (!parent.empty())
+                std::filesystem::create_directories(parent);
+            std::ofstream out(m_config.globalSettingsPath, std::ios::binary | std::ios::trunc);
+            if (!out)
+                return ErrorResponse(500, L"Could not write global settings.");
+            out << settings.dump(2);
+        }
+        catch (const std::exception& e) {
+            return ErrorResponse(500, L"Could not save global settings: " + Utf8ToWide(e.what()));
+        }
+
+        return JsonResponse(200, { { "ok", true }, { "settings", settings } });
     }
 
     std::optional<json> ReadManifest(std::wstring& errorOut)
@@ -976,6 +1056,8 @@ static bool LoadConfig(const std::filesystem::path& path, ServerConfig& config)
         config.updateRoot = Utf8ToWide(root["updateRoot"].get<std::string>());
     if (root.contains("manifestPath"))
         config.manifestPath = Utf8ToWide(root["manifestPath"].get<std::string>());
+    if (root.contains("globalSettingsPath"))
+        config.globalSettingsPath = Utf8ToWide(root["globalSettingsPath"].get<std::string>());
     return true;
 }
 

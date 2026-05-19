@@ -88,6 +88,7 @@ struct AppNotification
 struct ChatMessage
 {
     std::wstring author;
+    std::wstring position;
     std::wstring text;
     std::wstring timestamp;
 };

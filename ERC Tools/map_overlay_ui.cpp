@@ -121,6 +121,34 @@ float MapOverlayUiRenderer::MeasureTextHeight(const std::wstring& text, IDWriteT
     return metrics.height;
 }
 
+float MapOverlayUiRenderer::MeasureTextWidth(const std::wstring& text, IDWriteTextFormat* format, float width) const
+{
+    if (!format || text.empty())
+        return 0.0f;
+
+    width = ClampFloat(width, 1.0f, 4000.0f);
+    if (!m_boundWriteFactory)
+        return 0.0f;
+
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(m_boundWriteFactory->CreateTextLayout(
+        text.c_str(),
+        static_cast<UINT32>(text.size()),
+        format,
+        width,
+        4000.0f,
+        &layout)))
+    {
+        return 0.0f;
+    }
+
+    DWRITE_TEXT_METRICS metrics{};
+    if (FAILED(layout->GetMetrics(&metrics)))
+        return 0.0f;
+
+    return metrics.widthIncludingTrailingWhitespace;
+}
+
 void MapOverlayUiRenderer::DrawGlassPanel(const D2D1_RECT_F& rect, float radius)
 {
     if (!m_boundRenderTarget || !m_panelBrush || !ValidRect(rect))

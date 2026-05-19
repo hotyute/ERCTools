@@ -19,6 +19,7 @@ constexpr int IDC_LOGIN_STATUS = 7106;
 constexpr int IDC_LOGIN_BUTTON = 7107;
 constexpr int IDC_LOGIN_CANCEL = 7108;
 constexpr int IDC_LOGIN_OFFLINE = 7109;
+constexpr int IDC_LOGIN_REMEMBER = 7110;
 
 static HMENU ControlMenuId(int id)
 {
@@ -34,11 +35,22 @@ struct LoginContext
     HWND passwordEdit = nullptr;
     HWND positionCombo = nullptr;
     HWND podCombo = nullptr;
+    HWND rememberCheck = nullptr;
     HWND statusLabel = nullptr;
     ClientSession* session = nullptr;
     std::wstring serverBaseUrl = L"http://localhost:8080";
     bool done = false;
     bool accepted = false;
+};
+
+struct RememberedLogin
+{
+    bool remember = false;
+    std::wstring displayName;
+    std::wstring username;
+    std::wstring password;
+    std::wstring position;
+    std::wstring pod;
 };
 
 static std::wstring AppendApiPath(std::wstring base, const wchar_t* path)
@@ -75,6 +87,79 @@ static std::wstring LoadConfiguredServerBaseUrl()
     return L"http://localhost:8080";
 }
 
+static RememberedLogin LoadRememberedLogin()
+{
+    RememberedLogin remembered;
+    std::ifstream in(GetSettingsPath(), std::ios::binary);
+    if (!in)
+        return remembered;
+
+    try {
+        json root = json::parse(in);
+        if (!root.is_object())
+            return remembered;
+        auto it = root.find("loginRemember");
+        if (it == root.end() || !it->is_object())
+            return remembered;
+
+        remembered.remember = it->value("enabled", false);
+        if (!remembered.remember)
+            return remembered;
+
+        auto read = [&](const char* key) -> std::wstring {
+            auto valueIt = it->find(key);
+            if (valueIt != it->end() && valueIt->is_string())
+                return Utf8ToWide(valueIt->get<std::string>());
+            return L"";
+            };
+        remembered.displayName = read("displayName");
+        remembered.username = read("username");
+        remembered.password = read("password");
+        remembered.position = read("position");
+        remembered.pod = read("pod");
+    }
+    catch (...) {
+    }
+    return remembered;
+}
+
+static void SaveRememberedLogin(const RememberedLogin& remembered)
+{
+    try {
+        json root = json::object();
+        {
+            std::ifstream in(GetSettingsPath(), std::ios::binary);
+            if (in) {
+                try {
+                    root = json::parse(in);
+                    if (!root.is_object())
+                        root = json::object();
+                }
+                catch (...) {
+                    root = json::object();
+                }
+            }
+        }
+
+        root["loginRemember"] = {
+            { "enabled", remembered.remember }
+        };
+        if (remembered.remember) {
+            root["loginRemember"]["displayName"] = WideToUtf8(remembered.displayName);
+            root["loginRemember"]["username"] = WideToUtf8(remembered.username);
+            root["loginRemember"]["password"] = WideToUtf8(remembered.password);
+            root["loginRemember"]["position"] = WideToUtf8(remembered.position);
+            root["loginRemember"]["pod"] = WideToUtf8(remembered.pod);
+        }
+
+        std::ofstream out(GetSettingsPath(), std::ios::binary | std::ios::trunc);
+        if (out)
+            out << root.dump();
+    }
+    catch (...) {
+    }
+}
+
 static void SetChildFont(HWND hwnd, HFONT font)
 {
     if (hwnd && font)
@@ -101,6 +186,20 @@ static std::wstring ComboText(HWND combo)
     wchar_t buffer[128]{};
     SendMessageW(combo, CB_GETLBTEXT, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(buffer));
     return buffer;
+}
+
+static void SetComboSelection(HWND combo, const std::wstring& text, int fallback)
+{
+    int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+    for (int i = 0; i < count; ++i) {
+        wchar_t buffer[128]{};
+        SendMessageW(combo, CB_GETLBTEXT, static_cast<WPARAM>(i), reinterpret_cast<LPARAM>(buffer));
+        if (text == buffer) {
+            SendMessageW(combo, CB_SETCURSEL, i, 0);
+            return;
+        }
+    }
+    SendMessageW(combo, CB_SETCURSEL, fallback, 0);
 }
 
 static bool ParseLoginResponse(const std::string& response, ClientSession& sessionOut, std::wstring& errorOut)
@@ -196,6 +295,18 @@ static void AttemptLogin(LoginContext* ctx)
     if (session.pod.empty())
         session.pod = pod;
 
+    RememberedLogin remembered;
+    remembered.remember = ctx->rememberCheck &&
+        SendMessageW(ctx->rememberCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (remembered.remember) {
+        remembered.displayName = displayName;
+        remembered.username = username;
+        remembered.password = password;
+        remembered.position = position;
+        remembered.pod = pod;
+    }
+    SaveRememberedLogin(remembered);
+
     *ctx->session = std::move(session);
     ctx->accepted = true;
     ctx->done = true;
@@ -250,7 +361,18 @@ static void CreateLoginControls(LoginContext* ctx)
     }
     SendMessageW(ctx->podCombo, CB_SETCURSEL, 0, 0);
 
-    ctx->statusLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 24, 286, 400, 40, ctx->hwnd, ControlMenuId(IDC_LOGIN_STATUS), ctx->hInst, nullptr);
+    ctx->rememberCheck = CreateWindowExW(0, L"BUTTON", L"Remember username and password", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 154, 284, 270, 24, ctx->hwnd, ControlMenuId(IDC_LOGIN_REMEMBER), ctx->hInst, nullptr);
+    ctx->statusLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 24, 316, 400, 42, ctx->hwnd, ControlMenuId(IDC_LOGIN_STATUS), ctx->hInst, nullptr);
+
+    RememberedLogin remembered = LoadRememberedLogin();
+    if (remembered.remember) {
+        SetWindowTextSafe(ctx->displayNameEdit, remembered.displayName);
+        SetWindowTextSafe(ctx->usernameEdit, remembered.username);
+        SetWindowTextSafe(ctx->passwordEdit, remembered.password);
+        SetComboSelection(ctx->positionCombo, remembered.position, 3);
+        SetComboSelection(ctx->podCombo, remembered.pod, 0);
+        SendMessageW(ctx->rememberCheck, BM_SETCHECK, BST_CHECKED, 0);
+    }
 }
 
 static LRESULT CALLBACK LoginWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -268,11 +390,11 @@ static LRESULT CALLBACK LoginWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         CreateLoginControls(ctx);
         {
             HFONT font = CreateUiFont(10);
-            for (HWND h : { ctx->displayNameEdit, ctx->usernameEdit, ctx->passwordEdit, ctx->positionCombo, ctx->podCombo, ctx->statusLabel })
+            for (HWND h : { ctx->displayNameEdit, ctx->usernameEdit, ctx->passwordEdit, ctx->positionCombo, ctx->podCombo, ctx->rememberCheck, ctx->statusLabel })
                 SetChildFont(h, font);
-            HWND offline = CreateWindowExW(0, L"BUTTON", L"Offline Mode", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 24, 336, 128, 32, hwnd, ControlMenuId(IDC_LOGIN_OFFLINE), ctx->hInst, nullptr);
-            HWND login = CreateWindowExW(0, L"BUTTON", L"Login", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 222, 336, 96, 32, hwnd, ControlMenuId(IDC_LOGIN_BUTTON), ctx->hInst, nullptr);
-            HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 328, 336, 96, 32, hwnd, ControlMenuId(IDC_LOGIN_CANCEL), ctx->hInst, nullptr);
+            HWND offline = CreateWindowExW(0, L"BUTTON", L"Offline Mode", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 24, 376, 128, 32, hwnd, ControlMenuId(IDC_LOGIN_OFFLINE), ctx->hInst, nullptr);
+            HWND login = CreateWindowExW(0, L"BUTTON", L"Login", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 222, 376, 96, 32, hwnd, ControlMenuId(IDC_LOGIN_BUTTON), ctx->hInst, nullptr);
+            HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 328, 376, 96, 32, hwnd, ControlMenuId(IDC_LOGIN_CANCEL), ctx->hInst, nullptr);
             SetChildFont(offline, font);
             SetChildFont(login, font);
             SetChildFont(cancel, font);
@@ -339,7 +461,7 @@ bool ShowLoginDialog(HINSTANCE hInst, ClientSession& sessionOut)
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         470,
-        420,
+        470,
         nullptr,
         nullptr,
         hInst,

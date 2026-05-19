@@ -54,6 +54,7 @@ public:
 
     bool HitTest(const D2D1_RECT_F& rect, float x, float y) const;
     float MeasureTextHeight(const std::wstring& text, IDWriteTextFormat* format, float width) const;
+    float MeasureTextWidth(const std::wstring& text, IDWriteTextFormat* format, float width) const;
 
     void DrawGlassPanel(const D2D1_RECT_F& rect, float radius = 12.0f);
     void DrawLabel(const std::wstring& text, IDWriteTextFormat* format, const D2D1_RECT_F& rect, ID2D1Brush* brush = nullptr);
