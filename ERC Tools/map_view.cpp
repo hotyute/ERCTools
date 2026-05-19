@@ -58,6 +58,8 @@ struct BoundaryRing
 {
     std::vector<GeoPoint> points;
     std::vector<BoundarySegment> segmentsByMinLat;
+    ComPtr<ID2D1PathGeometry> fillGeometry;
+    int fillGeometryZoom = -1;
     double minLat = 0.0;
     double maxLat = 0.0;
     double minLon = 0.0;
@@ -3986,38 +3988,60 @@ private:
         }
     }
 
-    void DrawBoundaryRingFull(const BoundaryRing& ring, const ViewState& view)
+    bool EnsureBoundaryFillGeometry(BoundaryRing& ring)
     {
-        if (!m_rt || ring.points.size() < 3)
-            return;
+        if (!g_d2dFactory || ring.points.size() < 3)
+            return false;
+        if (ring.fillGeometry && ring.fillGeometryZoom == m_zoom)
+            return true;
 
         ComPtr<ID2D1PathGeometry> geom;
         if (FAILED(g_d2dFactory->CreatePathGeometry(&geom)))
-            return;
+            return false;
 
         ComPtr<ID2D1GeometrySink> sink;
         if (FAILED(geom->Open(&sink)))
-            return;
+            return false;
 
         sink->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
 
-        sink->BeginFigure(
-            GeoToScreen(view, ring.points[0].lat, ring.points[0].lon),
-            D2D1_FIGURE_BEGIN_FILLED);
+        WorldPoint first = GeoToWorld(ring.points[0].lat, ring.points[0].lon, m_zoom);
+        sink->BeginFigure(D2D1::Point2F(static_cast<float>(first.x), static_cast<float>(first.y)), D2D1_FIGURE_BEGIN_FILLED);
 
-        for (size_t i = 1; i < ring.points.size(); ++i)
-            sink->AddLine(GeoToScreen(view, ring.points[i].lat, ring.points[i].lon));
+        for (size_t i = 1; i < ring.points.size(); ++i) {
+            WorldPoint p = GeoToWorld(ring.points[i].lat, ring.points[i].lon, m_zoom);
+            sink->AddLine(D2D1::Point2F(static_cast<float>(p.x), static_cast<float>(p.y)));
+        }
 
         sink->EndFigure(D2D1_FIGURE_END_CLOSED);
 
         if (FAILED(sink->Close()))
+            return false;
+
+        ring.fillGeometry = geom;
+        ring.fillGeometryZoom = m_zoom;
+        return true;
+    }
+
+    void DrawBoundaryRingFull(BoundaryRing& ring, const ViewState& view)
+    {
+        if (!m_rt || !EnsureBoundaryFillGeometry(ring))
             return;
 
+        D2D1_MATRIX_3X2_F oldTransform{};
+        m_rt->GetTransform(&oldTransform);
+        const D2D1_MATRIX_3X2_F translation = D2D1::Matrix3x2F::Translation(
+            static_cast<float>(-view.centerWorld.x + view.width * 0.5),
+            static_cast<float>(-view.centerWorld.y + view.height * 0.5));
+        m_rt->SetTransform(translation);
+
         if (m_outlineFillBrush)
-            m_rt->FillGeometry(geom.Get(), m_outlineFillBrush.Get());
+            m_rt->FillGeometry(ring.fillGeometry.Get(), m_outlineFillBrush.Get());
 
         if (m_outlineStrokeBrush)
-            m_rt->DrawGeometry(geom.Get(), m_outlineStrokeBrush.Get(), 2.0f);
+            m_rt->DrawGeometry(ring.fillGeometry.Get(), m_outlineStrokeBrush.Get(), 2.0f);
+
+        m_rt->SetTransform(oldTransform);
     }
 
     void DrawBoundaryRingVisibleStroke(const BoundaryRing& ring, const ViewState& view)
@@ -4043,8 +4067,20 @@ private:
             if (!LongitudeRangesIntersect(view, segment.minLon, segment.maxLon))
                 continue;
 
-            sink->BeginFigure(GeoToScreen(view, segment.a.lat, segment.a.lon), D2D1_FIGURE_BEGIN_HOLLOW);
-            sink->AddLine(GeoToScreen(view, segment.b.lat, segment.b.lon));
+            const D2D1_POINT_2F a = GeoToScreen(view, segment.a.lat, segment.a.lon);
+            const D2D1_POINT_2F b = GeoToScreen(view, segment.b.lat, segment.b.lon);
+            if (m_hasOverlayClip) {
+                D2D1_RECT_F segmentRect = D2D1::RectF(
+                    MinValue(a.x, b.x) - 2.0f,
+                    MinValue(a.y, b.y) - 2.0f,
+                    MaxValue(a.x, b.x) + 2.0f,
+                    MaxValue(a.y, b.y) + 2.0f);
+                if (!RectsIntersect(segmentRect, m_overlayClip))
+                    continue;
+            }
+
+            sink->BeginFigure(a, D2D1_FIGURE_BEGIN_HOLLOW);
+            sink->AddLine(b);
             sink->EndFigure(D2D1_FIGURE_END_OPEN);
             hasFigure = true;
         }
@@ -4082,7 +4118,7 @@ private:
             }
         }
 
-        for (const auto& ring : m_ukBoundaryRings) {
+        for (auto& ring : m_ukBoundaryRings) {
             if (!RingIntersectsView(ring, view))
                 continue;
 
@@ -4101,7 +4137,7 @@ private:
         }
 
         const bool fillBoundary = m_zoom <= kFullBoundaryMaxZoom;
-        for (const BoundaryRing& ring : m_worldBoundaryRings) {
+        for (BoundaryRing& ring : m_worldBoundaryRings) {
             if (!RingIntersectsView(ring, view))
                 continue;
 

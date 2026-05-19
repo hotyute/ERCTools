@@ -58,7 +58,7 @@ std::filesystem::path GetBoundaryCachePath()
 
 std::filesystem::path GetWorldBoundaryCachePath()
 {
-    return GetTrafficEnglandCacheFolder() / L"world_boundaries_adm0.geojson";
+    return GetTrafficEnglandCacheFolder() / L"natural_earth_admin0_50m.geojson";
 }
 
 std::filesystem::path GetLaneImageCachePath(const std::wstring& imageUrl)
@@ -543,8 +543,13 @@ std::wstring NormalizeUrl(std::wstring url)
     if (url.empty())
         return {};
 
-    if (url.find(L"://") == std::wstring::npos)
-        url = L"https://" + url;
+    if (url.find(L"://") == std::wstring::npos) {
+        const std::wstring lower = ToLower(url);
+        const bool looksLikeIp = !url.empty() && std::iswdigit(url.front()) && url.find(L'.') != std::wstring::npos;
+        const bool hasExplicitPort = url.find(L':') != std::wstring::npos;
+        const bool looksLocal = lower.rfind(L"localhost", 0) == 0 || lower.rfind(L"127.", 0) == 0 || lower.rfind(L"[::1]", 0) == 0;
+        url = (looksLikeIp || hasExplicitPort || looksLocal ? L"http://" : L"https://") + url;
+    }
 
     return url;
 }

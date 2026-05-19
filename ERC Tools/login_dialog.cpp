@@ -38,7 +38,7 @@ struct LoginContext
     HWND rememberCheck = nullptr;
     HWND statusLabel = nullptr;
     ClientSession* session = nullptr;
-    std::wstring serverBaseUrl = L"http://localhost:8080";
+    std::wstring serverBaseUrl = L"http://213.254.181.35:8080";
     bool done = false;
     bool accepted = false;
 };
@@ -65,7 +65,7 @@ static std::wstring LoadConfiguredServerBaseUrl()
 {
     std::ifstream in(GetSettingsPath(), std::ios::binary);
     if (!in)
-        return L"http://localhost:8080";
+        return L"http://213.254.181.35:8080";
 
     try {
         json root = json::parse(in);
@@ -77,6 +77,9 @@ static std::wstring LoadConfiguredServerBaseUrl()
         auto it = settings->find("serverBaseUrl");
         if (it != settings->end() && it->is_string()) {
             std::wstring value = NormalizeUrl(Utf8ToWide(it->get<std::string>()));
+            std::wstring lower = ToLower(value);
+            if (lower == L"http://localhost:8080" || lower == L"https://localhost:8080")
+                value = L"http://213.254.181.35:8080";
             if (!value.empty())
                 return value;
         }
@@ -84,7 +87,7 @@ static std::wstring LoadConfiguredServerBaseUrl()
     catch (...) {
     }
 
-    return L"http://localhost:8080";
+    return L"http://213.254.181.35:8080";
 }
 
 static RememberedLogin LoadRememberedLogin()

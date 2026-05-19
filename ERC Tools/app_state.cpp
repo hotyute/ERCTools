@@ -19,7 +19,7 @@ const wchar_t kMapClassName[] = L"TrafficEnglandNativeMapView";
 const wchar_t kUkBoundarySourceUrl[] =
 L"https://github.com/wmgeolab/geoBoundaries/raw/main/releaseData/gbOpen/GBR/ADM0/geoBoundaries-GBR-ADM0.geojson";
 const wchar_t kWorldBoundarySourceUrl[] =
-L"https://github.com/wmgeolab/geoBoundaries/raw/main/releaseData/CGAZ/geoBoundariesCGAZ_ADM0.geojson";
+L"https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_0_countries.geojson";
 
 std::atomic_bool g_boundaryDownloadInProgress{ false };
 std::atomic_bool g_appQuitting{ false };
