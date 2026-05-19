@@ -48,6 +48,7 @@ public:
     void SetDraftPolygon(const std::vector<GeoPoint>& points);
     void SetPolygonCaptureActive(bool active);
     void SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes);
+    void SetEarthquakeOverlayVisible(bool visible);
     void SetActiveNotification(const AppNotification& notification);
     void ClearActiveNotification();
     void SetNotificationHistory(const std::vector<AppNotification>& notifications);

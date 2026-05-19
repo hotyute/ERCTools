@@ -38,6 +38,8 @@ constexpr int IDM_ROADS_TEMPLATES_WIZARD = 2010;
 constexpr int IDM_ROADS_EDIT_TEMPLATES = 2011;
 constexpr int IDM_EARTHQUAKES_TEMPLATES_WIZARD = 2012;
 constexpr int IDM_EARTHQUAKES_EDIT_TEMPLATES = 2013;
+constexpr int IDM_EARTHQUAKE_OVERLAY_NONE = 2014;
+constexpr int IDM_EARTHQUAKE_OVERLAY_MAG_REGION = 2015;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -79,6 +81,8 @@ constexpr int IDC_INCIDENT_NOTIFICATIONS_AND_RADIO = 2314;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_OR_RADIO = 2315;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_LOCATION_EXCLUSIONS_LABEL = 2316;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_LOCATION_EXCLUSIONS_EDIT = 2317;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_ROAD_EXCLUSIONS_LABEL = 2318;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_ROAD_EXCLUSIONS_EDIT = 2319;
 constexpr int IDC_NOTIFICATION_REGIONS_LIST = 2401;
 constexpr int IDC_NOTIFICATION_REGIONS_NEW_BTN = 2402;
 constexpr int IDC_NOTIFICATION_REGIONS_EDIT_BTN = 2403;
@@ -1056,7 +1060,7 @@ public:
         m_hwnd = CreateWindowExW(
             0,
             kMainClassName,
-            L"Traffic England Alerts Map",
+            L"ERC Tools",
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -1085,7 +1089,7 @@ public:
     }
 
 private:
-    static constexpr const wchar_t* kBaseTitle = L"Traffic England Alerts Map";
+    static constexpr const wchar_t* kBaseTitle = L"ERC Tools";
 
     static bool RegisterClass()
     {
@@ -1340,7 +1344,7 @@ private:
         if (!m_searchLabel || !m_severityLabel ||
             !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_statusBar)
         {
-            MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"Traffic England Alerts Map", MB_ICONERROR);
+            MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"ERC Tools", MB_ICONERROR);
             return;
         }
 
@@ -1387,7 +1391,7 @@ private:
 
         m_map.Create(m_hwnd, 0, 0, 100, 100);
         if (!m_map.Hwnd()) {
-            MessageBoxW(m_hwnd, L"Could not create the native map view.", L"Traffic England Alerts Map", MB_ICONERROR);
+            MessageBoxW(m_hwnd, L"Could not create the native map view.", L"ERC Tools", MB_ICONERROR);
             return;
         }
 
@@ -1428,6 +1432,7 @@ private:
             });
         m_map.SetNotificationPolygons(m_incidentNotificationRegions);
         m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
+        m_map.SetEarthquakeOverlayVisible(m_showEarthquakes && m_showEarthquakeOverlayLabels);
         RenderNotificationHistory();
 
         Layout();
@@ -1589,6 +1594,12 @@ private:
 
         case IDM_SHOW_EARTHQUAKES:
             ToggleShowEarthquakes();
+            break;
+        case IDM_EARTHQUAKE_OVERLAY_NONE:
+            SetEarthquakeOverlayLabels(false);
+            break;
+        case IDM_EARTHQUAKE_OVERLAY_MAG_REGION:
+            SetEarthquakeOverlayLabels(true);
             break;
 
         case IDM_VIEW_NOTIFICATION_HISTORY:
@@ -1758,6 +1769,7 @@ private:
             readBool("incidentFilterUnplanned", m_incidentFilterUnplanned);
             readBool("incidentFilterPlanned", m_incidentFilterPlanned);
             readString("incidentNotifyRoads", m_incidentNotifyRoads);
+            readString("incidentNotifyRoadExclusions", m_incidentNotifyRoadExclusions);
             readString("incidentNotifyLaneThresholdText", m_incidentNotifyLaneThresholdText);
             readDouble("incidentNotifyLaneThreshold", m_incidentNotifyLaneThreshold);
             double parsedThreshold = 0.0;
@@ -1818,6 +1830,7 @@ private:
             }
 
             readBool("showEarthquakes", m_showEarthquakes);
+            readBool("showEarthquakeOverlayLabels", m_showEarthquakeOverlayLabels);
             readString("earthquakeListMagnitudeText", m_earthquakeListMagnitudeText);
             readString("earthquakeListTimeText", m_earthquakeListTimeText);
             readString("earthquakeNotificationMagnitudeText", m_earthquakeNotificationMagnitudeText);
@@ -1949,6 +1962,7 @@ private:
             settings["incidentFilterUnplanned"] = m_incidentFilterUnplanned;
             settings["incidentFilterPlanned"] = m_incidentFilterPlanned;
             settings["incidentNotifyRoads"] = WideToUtf8(m_incidentNotifyRoads);
+            settings["incidentNotifyRoadExclusions"] = WideToUtf8(m_incidentNotifyRoadExclusions);
             settings["incidentNotifyLaneThresholdText"] = WideToUtf8(m_incidentNotifyLaneThresholdText);
             settings["incidentNotifyLaneThreshold"] = m_incidentNotifyLaneThreshold;
             settings["incidentNotifyDelayThresholdText"] = WideToUtf8(m_incidentNotifyDelayThresholdText);
@@ -1974,6 +1988,7 @@ private:
                 settings["earthquakeReportTemplates"].push_back(std::move(item));
             }
             settings["showEarthquakes"] = m_showEarthquakes;
+            settings["showEarthquakeOverlayLabels"] = m_showEarthquakeOverlayLabels;
             settings["earthquakeListMagnitudeText"] = WideToUtf8(m_earthquakeListMagnitudeText);
             settings["earthquakeListTimeText"] = WideToUtf8(m_earthquakeListTimeText);
             settings["earthquakeFilterRegion"] = json::array();
@@ -2176,6 +2191,12 @@ private:
         return AlertMatchesIncidentNotificationRegion(alert);
     }
 
+    bool RoadExcludedFromIncidentNotification(const TrafficAlert& alert) const
+    {
+        std::wstring road = alert.road.empty() ? alert.region : alert.road;
+        return RoadListMatches(road, m_incidentNotifyRoadExclusions, false);
+    }
+
     bool ReasonExcludedFromNotification(const TrafficAlert& alert) const
     {
         std::wstring reason = ToLower(AlertReasonForNotification(alert));
@@ -2242,6 +2263,7 @@ private:
     bool AlertMatchesIncidentNotification(const TrafficAlert& alert) const
     {
         return RoadMatchesIncidentNotification(alert) &&
+            !RoadExcludedFromIncidentNotification(alert) &&
             SeverityAllowedForIncidentNotification(alert) &&
             IncidentTypeAllowedForNotification(alert) &&
             IncidentThresholdsMatchNotification(alert) &&
@@ -2394,7 +2416,7 @@ private:
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.uCallbackMessage = WM_APP_NOTIFY_ICON;
         nid.hIcon = LoadIconW(nullptr, IDI_INFORMATION);
-        wcsncpy_s(nid.szTip, L"Traffic England Alerts Map", _TRUNCATE);
+        wcsncpy_s(nid.szTip, L"ERC Tools", _TRUNCATE);
 
         if (Shell_NotifyIconW(NIM_ADD, &nid)) {
             nid.uVersion = NOTIFYICON_VERSION_4;
@@ -3143,11 +3165,22 @@ private:
         AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKES_EDIT_TEMPLATES, L"Edit Templates...");
         AppendMenuW(earthquakesMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(earthquakesMenu, m_showEarthquakes ? MF_CHECKED : MF_UNCHECKED, IDM_SHOW_EARTHQUAKES, L"Show Earthquakes");
+        HMENU earthquakeOverlayMenu = CreatePopupMenu();
+        const UINT overlayEnabled = m_showEarthquakes ? MF_ENABLED : MF_GRAYED;
+        AppendMenuW(earthquakeOverlayMenu, overlayEnabled | (m_showEarthquakeOverlayLabels ? MF_UNCHECKED : MF_CHECKED), IDM_EARTHQUAKE_OVERLAY_NONE, L"None");
+        AppendMenuW(earthquakeOverlayMenu, overlayEnabled | (m_showEarthquakeOverlayLabels ? MF_CHECKED : MF_UNCHECKED), IDM_EARTHQUAKE_OVERLAY_MAG_REGION, L"Magnitude and Region");
+        AppendMenuW(earthquakesMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(earthquakeOverlayMenu), L"Earthquake Overlays");
         MENUITEMINFOW showEarthquakesInfo{};
         showEarthquakesInfo.cbSize = sizeof(showEarthquakesInfo);
         showEarthquakesInfo.fMask = MIIM_FTYPE;
         showEarthquakesInfo.fType = MFT_RADIOCHECK;
         SetMenuItemInfoW(earthquakesMenu, IDM_SHOW_EARTHQUAKES, FALSE, &showEarthquakesInfo);
+        MENUITEMINFOW earthquakeOverlayInfo{};
+        earthquakeOverlayInfo.cbSize = sizeof(earthquakeOverlayInfo);
+        earthquakeOverlayInfo.fMask = MIIM_FTYPE;
+        earthquakeOverlayInfo.fType = MFT_RADIOCHECK;
+        SetMenuItemInfoW(earthquakeOverlayMenu, IDM_EARTHQUAKE_OVERLAY_NONE, FALSE, &earthquakeOverlayInfo);
+        SetMenuItemInfoW(earthquakeOverlayMenu, IDM_EARTHQUAKE_OVERLAY_MAG_REGION, FALSE, &earthquakeOverlayInfo);
         AppendMenuW(viewMenu, m_showNotificationHistory ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_NOTIFICATION_HISTORY, L"Notification History");
         MENUITEMINFOW historyInfo{};
         historyInfo.cbSize = sizeof(historyInfo);
@@ -3166,8 +3199,8 @@ private:
     {
         MessageBoxW(
             m_hwnd,
-            L"Traffic England Alerts Map\n\nView Traffic England alerts on a UK map, collaborate with local responders, and share map notes.",
-            L"About Traffic England Alerts Map",
+            L"ERC Tools\n\nView live alerts on a UK map, collaborate with local responders, and share map notes.",
+            L"About ERC Tools",
             MB_OK | MB_ICONINFORMATION);
     }
 
@@ -3420,6 +3453,11 @@ private:
         m_incidentNotifyRoadsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_ROADS_EDIT), m_hInst, nullptr);
         y += 42;
 
+        CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_ROAD_EXCLUSIONS_LABEL, L"Roads to exclude", left, y);
+        y += 26;
+        m_incidentNotifyRoadExclusionsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_ROAD_EXCLUSIONS_EDIT), m_hInst, nullptr);
+        y += 42;
+
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_LANES_LABEL, L"Closed-lane threshold", left, y);
         y += 26;
         m_incidentNotifyLaneThresholdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, 120, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_LANES_EDIT), m_hInst, nullptr);
@@ -3450,12 +3488,13 @@ private:
 
         HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 392, y + 42, 102, 32, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyAndRadio, m_incidentNotifyOrRadio, m_incidentNotifyDelayThresholdEdit, m_incidentNotifyRegionsBtn, m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyLocationExclusionsEdit, close }) {
+        for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyRoadExclusionsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyAndRadio, m_incidentNotifyOrRadio, m_incidentNotifyDelayThresholdEdit, m_incidentNotifyRegionsBtn, m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyLocationExclusionsEdit, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
 
         SendMessageW(m_incidentNotifyRoadsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M*, A*, A1(M), A2, A15, A16, A17, A20, A4, A52"));
+        SendMessageW(m_incidentNotifyRoadExclusionsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M25, A1(M)"));
         SendMessageW(m_incidentNotifyLaneThresholdEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"50%"));
         SendMessageW(m_incidentNotifyDelayThresholdEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"1 hour"));
         SendMessageW(m_incidentNotifyReasonExclusionsEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Road Management"));
@@ -3469,6 +3508,8 @@ private:
         m_syncingControls = true;
         if (m_incidentNotifyRoadsEdit)
             SetWindowTextSafe(m_incidentNotifyRoadsEdit, m_incidentNotifyRoads);
+        if (m_incidentNotifyRoadExclusionsEdit)
+            SetWindowTextSafe(m_incidentNotifyRoadExclusionsEdit, m_incidentNotifyRoadExclusions);
         if (m_incidentNotifyLaneThresholdEdit)
             SetWindowTextSafe(m_incidentNotifyLaneThresholdEdit, m_incidentNotifyLaneThresholdText);
         if (m_incidentNotifyDelayThresholdEdit)
@@ -3508,6 +3549,10 @@ private:
 
         if (id == IDC_INCIDENT_NOTIFICATIONS_ROADS_EDIT) {
             m_incidentNotifyRoads = GetWindowTextString(m_incidentNotifyRoadsEdit);
+            SaveSettings();
+        }
+        else if (id == IDC_INCIDENT_NOTIFICATIONS_ROAD_EXCLUSIONS_EDIT) {
+            m_incidentNotifyRoadExclusions = GetWindowTextString(m_incidentNotifyRoadExclusionsEdit);
             SaveSettings();
         }
         else if (id == IDC_INCIDENT_NOTIFICATIONS_EXCLUSIONS_EDIT) {
@@ -5298,6 +5343,7 @@ private:
 
     void ApplyEarthquakeVisibility()
     {
+        m_map.SetEarthquakeOverlayVisible(m_showEarthquakes && m_showEarthquakeOverlayLabels);
         if (m_showEarthquakes)
             m_map.SetEarthquakes(m_filteredEarthquakes);
         else
@@ -5307,8 +5353,13 @@ private:
     void UpdateEarthquakeMenu()
     {
         HMENU menu = GetMenu(m_hwnd);
-        if (menu)
+        if (menu) {
             CheckMenuItem(menu, IDM_SHOW_EARTHQUAKES, MF_BYCOMMAND | (m_showEarthquakes ? MF_CHECKED : MF_UNCHECKED));
+            CheckMenuItem(menu, IDM_EARTHQUAKE_OVERLAY_NONE, MF_BYCOMMAND | (m_showEarthquakeOverlayLabels ? MF_UNCHECKED : MF_CHECKED));
+            CheckMenuItem(menu, IDM_EARTHQUAKE_OVERLAY_MAG_REGION, MF_BYCOMMAND | (m_showEarthquakeOverlayLabels ? MF_CHECKED : MF_UNCHECKED));
+            EnableMenuItem(menu, IDM_EARTHQUAKE_OVERLAY_NONE, MF_BYCOMMAND | (m_showEarthquakes ? MF_ENABLED : MF_GRAYED));
+            EnableMenuItem(menu, IDM_EARTHQUAKE_OVERLAY_MAG_REGION, MF_BYCOMMAND | (m_showEarthquakes ? MF_ENABLED : MF_GRAYED));
+        }
     }
 
     void UpdateNotificationHistoryMenu()
@@ -5335,6 +5386,17 @@ private:
         SaveSettings();
         if (m_showEarthquakes && m_allEarthquakes.empty())
             FetchEarthquakesAsync(false);
+    }
+
+    void SetEarthquakeOverlayLabels(bool visible)
+    {
+        if (m_showEarthquakeOverlayLabels == visible)
+            return;
+
+        m_showEarthquakeOverlayLabels = visible;
+        UpdateEarthquakeMenu();
+        ApplyEarthquakeVisibility();
+        SaveSettings();
     }
 
     bool EarthquakeMatchesNotification(const EarthquakeEvent& event) const
@@ -6117,6 +6179,7 @@ private:
     HWND m_incidentUnplannedCheck = nullptr;
     HWND m_incidentPlannedCheck = nullptr;
     HWND m_incidentNotifyRoadsEdit = nullptr;
+    HWND m_incidentNotifyRoadExclusionsEdit = nullptr;
     HWND m_incidentNotifyLaneThresholdEdit = nullptr;
     HWND m_incidentNotifyDelayThresholdEdit = nullptr;
     HWND m_incidentNotifyAndRadio = nullptr;
@@ -6181,6 +6244,7 @@ private:
     bool m_incidentFilterUnplanned = true;
     bool m_incidentFilterPlanned = true;
     std::wstring m_incidentNotifyRoads = L"M*, A*, A1(M), A2, A15, A16, A17, A20, A4, A52";
+    std::wstring m_incidentNotifyRoadExclusions;
     std::wstring m_incidentNotifyLaneThresholdText = L"50%";
     double m_incidentNotifyLaneThreshold = 50.0;
     std::wstring m_incidentNotifyDelayThresholdText = L"1 hour";
@@ -6189,6 +6253,7 @@ private:
     std::wstring m_incidentNotifyReasonExclusions = L"Road Management";
     std::wstring m_incidentNotifyLocationExclusions = L"entry, exit";
     bool m_showEarthquakes = false;
+    bool m_showEarthquakeOverlayLabels = false;
     std::wstring m_earthquakeListMagnitudeText;
     std::wstring m_earthquakeListTimeText;
     std::wstring m_earthquakeNotificationMagnitudeText = L"4.0";
@@ -6219,7 +6284,7 @@ int RunMainWindow(HINSTANCE hInstance, int nCmdShow, const ClientSession& sessio
 {
     MainWindow win(session);
     if (!win.Create(hInstance)) {
-        MessageBoxW(nullptr, L"Failed to create main window.", L"Traffic England Alerts Map", MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to create main window.", L"ERC Tools", MB_ICONERROR);
         return 0;
     }
 

@@ -46,16 +46,16 @@ bool InitGraphicsFactories()
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
 {
     OpenConsole();
-    ConsoleLog(L"Starting Traffic England Alerts Map...");
+    ConsoleLog(L"Starting ERC Tools...");
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(hr)) {
-        MessageBoxW(nullptr, L"COM initialization failed.", L"Traffic England Alerts Map", MB_ICONERROR);
+        MessageBoxW(nullptr, L"COM initialization failed.", L"ERC Tools", MB_ICONERROR);
         return 0;
     }
 
     if (!InitGraphicsFactories()) {
-        MessageBoxW(nullptr, L"Graphics initialization failed.", L"Traffic England Alerts Map", MB_ICONERROR);
+        MessageBoxW(nullptr, L"Graphics initialization failed.", L"ERC Tools", MB_ICONERROR);
         CoUninitialize();
         return 0;
     }

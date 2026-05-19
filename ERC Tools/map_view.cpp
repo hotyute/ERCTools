@@ -73,7 +73,9 @@ constexpr int kAlertFocusZoom = 9;
 
 // Interaction timing.
 constexpr UINT_PTR kInteractionIdleTimer = 1;
+constexpr UINT_PTR kOverlayAnimationTimer = 2;
 constexpr UINT kInteractionIdleMs = 120;
+constexpr UINT kOverlayAnimationMs = 220;
 
 // Map styling.
 constexpr float kMapWaterR = 0.80f;
@@ -259,10 +261,25 @@ public:
         Invalidate();
     }
 
+    void SetEarthquakeOverlayVisible(bool visible)
+    {
+        if (m_showEarthquakeOverlayLabels == visible)
+            return;
+
+        m_showEarthquakeOverlayLabels = visible;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
     void SetActiveNotification(const AppNotification& notification)
     {
         m_activeNotification = notification;
         m_hasActiveNotification = !notification.title.empty() || !notification.body.empty();
+        m_activeNotificationClosing = false;
+        if (m_hasActiveNotification) {
+            m_activeNotificationProgress = 0.0f;
+            StartActiveNotificationAnimation(1.0f);
+        }
         Invalidate();
     }
 
@@ -271,8 +288,8 @@ public:
         if (!m_hasActiveNotification)
             return;
 
-        m_hasActiveNotification = false;
-        m_activeNotification = {};
+        m_activeNotificationClosing = true;
+        StartActiveNotificationAnimation(0.0f);
         Invalidate();
     }
 
@@ -289,6 +306,9 @@ public:
             return;
 
         m_showNotificationHistory = visible;
+        if (visible)
+            m_notificationHistoryCollapsed = false;
+        StartNotificationHistoryAnimation(visible ? 1.0f : 0.0f);
         m_notificationHistoryScroll = ClampNotificationHistoryScroll(m_notificationHistoryScroll);
         Invalidate();
     }
@@ -297,6 +317,84 @@ public:
     {
         m_selectedId = id;
         InvalidateSceneCache();
+        Invalidate();
+    }
+
+    static float EaseOverlay(float t)
+    {
+        t = ClampValue(t, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    }
+
+    void EnsureOverlayAnimationTimer()
+    {
+        if (m_hwnd)
+            SetTimer(m_hwnd, kOverlayAnimationTimer, 16, nullptr);
+    }
+
+    void StartNotificationHistoryAnimation(float target)
+    {
+        m_notificationHistoryAnimationStart = m_notificationHistoryOpenProgress;
+        m_notificationHistoryAnimationTarget = ClampValue(target, 0.0f, 1.0f);
+        m_notificationHistoryAnimationStartMs = GetTickCount64();
+        m_notificationHistoryAnimating = true;
+        EnsureOverlayAnimationTimer();
+    }
+
+    void StartActiveNotificationAnimation(float target)
+    {
+        m_activeNotificationAnimationStart = m_activeNotificationProgress;
+        m_activeNotificationAnimationTarget = ClampValue(target, 0.0f, 1.0f);
+        m_activeNotificationAnimationStartMs = GetTickCount64();
+        m_activeNotificationAnimating = true;
+        EnsureOverlayAnimationTimer();
+    }
+
+    static bool AdvanceAnimatedValue(float& value, float start, float target, ULONGLONG startMs)
+    {
+        const ULONGLONG now = GetTickCount64();
+        const float t = static_cast<float>(std::min<ULONGLONG>(kOverlayAnimationMs, now - startMs)) /
+            static_cast<float>(kOverlayAnimationMs);
+        value = start + (target - start) * EaseOverlay(t);
+        if (t >= 1.0f) {
+            value = target;
+            return true;
+        }
+        return false;
+    }
+
+    void UpdateOverlayAnimations()
+    {
+        bool anyRunning = false;
+
+        if (m_notificationHistoryAnimating) {
+            const bool done = AdvanceAnimatedValue(
+                m_notificationHistoryOpenProgress,
+                m_notificationHistoryAnimationStart,
+                m_notificationHistoryAnimationTarget,
+                m_notificationHistoryAnimationStartMs);
+            m_notificationHistoryAnimating = !done;
+            anyRunning = anyRunning || !done;
+        }
+
+        if (m_activeNotificationAnimating) {
+            const bool done = AdvanceAnimatedValue(
+                m_activeNotificationProgress,
+                m_activeNotificationAnimationStart,
+                m_activeNotificationAnimationTarget,
+                m_activeNotificationAnimationStartMs);
+            m_activeNotificationAnimating = !done;
+            anyRunning = anyRunning || !done;
+            if (done && m_activeNotificationClosing && m_activeNotificationProgress <= 0.0f) {
+                m_hasActiveNotification = false;
+                m_activeNotificationClosing = false;
+                m_activeNotification = {};
+            }
+        }
+
+        if (!anyRunning)
+            KillTimer(m_hwnd, kOverlayAnimationTimer);
+
         Invalidate();
     }
 
@@ -540,6 +638,10 @@ private:
                 KillTimer(m_hwnd, kInteractionIdleTimer);
                 m_interactivePan = false;
                 Invalidate();
+                return 0;
+            }
+            if (wParam == kOverlayAnimationTimer) {
+                UpdateOverlayAnimations();
                 return 0;
             }
             break;
@@ -855,12 +957,17 @@ private:
 
     D2D1_RECT_F BuildAddNoteButtonRect() const
     {
-        return D2D1::RectF(132.0f, 18.0f, 224.0f, 50.0f);
+        return D2D1::RectF(244.0f, 18.0f, 336.0f, 50.0f);
+    }
+
+    D2D1_RECT_F BuildResetViewButtonRect() const
+    {
+        return D2D1::RectF(132.0f, 18.0f, 232.0f, 50.0f);
     }
 
     D2D1_RECT_F BuildAddNotePromptRect() const
     {
-        return D2D1::RectF(234.0f, 18.0f, 436.0f, 50.0f);
+        return D2D1::RectF(346.0f, 18.0f, 548.0f, 50.0f);
     }
 
     D2D1_RECT_F BuildRefreshButtonRect() const
@@ -1071,6 +1178,8 @@ private:
     {
         if (PointInRect(x, y, BuildRefreshButtonRect()))
             return true;
+        if (PointInRect(x, y, BuildResetViewButtonRect()))
+            return true;
         if (PointInRect(x, y, BuildAddNoteButtonRect()))
             return true;
         if (m_addNoteMode && PointInRect(x, y, BuildAddNotePromptRect()))
@@ -1089,10 +1198,16 @@ private:
             return false;
 
         const D2D1_RECT_F addButton = BuildAddNoteButtonRect();
+        const D2D1_RECT_F resetButton = BuildResetViewButtonRect();
         const D2D1_RECT_F refreshButton = BuildRefreshButtonRect();
         if (PointInRect(x, y, refreshButton)) {
             if (m_onRefresh)
                 m_onRefresh();
+            return true;
+        }
+
+        if (PointInRect(x, y, resetButton)) {
+            FitToAlerts();
             return true;
         }
 
@@ -1794,6 +1909,43 @@ private:
         DrawPolygonPath(view, m_draftPolygon, m_draftPolygon.size() >= 3, m_draftFillBrush.Get(), m_draftStrokeBrush.Get(), 2.0f);
     }
 
+    std::wstring EarthquakeOverlayText(const EarthquakeEvent& event) const
+    {
+        wchar_t mag[32]{};
+        swprintf_s(mag, L"M%.1f", event.magnitude);
+        std::wstring text = mag;
+        if (!event.place.empty()) {
+            text += L" ";
+            text += event.place;
+        }
+        if (text.size() > 72)
+            text = text.substr(0, 69) + L"...";
+        return text;
+    }
+
+    void DrawEarthquakeOverlayLabel(const ViewState& view, const EarthquakeEvent& event, D2D1_POINT_2F anchor, float radius)
+    {
+        if (!m_showEarthquakeOverlayLabels || !m_noteTextFormat)
+            return;
+
+        std::wstring text = EarthquakeOverlayText(event);
+        if (text.empty())
+            return;
+
+        const float width = ClampValue(76.0f + static_cast<float>(text.size()) * 5.5f, 108.0f, 260.0f);
+        D2D1_RECT_F rect = D2D1::RectF(
+            anchor.x + radius + 8.0f,
+            anchor.y - 18.0f,
+            anchor.x + radius + 8.0f + width,
+            anchor.y + 20.0f);
+        rect = ClampRectToView(rect, view);
+
+        m_rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 7.0f, 7.0f), m_panelBrush.Get());
+        m_rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 7.0f, 7.0f), m_earthquakeBrush.Get(), 1.2f);
+        D2D1_RECT_F textRect = D2D1::RectF(rect.left + 9.0f, rect.top + 6.0f, rect.right - 8.0f, rect.bottom - 4.0f);
+        m_rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), m_noteTextFormat.Get(), textRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+
     void DrawEarthquakes(const ViewState& view)
     {
         if (!m_rt || m_earthquakes.empty())
@@ -1845,6 +1997,7 @@ private:
             float radius = static_cast<float>(ClampValue(4.0 + event.magnitude * 2.2, 5.0, 22.0));
             m_rt->FillEllipse(D2D1::Ellipse(p, radius, radius), m_earthquakeBrush.Get());
             m_rt->DrawEllipse(D2D1::Ellipse(p, radius, radius), m_borderBrush.Get(), 1.25f);
+            DrawEarthquakeOverlayLabel(view, event, p, radius);
         }
     }
 
@@ -1892,7 +2045,9 @@ private:
     {
         D2D1_RECT_F bannerRect{};
         D2D1_RECT_F historyRect{};
+        D2D1_RECT_F historyToggleRect{};
         bool hasHistory = false;
+        float historyProgress = 0.0f;
     };
 
     static bool PointInRect(int x, int y, const D2D1_RECT_F& rect)
@@ -1913,11 +2068,19 @@ private:
         if (m_showNotificationHistory) {
             historyW = ClampValue(width * 0.32f, 280.0f, 420.0f);
             historyW = MinValue(historyW, MaxValue(180.0f, usableW));
+            const float tabW = 34.0f;
+            layout.historyProgress = ClampValue(m_notificationHistoryOpenProgress, 0.0f, 1.0f);
+            const float offset = (1.0f - layout.historyProgress) * MaxValue(0.0f, historyW - tabW);
             layout.historyRect = D2D1::RectF(
-                width - kOverlayUiMargin - historyW,
+                width - kOverlayUiMargin - historyW + offset,
                 kOverlayUiMargin,
-                width - kOverlayUiMargin,
+                width - kOverlayUiMargin + offset,
                 kOverlayUiMargin + MaxValue(120.0f, usableH));
+            layout.historyToggleRect = D2D1::RectF(
+                layout.historyRect.left + 6.0f,
+                layout.historyRect.top + 12.0f,
+                layout.historyRect.left + 31.0f,
+                layout.historyRect.top + 39.0f);
             layout.hasHistory = true;
         }
 
@@ -2045,7 +2208,9 @@ private:
             return false;
 
         const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
-        if (m_showNotificationHistory && PointInRect(x, y, layout.historyRect))
+        if (m_showNotificationHistory && PointInRect(x, y, layout.historyToggleRect))
+            return true;
+        if (m_showNotificationHistory && layout.historyProgress > 0.04f && PointInRect(x, y, layout.historyRect))
             return true;
         if (m_hasActiveNotification && m_hasLastActiveNotificationRect && PointInRect(x, y, m_lastActiveNotificationRect))
             return true;
@@ -2063,7 +2228,17 @@ private:
             return false;
 
         const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
-        if (!layout.hasHistory || !PointInRect(x, y, layout.historyRect))
+        if (!layout.hasHistory)
+            return false;
+
+        if (PointInRect(x, y, layout.historyToggleRect)) {
+            m_notificationHistoryCollapsed = !m_notificationHistoryCollapsed;
+            StartNotificationHistoryAnimation(m_notificationHistoryCollapsed ? 0.0f : 1.0f);
+            Invalidate();
+            return true;
+        }
+
+        if (layout.historyProgress <= 0.04f || !PointInRect(x, y, layout.historyRect))
             return false;
 
         if (PointInRect(x, y, NotificationHistoryClearRect(layout.historyRect))) {
@@ -2099,7 +2274,7 @@ private:
             return false;
 
         const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
-        if (!PointInRect(x, y, layout.historyRect))
+        if (layout.historyProgress <= 0.04f || !PointInRect(x, y, layout.historyRect))
             return false;
 
         EnsureDeviceResources();
@@ -2134,6 +2309,13 @@ private:
             : MaxValue(13.0f, m_overlayUi.MeasureTextHeight(m_activeNotification.timestamp, m_overlayUi.SmallFormat(), contentW));
         const float desiredH = kOverlayUiPadding * 2.0f + titleH + timestampH + (bodyH > 0.0f ? bodyH + 6.0f : 0.0f);
         rect.bottom = rect.top + ClampValue(desiredH, 58.0f, MaxValue(82.0f, static_cast<float>(view.height) * 0.38f));
+        const float progress = ClampValue(m_activeNotificationProgress, 0.0f, 1.0f);
+        if (progress <= 0.02f)
+            return;
+
+        const float offsetY = -(rect.bottom - rect.top + 12.0f) * (1.0f - progress);
+        rect.top += offsetY;
+        rect.bottom += offsetY;
         m_lastActiveNotificationRect = rect;
         m_hasLastActiveNotificationRect = true;
 
@@ -2164,15 +2346,22 @@ private:
             return;
 
         const D2D1_RECT_F rect = layout.historyRect;
+        const OverlayButton toggleButton{ 0, m_notificationHistoryCollapsed ? L"<" : L">", layout.historyToggleRect, true, false, false };
+        if (layout.historyProgress <= 0.04f) {
+            m_overlayUi.DrawButton(toggleButton);
+            return;
+        }
+
         if (rect.right - rect.left < 120.0f || rect.bottom - rect.top < 120.0f)
             return;
 
         m_lastNotificationHistoryRect = rect;
         m_hasLastNotificationHistoryRect = true;
         m_overlayUi.DrawGlassPanel(rect, 12.0f);
+        m_overlayUi.DrawButton(toggleButton);
 
         D2D1_RECT_F titleRect = D2D1::RectF(
-            rect.left + kOverlayUiPadding,
+            rect.left + kOverlayUiPadding + 24.0f,
             rect.top + kOverlayUiPadding - 1.0f,
             rect.right - kOverlayUiPadding - 78.0f,
             rect.top + kOverlayUiPadding + 22.0f);
@@ -2614,6 +2803,11 @@ private:
         refreshButton.text = L"Refresh";
         refreshButton.bounds = BuildRefreshButtonRect();
         m_overlayUi.DrawButton(refreshButton);
+
+        OverlayButton resetButton;
+        resetButton.text = L"Reset View";
+        resetButton.bounds = BuildResetViewButtonRect();
+        m_overlayUi.DrawButton(resetButton);
 
         OverlayButton addButton;
         addButton.text = m_addNoteMode ? L"Adding" : L"+ Note";
@@ -3191,7 +3385,20 @@ private:
     AppNotification m_activeNotification;
     std::vector<AppNotification> m_notificationHistory;
     bool m_hasActiveNotification = false;
+    bool m_activeNotificationClosing = false;
+    float m_activeNotificationProgress = 0.0f;
+    float m_activeNotificationAnimationStart = 0.0f;
+    float m_activeNotificationAnimationTarget = 0.0f;
+    ULONGLONG m_activeNotificationAnimationStartMs = 0;
+    bool m_activeNotificationAnimating = false;
     bool m_showNotificationHistory = false;
+    bool m_notificationHistoryCollapsed = false;
+    float m_notificationHistoryOpenProgress = 0.0f;
+    float m_notificationHistoryAnimationStart = 0.0f;
+    float m_notificationHistoryAnimationTarget = 0.0f;
+    ULONGLONG m_notificationHistoryAnimationStartMs = 0;
+    bool m_notificationHistoryAnimating = false;
+    bool m_showEarthquakeOverlayLabels = false;
     bool m_draggingNotificationHistoryScrollbar = false;
     float m_notificationHistoryScroll = 0.0f;
     float m_notificationHistoryScrollbarDragOffset = 0.0f;
@@ -3337,6 +3544,11 @@ void MapView::SetPolygonCaptureActive(bool active)
 void MapView::SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes)
 {
     m_impl->SetEarthquakes(earthquakes);
+}
+
+void MapView::SetEarthquakeOverlayVisible(bool visible)
+{
+    m_impl->SetEarthquakeOverlayVisible(visible);
 }
 
 void MapView::SetActiveNotification(const AppNotification& notification)

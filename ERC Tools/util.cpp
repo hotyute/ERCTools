@@ -19,7 +19,7 @@ void OpenConsole()
     freopen_s(&fp, "CONOUT$", "w", stderr);
     freopen_s(&fp, "CONIN$", "r", stdin);
 
-    SetConsoleTitleW(L"Traffic England Alerts Map - Debug Console");
+    SetConsoleTitleW(L"ERC Tools - Debug Console");
 }
 
 void ConsoleLog(const std::wstring& text)
