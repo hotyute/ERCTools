@@ -8,7 +8,16 @@ Multithreaded HTTP server for ERC Tools authentication, collaboration data, and 
 2. Run `schema.sql` against MySQL.
 3. Copy `server_config.example.json` to `server_config.json` and set the MySQL connection string.
 4. Start the server. The default port is `8081`.
-5. Create user accounts with the Account Creator:
+5. Check the ODBC driver name and database connection:
+
+```powershell
+.\ERC Tools Account Creator.exe --list-odbc-drivers
+.\ERC Tools Account Creator.exe --config server_config.json --test-connection
+```
+
+The `DRIVER={...}` value in `server_config.json` must exactly match one of the installed 64-bit ODBC driver names shown by `--list-odbc-drivers`. If the list does not include a MySQL Unicode driver, install the 64-bit MySQL ODBC connector first. phpMyAdmin can work even when the Windows ODBC driver is missing.
+
+6. Create user accounts with the Account Creator:
 
 ```powershell
 .\ERC Tools Account Creator.exe server_config.json
@@ -20,7 +29,9 @@ Or provide the fields directly:
 .\ERC Tools Account Creator.exe --config server_config.json --username sam --display-name "Sam" --password "temporary-password" --position Administrator --pod "Pod 1"
 ```
 
-6. Copy `updates\manifest.example.json` to `updates\manifest.json` when you are ready to publish updates.
+Omit `--password` to enter it through the hidden console prompt instead of putting it in command history. Use a dedicated MySQL user for ERC Tools rather than the MySQL root account once the connection is working.
+
+7. Copy `updates\manifest.example.json` to `updates\manifest.json` when you are ready to publish updates.
 
 ## Accounts and 401 Responses
 

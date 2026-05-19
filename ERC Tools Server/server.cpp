@@ -255,6 +255,27 @@ static bool ConstantTimeEquals(const std::string& a, const std::string& b)
     return diff == 0;
 }
 
+static std::wstring SqlDiagnostic(SQLSMALLINT handleType, SQLHANDLE handle)
+{
+    std::wstring out;
+    for (SQLSMALLINT i = 1;; ++i) {
+        SQLWCHAR state[8]{};
+        SQLWCHAR message[512]{};
+        SQLINTEGER nativeError = 0;
+        SQLSMALLINT length = 0;
+        SQLRETURN ret = SQLGetDiagRecW(handleType, handle, i, state, &nativeError, message, _countof(message), &length);
+        if (!SQL_SUCCEEDED(ret))
+            break;
+        if (!out.empty())
+            out += L" | ";
+        out += L"[";
+        out += state;
+        out += L"] ";
+        out += message;
+    }
+    return out;
+}
+
 class BlockingSocketQueue
 {
 public:
@@ -322,8 +343,10 @@ public:
             _countof(outConn),
             &outLen,
             SQL_DRIVER_NOPROMPT);
-        if (!SQL_SUCCEEDED(ret))
-            return Fail(errorOut, L"Could not connect to MySQL through ODBC.");
+        if (!SQL_SUCCEEDED(ret)) {
+            std::wstring diagnostic = SqlDiagnostic(SQL_HANDLE_DBC, m_dbc);
+            return Fail(errorOut, diagnostic.empty() ? L"Could not connect to MySQL through ODBC." : diagnostic);
+        }
 
         m_connected = true;
         return true;
@@ -348,7 +371,8 @@ public:
 
         SQLRETURN ret = SQLExecute(stmt);
         if (!SQL_SUCCEEDED(ret)) {
-            errorOut = L"SQLExecute failed.";
+            std::wstring diagnostic = SqlDiagnostic(SQL_HANDLE_STMT, stmt);
+            errorOut = diagnostic.empty() ? L"SQLExecute failed." : diagnostic;
             closeStmt();
             return rows;
         }
@@ -388,11 +412,13 @@ public:
             return false;
         }
         SQLRETURN ret = SQLExecute(stmt);
-        closeStmt();
         if (!SQL_SUCCEEDED(ret)) {
-            errorOut = L"SQLExecute failed.";
+            std::wstring diagnostic = SqlDiagnostic(SQL_HANDLE_STMT, stmt);
+            errorOut = diagnostic.empty() ? L"SQLExecute failed." : diagnostic;
+            closeStmt();
             return false;
         }
+        closeStmt();
         return true;
     }
 
@@ -401,7 +427,8 @@ private:
     {
         SQLRETURN ret = SQLPrepareW(stmt, reinterpret_cast<SQLWCHAR*>(const_cast<wchar_t*>(sql.c_str())), SQL_NTS);
         if (!SQL_SUCCEEDED(ret)) {
-            errorOut = L"SQLPrepare failed.";
+            std::wstring diagnostic = SqlDiagnostic(SQL_HANDLE_STMT, stmt);
+            errorOut = diagnostic.empty() ? L"SQLPrepare failed." : diagnostic;
             return false;
         }
 
@@ -420,7 +447,8 @@ private:
                 0,
                 &m_paramLengths[i]);
             if (!SQL_SUCCEEDED(ret)) {
-                errorOut = L"SQLBindParameter failed.";
+                std::wstring diagnostic = SqlDiagnostic(SQL_HANDLE_STMT, stmt);
+                errorOut = diagnostic.empty() ? L"SQLBindParameter failed." : diagnostic;
                 return false;
             }
         }

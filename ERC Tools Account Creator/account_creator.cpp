@@ -48,6 +48,8 @@ struct AccountInput
     std::wstring pod;
     bool active = true;
     bool updateExisting = false;
+    bool listOdbcDrivers = false;
+    bool testConnection = false;
 };
 
 static std::wstring Utf8ToWide(const std::string& s)
@@ -126,14 +128,74 @@ static bool DerivePasswordHash(const std::wstring& password, const std::vector<u
 
 static std::wstring SqlDiagnostic(SQLSMALLINT handleType, SQLHANDLE handle)
 {
-    SQLWCHAR state[8]{};
-    SQLWCHAR message[512]{};
-    SQLINTEGER nativeError = 0;
-    SQLSMALLINT length = 0;
-    SQLRETURN ret = SQLGetDiagRecW(handleType, handle, 1, state, &nativeError, message, _countof(message), &length);
-    if (!SQL_SUCCEEDED(ret))
-        return {};
-    return std::wstring(message);
+    std::wstring out;
+    for (SQLSMALLINT i = 1;; ++i) {
+        SQLWCHAR state[8]{};
+        SQLWCHAR message[512]{};
+        SQLINTEGER nativeError = 0;
+        SQLSMALLINT length = 0;
+        SQLRETURN ret = SQLGetDiagRecW(handleType, handle, i, state, &nativeError, message, _countof(message), &length);
+        if (!SQL_SUCCEEDED(ret))
+            break;
+        if (!out.empty())
+            out += L" | ";
+        out += L"[";
+        out += state;
+        out += L"] ";
+        out += message;
+    }
+    return out;
+}
+
+static bool ListOdbcDrivers(std::wstring& errorOut)
+{
+    SQLHENV env = nullptr;
+    if (SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env) != SQL_SUCCESS) {
+        errorOut = L"SQLAllocHandle ENV failed.";
+        return false;
+    }
+
+    SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, reinterpret_cast<SQLPOINTER>(SQL_OV_ODBC3), 0);
+
+    SQLWCHAR description[512]{};
+    SQLWCHAR attributes[1024]{};
+    SQLSMALLINT descriptionLength = 0;
+    SQLSMALLINT attributesLength = 0;
+    SQLUSMALLINT direction = SQL_FETCH_FIRST;
+    bool found = false;
+
+    while (true) {
+        SQLRETURN ret = SQLDriversW(
+            env,
+            direction,
+            description,
+            _countof(description),
+            &descriptionLength,
+            attributes,
+            _countof(attributes),
+            &attributesLength);
+        if (ret == SQL_NO_DATA)
+            break;
+        if (!SQL_SUCCEEDED(ret)) {
+            errorOut = SqlDiagnostic(SQL_HANDLE_ENV, env);
+            if (errorOut.empty())
+                errorOut = L"SQLDrivers failed.";
+            SQLFreeHandle(SQL_HANDLE_ENV, env);
+            return false;
+        }
+
+        if (!found)
+            std::wcout << L"Installed ODBC drivers:\n";
+        found = true;
+        std::wcout << L"  " << description << L"\n";
+        direction = SQL_FETCH_NEXT;
+    }
+
+    SQLFreeHandle(SQL_HANDLE_ENV, env);
+
+    if (!found)
+        std::wcout << L"No ODBC drivers were reported by Windows.\n";
+    return true;
 }
 
 class OdbcConnection
@@ -395,6 +457,8 @@ static void ShowUsage()
         << L"  ERC Tools Account Creator.exe --config server_config.json --username sam --display-name \"Sam\" --password \"temp\" --position Administrator --pod \"Pod 1\"\n\n"
         << L"Options:\n"
         << L"  --config <path>          Server config JSON containing databaseConnectionString.\n"
+        << L"  --list-odbc-drivers     List installed Windows ODBC driver names.\n"
+        << L"  --test-connection       Test the configured MySQL ODBC connection and exit.\n"
         << L"  --username <value>       Unique login username.\n"
         << L"  --display-name <value>   Name shown in ERC Tools.\n"
         << L"  --password <value>       Initial password. If omitted, you will be prompted.\n"
@@ -428,6 +492,12 @@ static bool ReadArgs(int argc, wchar_t** argv, std::filesystem::path& configPath
                 return false;
             configPath = value;
             sawConfig = true;
+        }
+        else if (arg == L"--list-odbc-drivers") {
+            input.listOdbcDrivers = true;
+        }
+        else if (arg == L"--test-connection") {
+            input.testConnection = true;
         }
         else if (arg == L"--username") {
             if (!next(input.username))
@@ -562,6 +632,15 @@ static bool CreateOrUpdateAccount(const CreatorConfig& config, const AccountInpu
         { input.username, input.displayName, input.position, input.pod, saltHex, hashHex, iterations, active },
         errorOut);
 }
+
+static bool TestConnection(const CreatorConfig& config, std::wstring& errorOut)
+{
+    OdbcConnection db(config.databaseConnectionString);
+    auto rows = db.Query(L"SELECT 1", {}, errorOut);
+    if (!errorOut.empty())
+        return false;
+    return !rows.empty();
+}
 }
 
 int wmain(int argc, wchar_t** argv)
@@ -584,11 +663,31 @@ int wmain(int argc, wchar_t** argv)
         return 1;
     }
 
+    if (input.listOdbcDrivers) {
+        std::wstring driverError;
+        if (!ListOdbcDrivers(driverError)) {
+            std::wcerr << L"Could not list ODBC drivers: " << driverError << L"\n";
+            return 1;
+        }
+        if (!input.testConnection && input.username.empty() && input.displayName.empty())
+            return 0;
+    }
+
     CreatorConfig config;
     std::wstring error;
     if (!LoadConfig(configPath, config, error)) {
         std::wcerr << error << L"\n";
         return 1;
+    }
+
+    if (input.testConnection) {
+        if (!TestConnection(config, error)) {
+            std::wcerr << L"Connection test failed: " << error << L"\n";
+            return 1;
+        }
+        std::wcout << L"Connection test succeeded.\n";
+        if (input.username.empty() && input.displayName.empty())
+            return 0;
     }
 
     if (!CompleteInteractiveInput(input))
