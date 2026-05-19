@@ -69,6 +69,7 @@ constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
 constexpr int kMaxFallbackTileZoomDelta = 5;
 constexpr int kMaxInteractiveTileRequestsPerFrame = 2;
+constexpr int kAlertFocusZoom = 9;
 
 // Interaction timing.
 constexpr UINT_PTR kInteractionIdleTimer = 1;
@@ -305,7 +306,7 @@ public:
             if (m_alerts[i].id == id && m_alerts[i].hasLocation) {
                 m_centerLat = m_alerts[i].latitude;
                 m_centerLon = m_alerts[i].longitude;
-                m_zoom = MaxValue(m_zoom, 11);
+                m_zoom = kAlertFocusZoom;
                 NormalizeCenter();
                 Invalidate();
                 return;
@@ -2531,6 +2532,8 @@ private:
                 continue;
 
             std::wstring text = note.text;
+            if (!note.author.empty())
+                text = note.author + L": " + text;
             if (text.size() > 120)
                 text = text.substr(0, 117) + L"...";
 

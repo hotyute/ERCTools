@@ -18,6 +18,7 @@ constexpr int IDC_LOGIN_POD = 7105;
 constexpr int IDC_LOGIN_STATUS = 7106;
 constexpr int IDC_LOGIN_BUTTON = 7107;
 constexpr int IDC_LOGIN_CANCEL = 7108;
+constexpr int IDC_LOGIN_OFFLINE = 7109;
 
 static HMENU ControlMenuId(int id)
 {
@@ -201,6 +202,21 @@ static void AttemptLogin(LoginContext* ctx)
     DestroyWindow(ctx->hwnd);
 }
 
+static void AcceptOfflineMode(LoginContext* ctx)
+{
+    if (!ctx || !ctx->session)
+        return;
+
+    ClientSession session;
+    session.offlineMode = true;
+    session.username = L"Offline";
+
+    *ctx->session = std::move(session);
+    ctx->accepted = true;
+    ctx->done = true;
+    DestroyWindow(ctx->hwnd);
+}
+
 static void CreateLoginControls(LoginContext* ctx)
 {
     HFONT font = CreateUiFont(10);
@@ -254,8 +270,10 @@ static LRESULT CALLBACK LoginWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             HFONT font = CreateUiFont(10);
             for (HWND h : { ctx->displayNameEdit, ctx->usernameEdit, ctx->passwordEdit, ctx->positionCombo, ctx->podCombo, ctx->statusLabel })
                 SetChildFont(h, font);
+            HWND offline = CreateWindowExW(0, L"BUTTON", L"Offline Mode", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 24, 336, 128, 32, hwnd, ControlMenuId(IDC_LOGIN_OFFLINE), ctx->hInst, nullptr);
             HWND login = CreateWindowExW(0, L"BUTTON", L"Login", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 222, 336, 96, 32, hwnd, ControlMenuId(IDC_LOGIN_BUTTON), ctx->hInst, nullptr);
             HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 328, 336, 96, 32, hwnd, ControlMenuId(IDC_LOGIN_CANCEL), ctx->hInst, nullptr);
+            SetChildFont(offline, font);
             SetChildFont(login, font);
             SetChildFont(cancel, font);
         }
@@ -269,6 +287,10 @@ static LRESULT CALLBACK LoginWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         if (LOWORD(wParam) == IDC_LOGIN_CANCEL && HIWORD(wParam) == BN_CLICKED) {
             ctx->done = true;
             DestroyWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_LOGIN_OFFLINE && HIWORD(wParam) == BN_CLICKED) {
+            AcceptOfflineMode(ctx);
             return 0;
         }
         return 0;
@@ -339,5 +361,5 @@ bool ShowLoginDialog(HINSTANCE hInst, ClientSession& sessionOut)
         DispatchMessageW(&msg);
     }
 
-    return ctx.accepted && sessionOut.authenticated;
+    return ctx.accepted && (sessionOut.authenticated || sessionOut.offlineMode);
 }

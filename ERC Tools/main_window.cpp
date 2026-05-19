@@ -1433,13 +1433,19 @@ private:
         Layout();
         SetStatusText(L"Ready.");
         ApplyRefreshTimer();
-        SetTimer(m_hwnd, kServerPollTimerId, 8 * 1000, nullptr);
+        if (IsOnlineMode())
+            SetTimer(m_hwnd, kServerPollTimerId, 8 * 1000, nullptr);
         SetTimer(m_hwnd, kEarthquakeRefreshTimerId, 10 * 60 * 1000, nullptr);
 
         RefreshFeedAsync();
         FetchEarthquakesAsync(true);
-        PollServerAsync();
-        CheckForClientUpdateAsync();
+        if (IsOnlineMode()) {
+            PollServerAsync();
+            CheckForClientUpdateAsync();
+        }
+        else {
+            SetStatusText(L"Offline mode ready.");
+        }
     }
 
     void Layout()
@@ -1676,6 +1682,16 @@ private:
         if (!m_session.username.empty())
             return m_session.username;
         return L"ERCTools";
+    }
+
+    bool IsOnlineMode() const
+    {
+        return IsOnlineSession(m_session);
+    }
+
+    std::wstring MapNoteAuthor() const
+    {
+        return IsOnlineMode() ? SessionDisplayName() : L"";
     }
 
     void LoadSettings()
@@ -2071,7 +2087,9 @@ private:
         SortAlertsForCurrentOrder();
         delete result;
 
-        size_t visible = ApplyFilters(true);
+        const bool fitMap = !m_hasLoadedAlerts;
+        size_t visible = ApplyFilters(fitMap);
+        m_hasLoadedAlerts = true;
 
         if (m_allAlerts.empty()) {
             SetStatusText(L"No alerts available.");
@@ -2659,6 +2677,9 @@ private:
 
     void PollServerAsync()
     {
+        if (!IsOnlineMode())
+            return;
+
         if (m_serverRequestInProgress.exchange(true))
             return;
 
@@ -2718,6 +2739,9 @@ private:
 
     void CheckForClientUpdateAsync()
     {
+        if (!IsOnlineMode())
+            return;
+
         std::wstring server = ServerBaseUrl();
         if (server.empty())
             return;
@@ -2790,6 +2814,11 @@ private:
         m_chatMessages.push_back(local);
         RenderChatHistory();
 
+        if (!IsOnlineMode()) {
+            SetStatusText(L"Offline mode: chat kept locally.");
+            return;
+        }
+
         std::wstring server = ServerBaseUrl();
         HWND hwnd = m_hwnd;
         std::wstring authHeaders = BearerAuthHeader(m_session);
@@ -2817,14 +2846,17 @@ private:
     {
         MapNote note;
         note.id = L"local-" + std::to_wstring(GetTickCount64());
-        note.author = SessionDisplayName();
+        note.author = MapNoteAuthor();
         note.text = text;
-        note.timestamp = L"pending";
+        note.timestamp = IsOnlineMode() ? L"pending" : L"";
         note.latitude = lat;
         note.longitude = lon;
         m_notes.push_back(note);
         m_map.SetNotes(m_notes);
-        SetStatusText(L"Map note added.");
+        SetStatusText(IsOnlineMode() ? L"Map note added." : L"Map note added locally.");
+
+        if (!IsOnlineMode())
+            return;
 
         std::wstring server = ServerBaseUrl();
         if (server.empty()) {
@@ -2856,6 +2888,13 @@ private:
 
         MapNote& note = m_notes[index];
         note.text = text;
+        if (!IsOnlineMode()) {
+            note.timestamp.clear();
+            m_map.SetNotes(m_notes);
+            SetStatusText(L"Map note updated locally.");
+            return;
+        }
+
         if (!IsLocalOnlyNoteId(note.id)) {
             note.timestamp = L"pending edit";
             m_pendingNoteEdits[note.id] = note;
@@ -2906,7 +2945,10 @@ private:
         }
         m_notes.erase(m_notes.begin() + static_cast<std::ptrdiff_t>(index));
         m_map.SetNotes(m_notes);
-        SetStatusText(L"Map note removed.");
+        SetStatusText(IsOnlineMode() ? L"Map note removed." : L"Map note removed locally.");
+
+        if (!IsOnlineMode())
+            return;
 
         if (IsLocalOnlyNoteId(note.id))
             return;
@@ -6155,6 +6197,7 @@ private:
     std::wstring m_alertsEndpoint = L"https://www.trafficengland.com/traffic-alerts";
     std::wstring m_serverBaseUrl = L"http://localhost:8080";
     bool m_periodicRefreshEnabled = true;
+    bool m_hasLoadedAlerts = false;
     std::wstring m_refreshIntervalText = L"300s";
     UINT m_refreshIntervalMs = 5 * 60 * 1000;
     std::atomic_bool m_serverRequestInProgress{ false };
