@@ -1970,8 +1970,11 @@ private:
             m_serverBaseUrl = NormalizeUrl(m_serverBaseUrl);
             {
                 std::wstring lowerServer = ToLower(m_serverBaseUrl);
-                if (lowerServer == L"http://localhost:8080" || lowerServer == L"https://localhost:8080")
-                    m_serverBaseUrl = L"http://213.254.181.35:8080";
+                if (lowerServer == L"http://localhost:8080" || lowerServer == L"https://localhost:8080" ||
+                    lowerServer == L"http://213.254.181.35:8080" || lowerServer == L"https://213.254.181.35:8080")
+                {
+                    m_serverBaseUrl = L"http://213.254.181.35:8081";
+                }
             }
             readString("alertOrder", m_alertOrder);
             readBool("alertFilterUnplannedOnly", m_alertFilterUnplannedOnly);
@@ -7171,7 +7174,7 @@ private:
         MoveWindow(m_settingsRefreshOnRadio, onRadioX, radioY, onRadioW, onRadioH, TRUE);
 
         SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"https://www.trafficengland.com/traffic-alerts"));
-        SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"213.254.181.35:8080"));
+        SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"213.254.181.35:8081"));
         SendMessageW(m_settingsRefreshIntervalEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"5s, 3s, 10s"));
 
         SendMessageW(m_settingsFilterCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Unplanned only"));
@@ -7448,7 +7451,7 @@ private:
     double m_weatherSystemNotificationWindKnots = 34.0;
     std::wstring m_alertOrder = L"Road";
     std::wstring m_alertsEndpoint = L"https://www.trafficengland.com/traffic-alerts";
-    std::wstring m_serverBaseUrl = L"http://213.254.181.35:8080";
+    std::wstring m_serverBaseUrl = L"http://213.254.181.35:8081";
     bool m_periodicRefreshEnabled = true;
     bool m_hasLoadedAlerts = false;
     std::wstring m_refreshIntervalText = L"300s";

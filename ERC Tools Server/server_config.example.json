@@ -1,5 +1,5 @@
 {
-  "port": 8080,
+  "port": 8081,
   "workerThreads": 8,
   "sessionMinutes": 720,
   "databaseConnectionString": "DRIVER={MySQL ODBC 8.0 Unicode Driver};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=erc_tools;PWD=change-me;OPTION=3;",

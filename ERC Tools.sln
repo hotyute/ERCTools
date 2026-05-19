@@ -7,6 +7,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ERC Tools", "ERC Tools\ERC 
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ERC Tools Server", "ERC Tools Server\ERC Tools Server.vcxproj", "{B748BB5B-E074-4B99-8CD3-C3C13F9491DF}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ERC Tools Account Creator", "ERC Tools Account Creator\ERC Tools Account Creator.vcxproj", "{4D4E3F22-5B33-4E5B-9235-3C3979F40E4E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -31,6 +33,14 @@ Global
 		{B748BB5B-E074-4B99-8CD3-C3C13F9491DF}.Release|x64.Build.0 = Release|x64
 		{B748BB5B-E074-4B99-8CD3-C3C13F9491DF}.Release|x86.ActiveCfg = Release|Win32
 		{B748BB5B-E074-4B99-8CD3-C3C13F9491DF}.Release|x86.Build.0 = Release|Win32
+		{4D4E3F22-5B33-4E5B-9235-3C3979F40E4E}.Debug|x64.ActiveCfg = Debug|x64
+		{4D4E3F22-5B33-4E5B-9235-3C3979F40E4E}.Debug|x64.Build.0 = Debug|x64
+		{4D4E3F22-5B33-4E5B-9235-3C3979F40E4E}.Debug|x86.ActiveCfg = Debug|Win32
+		{4D4E3F22-5B33-4E5B-9235-3C3979F40E4E}.Debug|x86.Build.0 = Debug|Win32
+		{4D4E3F22-5B33-4E5B-9235-3C3979F40E4E}.Release|x64.ActiveCfg = Release|x64
+		{4D4E3F22-5B33-4E5B-9235-3C3979F40E4E}.Release|x64.Build.0 = Release|x64
+		{4D4E3F22-5B33-4E5B-9235-3C3979F40E4E}.Release|x86.ActiveCfg = Release|Win32
+		{4D4E3F22-5B33-4E5B-9235-3C3979F40E4E}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

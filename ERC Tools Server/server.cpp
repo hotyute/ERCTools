@@ -44,7 +44,7 @@ namespace
 {
 struct ServerConfig
 {
-    int port = 8080;
+    int port = 8081;
     int workerThreads = 0;
     int sessionMinutes = 12 * 60;
     std::wstring databaseConnectionString =
