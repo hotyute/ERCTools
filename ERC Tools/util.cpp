@@ -56,6 +56,11 @@ std::filesystem::path GetBoundaryCachePath()
     return GetTrafficEnglandCacheFolder() / L"uk_outline.geojson";
 }
 
+std::filesystem::path GetWorldBoundaryCachePath()
+{
+    return GetTrafficEnglandCacheFolder() / L"world_boundaries_adm0.geojson";
+}
+
 std::filesystem::path GetLaneImageCachePath(const std::wstring& imageUrl)
 {
     std::filesystem::path folder = GetTrafficEnglandCacheFolder() / L"lane_images";

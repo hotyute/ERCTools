@@ -25,6 +25,7 @@ extern const double kPi;
 extern const wchar_t kMainClassName[];
 extern const wchar_t kMapClassName[];
 extern const wchar_t kUkBoundarySourceUrl[];
+extern const wchar_t kWorldBoundarySourceUrl[];
 
 extern std::atomic_bool g_boundaryDownloadInProgress;
 extern std::atomic_bool g_appQuitting;

@@ -542,7 +542,10 @@ public:
         Invalidate();
     }
 
-    bool LoadUkBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut = nullptr)
+    bool LoadBoundaryRingsFromFile(
+        const std::filesystem::path& path,
+        std::vector<BoundaryRing>& target,
+        std::wstring* errorOut = nullptr)
     {
         std::ifstream in(path, std::ios::binary);
         if (!in) {
@@ -570,8 +573,8 @@ public:
             return false;
         }
 
-        m_ukBoundaryRings.clear();
-        m_ukBoundaryRings.reserve(rings.size());
+        target.clear();
+        target.reserve(rings.size());
         for (auto& ring : rings) {
             if (ring.empty())
                 continue;
@@ -601,12 +604,22 @@ public:
                 });
 
             cached.points = std::move(ring);
-            m_ukBoundaryRings.push_back(std::move(cached));
+            target.push_back(std::move(cached));
         }
 
         InvalidateSceneCache();
         Invalidate();
         return true;
+    }
+
+    bool LoadUkBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut = nullptr)
+    {
+        return LoadBoundaryRingsFromFile(path, m_ukBoundaryRings, errorOut);
+    }
+
+    bool LoadWorldBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut = nullptr)
+    {
+        return LoadBoundaryRingsFromFile(path, m_worldBoundaryRings, errorOut);
     }
 
 private:
@@ -1063,6 +1076,117 @@ private:
             rect.bottom = rect.top + height;
         }
         return rect;
+    }
+
+    float MeasureMapTextHeight(const std::wstring& text, IDWriteTextFormat* format, float width) const
+    {
+        if (!format || text.empty() || !g_dwriteFactory)
+            return 0.0f;
+
+        width = ClampValue(width, 1.0f, 4000.0f);
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(g_dwriteFactory->CreateTextLayout(
+            text.c_str(),
+            static_cast<UINT32>(text.size()),
+            format,
+            width,
+            4000.0f,
+            &layout)))
+        {
+            return 0.0f;
+        }
+
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED(layout->GetMetrics(&metrics)))
+            return 0.0f;
+        return metrics.height;
+    }
+
+    float MeasureMapTextWidth(const std::wstring& text, IDWriteTextFormat* format, float width) const
+    {
+        if (!format || text.empty() || !g_dwriteFactory)
+            return 0.0f;
+
+        width = ClampValue(width, 1.0f, 4000.0f);
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(g_dwriteFactory->CreateTextLayout(
+            text.c_str(),
+            static_cast<UINT32>(text.size()),
+            format,
+            width,
+            4000.0f,
+            &layout)))
+        {
+            return 0.0f;
+        }
+
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED(layout->GetMetrics(&metrics)))
+            return 0.0f;
+        return metrics.widthIncludingTrailingWhitespace;
+    }
+
+    D2D1_RECT_F BuildMeasuredBlipLabelRect(
+        const ViewState& view,
+        D2D1_POINT_2F anchor,
+        float markerRadius,
+        const std::wstring& text,
+        float minWidth,
+        float maxWidth,
+        float horizontalPadding,
+        float verticalPadding,
+        float* contentWidthOut = nullptr,
+        float* textHeightOut = nullptr) const
+    {
+        const float viewMaxWidth = MaxValue(minWidth, static_cast<float>(view.width) - 18.0f);
+        maxWidth = ClampValue(maxWidth, minWidth, viewMaxWidth);
+        const float naturalWidth = MeasureMapTextWidth(text, m_noteTextFormat.Get(), 4000.0f);
+        const float labelWidth = ClampValue(naturalWidth + horizontalPadding * 2.0f, minWidth, maxWidth);
+        const float contentWidth = MaxValue(1.0f, labelWidth - horizontalPadding * 2.0f);
+        const float textHeight = MaxValue(18.0f, MeasureMapTextHeight(text, m_noteTextFormat.Get(), contentWidth));
+        const float labelHeight = MinValue(
+            MaxValue(28.0f, textHeight + verticalPadding * 2.0f),
+            MaxValue(28.0f, static_cast<float>(view.height) - 18.0f));
+
+        D2D1_RECT_F rect = D2D1::RectF(
+            anchor.x + markerRadius + 8.0f,
+            anchor.y - labelHeight * 0.5f,
+            anchor.x + markerRadius + 8.0f + labelWidth,
+            anchor.y + labelHeight * 0.5f);
+
+        if (rect.right > static_cast<float>(view.width) - 8.0f)
+            rect = D2D1::RectF(anchor.x - markerRadius - 8.0f - labelWidth, rect.top, anchor.x - markerRadius - 8.0f, rect.bottom);
+        rect = ClampRectToView(rect, view);
+
+        if (contentWidthOut)
+            *contentWidthOut = contentWidth;
+        if (textHeightOut)
+            *textHeightOut = textHeight;
+        return rect;
+    }
+
+    void DrawMeasuredBlipLabel(
+        const ViewState& view,
+        D2D1_POINT_2F anchor,
+        float markerRadius,
+        const std::wstring& text,
+        ID2D1Brush* stroke,
+        float minWidth,
+        float maxWidth)
+    {
+        if (!m_rt || !m_noteTextFormat || text.empty())
+            return;
+
+        float textH = 0.0f;
+        const float padX = 9.0f;
+        const float padY = 6.0f;
+        D2D1_RECT_F rect = BuildMeasuredBlipLabelRect(view, anchor, markerRadius, text, minWidth, maxWidth, padX, padY, nullptr, &textH);
+        const D2D1_ROUNDED_RECT rounded = D2D1::RoundedRect(rect, 7.0f, 7.0f);
+        m_rt->FillRoundedRectangle(rounded, m_panelBrush.Get());
+        m_rt->DrawRoundedRectangle(rounded, stroke ? stroke : m_borderBrush.Get(), 1.2f);
+
+        D2D1_RECT_F textRect = D2D1::RectF(rect.left + padX, rect.top + padY, rect.right - padX, rect.top + padY + textH + 2.0f);
+        m_rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), m_noteTextFormat.Get(), textRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
     D2D1_RECT_F BuildNoteBubbleRect(const ViewState& view, D2D1_POINT_2F anchor, float width, float height) const
@@ -2052,8 +2176,6 @@ private:
             text += L" ";
             text += event.place;
         }
-        if (text.size() > 72)
-            text = text.substr(0, 69) + L"...";
         return text;
     }
 
@@ -2066,18 +2188,7 @@ private:
         if (text.empty())
             return;
 
-        const float width = ClampValue(76.0f + static_cast<float>(text.size()) * 5.5f, 108.0f, 260.0f);
-        D2D1_RECT_F rect = D2D1::RectF(
-            anchor.x + radius + 8.0f,
-            anchor.y - 18.0f,
-            anchor.x + radius + 8.0f + width,
-            anchor.y + 20.0f);
-        rect = ClampRectToView(rect, view);
-
-        m_rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 7.0f, 7.0f), m_panelBrush.Get());
-        m_rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 7.0f, 7.0f), m_earthquakeBrush.Get(), 1.2f);
-        D2D1_RECT_F textRect = D2D1::RectF(rect.left + 9.0f, rect.top + 6.0f, rect.right - 8.0f, rect.bottom - 4.0f);
-        m_rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), m_noteTextFormat.Get(), textRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        DrawMeasuredBlipLabel(view, anchor, radius, text, m_earthquakeBrush.Get(), 122.0f, 320.0f);
     }
 
     void DrawEarthquakes(const ViewState& view)
@@ -2150,8 +2261,6 @@ private:
             text += L" - ";
             text += system.basin;
         }
-        if (text.size() > 82)
-            text = text.substr(0, 79) + L"...";
         return text;
     }
 
@@ -2164,18 +2273,7 @@ private:
         if (text.empty())
             return;
 
-        const float width = ClampValue(92.0f + static_cast<float>(text.size()) * 5.6f, 140.0f, 330.0f);
-        D2D1_RECT_F rect = D2D1::RectF(
-            anchor.x + radius + 8.0f,
-            anchor.y - 19.0f,
-            anchor.x + radius + 8.0f + width,
-            anchor.y + 21.0f);
-        rect = ClampRectToView(rect, view);
-
-        m_rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 7.0f, 7.0f), m_panelBrush.Get());
-        m_rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 7.0f, 7.0f), m_weatherSystemBrush.Get(), 1.2f);
-        D2D1_RECT_F textRect = D2D1::RectF(rect.left + 9.0f, rect.top + 6.0f, rect.right - 8.0f, rect.bottom - 4.0f);
-        m_rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), m_noteTextFormat.Get(), textRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        DrawMeasuredBlipLabel(view, anchor, radius, text, m_weatherSystemBrush.Get(), 150.0f, 360.0f);
     }
 
     void DrawWeatherSystems(const ViewState& view)
@@ -3019,11 +3117,33 @@ private:
 
         const float icon = 34.0f;
         const float gap = 4.0f;
-        const float textH = hasLaneOverlay ? 64.0f : 44.0f;
         const float panelPad = 8.0f;
         const float iconsW = hasLaneOverlay ? (total * icon + (total - 1) * gap) : 0.0f;
-        const float panelW = MaxValue(238.0f, iconsW + panelPad * 2.0f);
-        const float panelH = hasLaneOverlay ? (textH + icon + panelPad * 2.0f + 4.0f) : (textH + panelPad * 2.0f);
+
+        std::wstring roadTitle = alert->road.empty() ? alert->region : alert->road;
+        if (roadTitle.empty())
+            roadTitle = L"Traffic alert";
+        std::wstring alertTitle = alert->title.empty() ? BuildSeverityDisplay(alert->severity) : alert->title;
+        std::wstring laneTitle;
+        if (hasLaneOverlay)
+            laneTitle = L"Lanes closed: " + std::to_wstring(closed) + L" of " + std::to_wstring(total);
+
+        const float maxPanelW = MinValue(420.0f, MaxValue(238.0f, static_cast<float>(view.width) - 16.0f));
+        float naturalW = MaxValue(
+            MeasureMapTextWidth(roadTitle, m_noteTextFormat.Get(), 4000.0f),
+            MeasureMapTextWidth(alertTitle, m_noteTextFormat.Get(), 4000.0f));
+        if (hasLaneOverlay)
+            naturalW = MaxValue(naturalW, MeasureMapTextWidth(laneTitle, m_noteTextFormat.Get(), 4000.0f));
+        float panelW = ClampValue(naturalW + panelPad * 2.0f, 238.0f, maxPanelW);
+        if (hasLaneOverlay)
+            panelW = MaxValue(panelW, MinValue(maxPanelW, iconsW + panelPad * 2.0f));
+
+        const float contentW = MaxValue(1.0f, panelW - panelPad * 2.0f);
+        const float roadH = MaxValue(18.0f, MeasureMapTextHeight(roadTitle, m_noteTextFormat.Get(), contentW));
+        const float titleH = MaxValue(18.0f, MeasureMapTextHeight(alertTitle, m_noteTextFormat.Get(), contentW));
+        const float laneH = hasLaneOverlay ? MaxValue(18.0f, MeasureMapTextHeight(laneTitle, m_noteTextFormat.Get(), contentW)) : 0.0f;
+        const float textH = roadH + 2.0f + titleH + (hasLaneOverlay ? laneH + 2.0f : 0.0f);
+        const float panelH = panelPad * 2.0f + textH + (hasLaneOverlay ? icon + 8.0f : 0.0f);
 
         float left = marker.x + 18.0f;
         float top = marker.y - panelH - 18.0f;
@@ -3040,20 +3160,18 @@ private:
         m_rt->FillRoundedRectangle(panel, m_panelBrush.Get());
         m_rt->DrawRoundedRectangle(panel, m_borderBrush.Get(), 1.0f);
 
-        std::wstring roadTitle = alert->road.empty() ? alert->region : alert->road;
-        if (roadTitle.empty())
-            roadTitle = L"Traffic alert";
-        std::wstring alertTitle = alert->title.empty() ? BuildSeverityDisplay(alert->severity) : alert->title;
-        std::wstring laneTitle;
-        if (hasLaneOverlay)
-            laneTitle = L"Lanes closed: " + std::to_wstring(closed) + L" of " + std::to_wstring(total);
         if (m_noteTextFormat) {
-            D2D1_RECT_F roadRect = D2D1::RectF(left + panelPad, top + panelPad - 1.0f, left + panelW - panelPad, top + panelPad + 20.0f);
-            D2D1_RECT_F titleRect = D2D1::RectF(left + panelPad, top + panelPad + 19.0f, left + panelW - panelPad, top + panelPad + 42.0f);
+            float y = top + panelPad - 1.0f;
+            D2D1_RECT_F roadRect = D2D1::RectF(left + panelPad, y, left + panelW - panelPad, y + roadH + 2.0f);
             m_rt->DrawTextW(roadTitle.c_str(), static_cast<UINT32>(roadTitle.size()), m_noteTextFormat.Get(), roadRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            y += roadH + 2.0f;
+
+            D2D1_RECT_F titleRect = D2D1::RectF(left + panelPad, y, left + panelW - panelPad, y + titleH + 2.0f);
             m_rt->DrawTextW(alertTitle.c_str(), static_cast<UINT32>(alertTitle.size()), m_noteTextFormat.Get(), titleRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            y += titleH + 2.0f;
+
             if (hasLaneOverlay) {
-                D2D1_RECT_F laneRect = D2D1::RectF(left + panelPad, top + panelPad + 42.0f, left + panelW - panelPad, top + panelPad + textH);
+                D2D1_RECT_F laneRect = D2D1::RectF(left + panelPad, y, left + panelW - panelPad, y + laneH + 2.0f);
                 m_rt->DrawTextW(laneTitle.c_str(), static_cast<UINT32>(laneTitle.size()), m_noteTextFormat.Get(), laneRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
         }
@@ -3062,7 +3180,7 @@ private:
             return;
 
         float x = left + panelPad;
-        const float y = top + panelPad + textH + 4.0f;
+        const float y = top + panelPad + textH + 6.0f;
         for (int i = 0; i < total; ++i) {
             bool drewBitmap = false;
             if (i < static_cast<int>(alert->laneImageUrls.size())) {
@@ -3485,9 +3603,8 @@ private:
             DrawUkBoundary(boundaryView);
             DrawCityAnchors(overlayView);
         }
-        else {
-            DrawWorldBaseMap(overlayView);
-        }
+        else
+            DrawWorldBoundary(boundaryView);
         DrawNotificationPolygons(overlayView);
         DrawEarthquakes(overlayView);
         DrawWeatherSystems(overlayView);
@@ -3869,7 +3986,7 @@ private:
         }
     }
 
-    void DrawBoundaryRingFull(const BoundaryRing& ring)
+    void DrawBoundaryRingFull(const BoundaryRing& ring, const ViewState& view)
     {
         if (!m_rt || ring.points.size() < 3)
             return;
@@ -3885,11 +4002,11 @@ private:
         sink->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
 
         sink->BeginFigure(
-            GeoToScreen(ring.points[0].lat, ring.points[0].lon),
+            GeoToScreen(view, ring.points[0].lat, ring.points[0].lon),
             D2D1_FIGURE_BEGIN_FILLED);
 
         for (size_t i = 1; i < ring.points.size(); ++i)
-            sink->AddLine(GeoToScreen(ring.points[i].lat, ring.points[i].lon));
+            sink->AddLine(GeoToScreen(view, ring.points[i].lat, ring.points[i].lon));
 
         sink->EndFigure(D2D1_FIGURE_END_CLOSED);
 
@@ -3970,7 +4087,26 @@ private:
                 continue;
 
             if (fullBoundary)
-                DrawBoundaryRingFull(ring);
+                DrawBoundaryRingFull(ring, view);
+            else
+                DrawBoundaryRingVisibleStroke(ring, view);
+        }
+    }
+
+    void DrawWorldBoundary(const ViewState& view)
+    {
+        if (m_worldBoundaryRings.empty()) {
+            DrawWorldBaseMap(view);
+            return;
+        }
+
+        const bool fillBoundary = m_zoom <= kFullBoundaryMaxZoom;
+        for (const BoundaryRing& ring : m_worldBoundaryRings) {
+            if (!RingIntersectsView(ring, view))
+                continue;
+
+            if (fillBoundary)
+                DrawBoundaryRingFull(ring, view);
             else
                 DrawBoundaryRingVisibleStroke(ring, view);
         }
@@ -4088,6 +4224,7 @@ private:
     bool m_hasOverlayClip = false;
     D2D1_RECT_F m_overlayClip{};
     std::vector<BoundaryRing> m_ukBoundaryRings;
+    std::vector<BoundaryRing> m_worldBoundaryRings;
 
     std::mutex m_tileMutex;
     std::unordered_map<TileKey, std::shared_ptr<TileEntry>, TileKeyHash> m_tiles;
@@ -4266,4 +4403,9 @@ void MapView::FitToAlerts()
 bool MapView::LoadUkBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut)
 {
     return m_impl->LoadUkBoundaryFromFile(path, errorOut);
+}
+
+bool MapView::LoadWorldBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut)
+{
+    return m_impl->LoadWorldBoundaryFromFile(path, errorOut);
 }

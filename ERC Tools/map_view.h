@@ -63,6 +63,7 @@ public:
     void CenterOnAlert(const std::wstring& id);
     void FitToAlerts();
     bool LoadUkBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut = nullptr);
+    bool LoadWorldBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut = nullptr);
 
 private:
     class Impl;

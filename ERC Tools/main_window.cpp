@@ -63,7 +63,10 @@ constexpr int IDC_SETTINGS_REFRESH_INTERVAL_LABEL = 2113;
 constexpr int IDC_SETTINGS_WORLD_LABEL = 2114;
 constexpr int IDC_SETTINGS_WORLD_OFF_RADIO = 2115;
 constexpr int IDC_SETTINGS_WORLD_ON_RADIO = 2116;
-constexpr int IDC_SETTINGS_SYNC_BTN = 2117;
+constexpr int IDC_SETTINGS_SYNC_LABEL = 2117;
+constexpr int IDC_SETTINGS_SYNC_LOCAL_RADIO = 2118;
+constexpr int IDC_SETTINGS_SYNC_SERVER_RADIO = 2119;
+constexpr int IDC_SETTINGS_WORLD_BOUNDARY_BTN = 2120;
 constexpr int IDC_INCIDENT_FILTERS_TITLE_LABEL = 2201;
 constexpr int IDC_INCIDENT_FILTERS_DESC_LABEL = 2202;
 constexpr int IDC_INCIDENT_FILTERS_SEVERITY_LABEL = 2203;
@@ -167,8 +170,15 @@ struct FeedResult
     std::vector<TrafficAlert> alerts;
 };
 
+enum class BoundaryDownloadKind
+{
+    Uk,
+    World
+};
+
 struct BoundaryDownloadResult
 {
+    BoundaryDownloadKind kind = BoundaryDownloadKind::Uk;
     bool ok = false;
     std::wstring error;
     std::filesystem::path filePath;
@@ -1573,6 +1583,10 @@ private:
         if (!m_map.LoadUkBoundaryFromFile(GetBoundaryCachePath(), &boundaryError)) {
             OutputDebugStringW((L"Boundary cache load: " + boundaryError + L"\n").c_str());
         }
+        std::wstring worldBoundaryError;
+        if (!m_map.LoadWorldBoundaryFromFile(GetWorldBoundaryCachePath(), &worldBoundaryError)) {
+            OutputDebugStringW((L"World boundary cache load: " + worldBoundaryError + L"\n").c_str());
+        }
 
         m_map.SetSelectCallback([this](const std::wstring& id) {
             SelectAlertById(id, true);
@@ -1629,6 +1643,8 @@ private:
         if (IsOnlineMode()) {
             PollServerAsync();
             CheckForClientUpdateAsync();
+            if (m_syncSettingsFromServer)
+                SyncGlobalSettingsFromServerAsync();
         }
         else {
             SetStatusText(L"Offline mode ready.");
@@ -1957,6 +1973,7 @@ private:
             readBool("periodicRefreshEnabled", m_periodicRefreshEnabled);
             readBool("showNotificationHistory", m_showNotificationHistory);
             readBool("displayWorldMap", m_displayWorldMap);
+            readBool("syncSettingsFromServer", m_syncSettingsFromServer);
             readString("refreshIntervalText", m_refreshIntervalText);
             readUInt("refreshIntervalMs", m_refreshIntervalMs);
             UINT parsedRefreshMs = 0;
@@ -2208,6 +2225,7 @@ private:
             settings["periodicRefreshEnabled"] = m_periodicRefreshEnabled;
             settings["showNotificationHistory"] = m_showNotificationHistory;
             settings["displayWorldMap"] = m_displayWorldMap;
+            settings["syncSettingsFromServer"] = m_syncSettingsFromServer;
             settings["refreshIntervalText"] = WideToUtf8(m_refreshIntervalText);
             settings["refreshIntervalMs"] = m_refreshIntervalMs;
             settings["incidentFilterSevere"] = m_incidentFilterSevere;
@@ -3479,35 +3497,39 @@ private:
         delete result;
     }
 
-    void DownloadBoundaryFromGitHubAsync()
+    void DownloadBoundaryFromGitHubAsync(BoundaryDownloadKind kind = BoundaryDownloadKind::Uk)
     {
         if (g_boundaryDownloadInProgress.exchange(true)) {
             SetStatusText(L"Boundary download already in progress...");
             return;
         }
 
-        SetStatusText(L"Downloading UK boundary from geoBoundaries...");
+        SetStatusText(kind == BoundaryDownloadKind::World
+            ? L"Downloading world boundaries from geoBoundaries..."
+            : L"Downloading UK boundary from geoBoundaries...");
 
         HWND hwnd = m_hwnd;
+        const std::wstring sourceUrl = kind == BoundaryDownloadKind::World ? kWorldBoundarySourceUrl : kUkBoundarySourceUrl;
+        const std::filesystem::path cachePath = kind == BoundaryDownloadKind::World ? GetWorldBoundaryCachePath() : GetBoundaryCachePath();
 
-        ScheduleBackgroundTask([hwnd]() {
+        ScheduleBackgroundTask([hwnd, kind, sourceUrl, cachePath]() {
             auto* result = new BoundaryDownloadResult{};
+            result->kind = kind;
             std::vector<BYTE> bytes;
             std::wstring error;
 
-            if (!HttpGetBinary(kUkBoundarySourceUrl, bytes, error)) {
+            if (!HttpGetBinary(sourceUrl, bytes, error)) {
                 result->ok = false;
                 result->error = L"Boundary download failed: " + error;
             }
             else {
-                std::filesystem::path path = GetBoundaryCachePath();
-                if (!SaveBinaryToFile(path, bytes)) {
+                if (!SaveBinaryToFile(cachePath, bytes)) {
                     result->ok = false;
                     result->error = L"Boundary downloaded but could not be saved locally.";
                 }
                 else {
                     result->ok = true;
-                    result->filePath = path;
+                    result->filePath = cachePath;
                 }
             }
 
@@ -3538,9 +3560,13 @@ private:
         }
 
         std::wstring loadError;
-        if (m_map.LoadUkBoundaryFromFile(result->filePath, &loadError)) {
-            SetStatusText(L"UK boundary downloaded and loaded.");
-
+        const bool loaded = result->kind == BoundaryDownloadKind::World
+            ? m_map.LoadWorldBoundaryFromFile(result->filePath, &loadError)
+            : m_map.LoadUkBoundaryFromFile(result->filePath, &loadError);
+        if (loaded) {
+            SetStatusText(result->kind == BoundaryDownloadKind::World
+                ? L"World boundaries downloaded and loaded."
+                : L"UK boundary downloaded and loaded.");
         }
         else {
             SetStatusText(L"Boundary downloaded, but could not load it.");
@@ -7092,7 +7118,7 @@ private:
 
         if (!m_settingsWnd || !IsWindow(m_settingsWnd)) {
             m_settingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClassName, L"Settings", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                CW_USEDEFAULT, CW_USEDEFAULT, 470, 575, m_hwnd, nullptr, m_hInst, this);
+                CW_USEDEFAULT, CW_USEDEFAULT, 470, 690, m_hwnd, nullptr, m_hInst, this);
         }
         SyncSettingsControls();
         ShowWindow(m_settingsWnd, SW_SHOW);
@@ -7113,15 +7139,18 @@ private:
         CreateAutoLabel(parent, IDC_SETTINGS_WORLD_LABEL, L"Map display", 18, 252);
         m_settingsWorldOffRadio = CreateWindowExW(0, L"BUTTON", L"UK depiction", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 278, 130, 24, parent, ControlId(IDC_SETTINGS_WORLD_OFF_RADIO), m_hInst, nullptr);
         m_settingsWorldOnRadio = CreateWindowExW(0, L"BUTTON", L"Display rest of world", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 278, 190, 24, parent, ControlId(IDC_SETTINGS_WORLD_ON_RADIO), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 316);
-        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 342, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 380);
-        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 406, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
-        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 452, 260, 32, parent, ControlId(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
-        m_settingsSyncBtn = CreateWindowExW(0, L"BUTTON", L"Sync Settings", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 492, 150, 32, parent, ControlId(IDC_SETTINGS_SYNC_BTN), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 492, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_SYNC_LABEL, L"Settings source", 18, 316);
+        m_settingsSyncLocalRadio = CreateWindowExW(0, L"BUTTON", L"Local settings", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 342, 130, 24, parent, ControlId(IDC_SETTINGS_SYNC_LOCAL_RADIO), m_hInst, nullptr);
+        m_settingsSyncServerRadio = CreateWindowExW(0, L"BUTTON", L"Sync Settings", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 342, 150, 24, parent, ControlId(IDC_SETTINGS_SYNC_SERVER_RADIO), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 380);
+        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 406, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 444);
+        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 470, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
+        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 516, 260, 32, parent, ControlId(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
+        m_settingsWorldBoundaryBtn = CreateWindowExW(0, L"BUTTON", L"Download / refresh World Boundaries", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 556, 310, 32, parent, ControlId(IDC_SETTINGS_WORLD_BOUNDARY_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 596, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsWorldOffRadio, m_settingsWorldOnRadio, m_settingsFilterCombo, m_settingsOrderCombo, boundary, m_settingsSyncBtn, close }) {
+        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsWorldOffRadio, m_settingsWorldOnRadio, m_settingsSyncLocalRadio, m_settingsSyncServerRadio, m_settingsFilterCombo, m_settingsOrderCombo, boundary, m_settingsWorldBoundaryBtn, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -7169,6 +7198,12 @@ private:
             SendMessageW(m_settingsWorldOffRadio, BM_SETCHECK, m_displayWorldMap ? BST_UNCHECKED : BST_CHECKED, 0);
         if (m_settingsWorldOnRadio)
             SendMessageW(m_settingsWorldOnRadio, BM_SETCHECK, m_displayWorldMap ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_settingsSyncLocalRadio)
+            SendMessageW(m_settingsSyncLocalRadio, BM_SETCHECK, m_syncSettingsFromServer ? BST_UNCHECKED : BST_CHECKED, 0);
+        if (m_settingsSyncServerRadio) {
+            SendMessageW(m_settingsSyncServerRadio, BM_SETCHECK, m_syncSettingsFromServer ? BST_CHECKED : BST_UNCHECKED, 0);
+            EnableWindow(m_settingsSyncServerRadio, IsOnlineMode());
+        }
         if (m_settingsFilterCombo)
             SendMessageW(m_settingsFilterCombo, CB_SETCURSEL, m_alertFilterUnplannedOnly ? 0 : 1, 0);
         if (m_settingsOrderCombo) {
@@ -7179,8 +7214,6 @@ private:
             else if (order == L"title") idx = 3;
             SendMessageW(m_settingsOrderCombo, CB_SETCURSEL, idx, 0);
         }
-        if (m_settingsSyncBtn)
-            EnableWindow(m_settingsSyncBtn, IsOnlineMode());
         m_syncingControls = false;
     }
 
@@ -7241,6 +7274,17 @@ private:
             SyncSettingsControls();
             SaveSettings();
         }
+        else if (id == IDC_SETTINGS_SYNC_LOCAL_RADIO && code == BN_CLICKED) {
+            m_syncSettingsFromServer = false;
+            SyncSettingsControls();
+            SaveSettings();
+        }
+        else if (id == IDC_SETTINGS_SYNC_SERVER_RADIO && code == BN_CLICKED) {
+            m_syncSettingsFromServer = true;
+            SyncSettingsControls();
+            SaveSettings();
+            SyncGlobalSettingsFromServerAsync();
+        }
         else if (id == IDC_SETTINGS_ALERT_FILTER && code == CBN_SELCHANGE) {
             m_alertFilterUnplannedOnly = SendMessageW(m_settingsFilterCombo, CB_GETCURSEL, 0, 0) == 0;
             SaveSettings();
@@ -7255,10 +7299,10 @@ private:
             SaveSettings();
         }
         else if (id == IDC_SETTINGS_BOUNDARY_BTN && code == BN_CLICKED) {
-            DownloadBoundaryFromGitHubAsync();
+            DownloadBoundaryFromGitHubAsync(BoundaryDownloadKind::Uk);
         }
-        else if (id == IDC_SETTINGS_SYNC_BTN && code == BN_CLICKED) {
-            SyncGlobalSettingsFromServerAsync();
+        else if (id == IDC_SETTINGS_WORLD_BOUNDARY_BTN && code == BN_CLICKED) {
+            DownloadBoundaryFromGitHubAsync(BoundaryDownloadKind::World);
         }
         else if (id == IDC_SETTINGS_CLOSE_BTN && code == BN_CLICKED) {
             ShowWindow(m_settingsWnd, SW_HIDE);
@@ -7297,7 +7341,9 @@ private:
     HWND m_settingsRefreshIntervalEdit = nullptr;
     HWND m_settingsWorldOffRadio = nullptr;
     HWND m_settingsWorldOnRadio = nullptr;
-    HWND m_settingsSyncBtn = nullptr;
+    HWND m_settingsSyncLocalRadio = nullptr;
+    HWND m_settingsSyncServerRadio = nullptr;
+    HWND m_settingsWorldBoundaryBtn = nullptr;
     HWND m_incidentSevereCheck = nullptr;
     HWND m_incidentModerateCheck = nullptr;
     HWND m_incidentMinorCheck = nullptr;
@@ -7388,6 +7434,7 @@ private:
     bool m_showWeatherSystems = false;
     bool m_showWeatherSystemOverlayLabels = false;
     bool m_displayWorldMap = false;
+    bool m_syncSettingsFromServer = false;
     std::wstring m_earthquakeListMagnitudeText;
     std::wstring m_earthquakeListTimeText;
     std::wstring m_earthquakeNotificationMagnitudeText = L"4.0";

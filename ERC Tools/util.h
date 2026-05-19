@@ -28,6 +28,7 @@ T MaxValue(T a, T b)
 void OpenConsole();
 void ConsoleLog(const std::wstring& text);
 std::filesystem::path GetBoundaryCachePath();
+std::filesystem::path GetWorldBoundaryCachePath();
 std::filesystem::path GetLaneImageCachePath(const std::wstring& imageUrl);
 std::filesystem::path GetSettingsPath();
 std::filesystem::path GetUpdateCacheRoot();
