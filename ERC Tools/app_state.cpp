@@ -22,6 +22,7 @@ L"https://github.com/wmgeolab/geoBoundaries/raw/main/releaseData/gbOpen/GBR/ADM0
 std::atomic_bool g_boundaryDownloadInProgress{ false };
 std::atomic_bool g_appQuitting{ false };
 std::atomic_bool g_fetchInProgress{ false };
+std::atomic_bool g_weatherSystemsFetchInProgress{ false };
 ComPtr<ID2D1Factory> g_d2dFactory;
 ComPtr<IWICImagingFactory> g_wicFactory;
 ComPtr<IDWriteFactory> g_dwriteFactory;

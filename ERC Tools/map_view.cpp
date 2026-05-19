@@ -133,6 +133,7 @@ public:
     using PolygonClearCallback = std::function<void(size_t polygonIndex)>;
     using RefreshCallback = std::function<void()>;
     using NotificationHistoryClearCallback = std::function<void()>;
+    using ChatSendCallback = std::function<void(const std::wstring& text)>;
 
     bool Create(HWND parent, int x, int y, int w, int h)
     {
@@ -208,6 +209,11 @@ public:
         m_onNotificationHistoryClear = std::move(cb);
     }
 
+    void SetChatSendCallback(ChatSendCallback cb)
+    {
+        m_onChatSend = std::move(cb);
+    }
+
     void SetAlerts(const std::vector<TrafficAlert>& alerts)
     {
         m_alerts = alerts;
@@ -224,6 +230,12 @@ public:
         if (m_noteEditorMode == NoteEditorMode::Edit && m_noteEditorIndex >= m_notes.size())
             CancelNoteEditor();
         InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetChatMessages(const std::vector<ChatMessage>& messages)
+    {
+        m_chatMessages = messages;
         Invalidate();
     }
 
@@ -267,6 +279,33 @@ public:
             return;
 
         m_showEarthquakeOverlayLabels = visible;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetWeatherSystems(const std::vector<WeatherSystemEvent>& systems)
+    {
+        m_weatherSystems = systems;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetWeatherSystemOverlayVisible(bool visible)
+    {
+        if (m_showWeatherSystemOverlayLabels == visible)
+            return;
+
+        m_showWeatherSystemOverlayLabels = visible;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetDisplayWorldMap(bool visible)
+    {
+        if (m_displayWorldMap == visible)
+            return;
+
+        m_displayWorldMap = visible;
         InvalidateSceneCache();
         Invalidate();
     }
@@ -350,6 +389,15 @@ public:
         EnsureOverlayAnimationTimer();
     }
 
+    void StartResponderChatAnimation(float target)
+    {
+        m_responderChatAnimationStart = m_responderChatOpenProgress;
+        m_responderChatAnimationTarget = ClampValue(target, 0.0f, 1.0f);
+        m_responderChatAnimationStartMs = GetTickCount64();
+        m_responderChatAnimating = true;
+        EnsureOverlayAnimationTimer();
+    }
+
     static bool AdvanceAnimatedValue(float& value, float start, float target, ULONGLONG startMs)
     {
         const ULONGLONG now = GetTickCount64();
@@ -390,6 +438,16 @@ public:
                 m_activeNotificationClosing = false;
                 m_activeNotification = {};
             }
+        }
+
+        if (m_responderChatAnimating) {
+            const bool done = AdvanceAnimatedValue(
+                m_responderChatOpenProgress,
+                m_responderChatAnimationStart,
+                m_responderChatAnimationTarget,
+                m_responderChatAnimationStartMs);
+            m_responderChatAnimating = !done;
+            anyRunning = anyRunning || !done;
         }
 
         if (!anyRunning)
@@ -651,9 +709,12 @@ private:
 
         case WM_LBUTTONDOWN:
             SetFocus(m_hwnd);
+            if (HandleResponderChatPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
             if (HandleNotificationPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
-            if (HitNotificationInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
+            if (HitResponderChatInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
+                HitNotificationInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
                 SetCapture(m_hwnd);
                 m_notificationUiMouseDown = true;
                 return 0;
@@ -679,9 +740,10 @@ private:
 
         case WM_MOUSELEAVE:
             m_trackingMouseLeave = false;
-            if (!m_hoveredAlertId.empty() || !m_hoveredEarthquakeId.empty()) {
+            if (!m_hoveredAlertId.empty() || !m_hoveredEarthquakeId.empty() || !m_hoveredWeatherSystemId.empty()) {
                 m_hoveredAlertId.clear();
                 m_hoveredEarthquakeId.clear();
+                m_hoveredWeatherSystemId.clear();
                 Invalidate();
             }
             return 0;
@@ -704,11 +766,15 @@ private:
             return 0;
 
         case WM_KEYDOWN:
+            if (HandleResponderChatKeyDown(wParam))
+                return 0;
             if (HandleNoteEditorKeyDown(wParam))
                 return 0;
             break;
 
         case WM_CHAR:
+            if (HandleResponderChatChar(wParam))
+                return 0;
             if (HandleNoteEditorChar(wParam))
                 return 0;
             break;
@@ -944,6 +1010,31 @@ private:
             if (d <= radius && d < bestDist) {
                 bestDist = d;
                 bestId = event.id;
+            }
+        }
+
+        return bestId;
+    }
+
+    std::wstring HitTestWeatherSystem(int x, int y) const
+    {
+        std::wstring bestId;
+        double bestDist = 30.0;
+        const ViewState view = BuildViewState(bestDist + 8.0);
+
+        for (const WeatherSystemEvent& system : m_weatherSystems) {
+            if (system.id.empty() || !system.hasLocation || !IsGeoPointInView(view, system.latitude, system.longitude))
+                continue;
+
+            D2D1_POINT_2F pt = GeoToScreen(view, system.latitude, system.longitude);
+            const double radius = ClampValue(8.0 + system.windKnots * 0.08, 9.0, 22.0) + 7.0;
+            const double dx = pt.x - x;
+            const double dy = pt.y - y;
+            const double d = std::sqrt(dx * dx + dy * dy);
+
+            if (d <= radius && d < bestDist) {
+                bestDist = d;
+                bestId = system.id;
             }
         }
 
@@ -1409,10 +1500,11 @@ private:
             return;
         }
 
-        if (m_notificationUiMouseDown || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
-            if (!m_hoveredAlertId.empty() || !m_hoveredEarthquakeId.empty()) {
+        if (m_notificationUiMouseDown || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
+            if (!m_hoveredAlertId.empty() || !m_hoveredEarthquakeId.empty() || !m_hoveredWeatherSystemId.empty()) {
                 m_hoveredAlertId.clear();
                 m_hoveredEarthquakeId.clear();
+                m_hoveredWeatherSystemId.clear();
                 Invalidate();
             }
             return;
@@ -1429,9 +1521,14 @@ private:
 
         std::wstring hoveredId = HitTestAlert(x, y);
         std::wstring hoveredEarthquakeId = hoveredId.empty() ? HitTestEarthquake(x, y) : L"";
-        if (hoveredId != m_hoveredAlertId || hoveredEarthquakeId != m_hoveredEarthquakeId) {
+        std::wstring hoveredWeatherSystemId = hoveredId.empty() && hoveredEarthquakeId.empty() ? HitTestWeatherSystem(x, y) : L"";
+        if (hoveredId != m_hoveredAlertId ||
+            hoveredEarthquakeId != m_hoveredEarthquakeId ||
+            hoveredWeatherSystemId != m_hoveredWeatherSystemId)
+        {
             m_hoveredAlertId = std::move(hoveredId);
             m_hoveredEarthquakeId = std::move(hoveredEarthquakeId);
+            m_hoveredWeatherSystemId = std::move(hoveredWeatherSystemId);
             Invalidate();
         }
 
@@ -1483,7 +1580,7 @@ private:
             return;
         }
 
-        if (m_notificationUiMouseDown || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
+        if (m_notificationUiMouseDown || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
             m_notificationUiMouseDown = false;
             m_dragging = false;
             m_interactivePan = false;
@@ -1516,7 +1613,7 @@ private:
 
     void OnDoubleClick(int x, int y)
     {
-        if (HitNotificationInterface(x, y) || HitNoteInterface(x, y))
+        if (HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y))
             return;
 
         GeoPoint geo = ScreenToGeo(x, y);
@@ -1527,6 +1624,9 @@ private:
     {
         POINT pt{ screenX, screenY };
         ScreenToClient(m_hwnd, &pt);
+
+        if (HitResponderChatInterface(pt.x, pt.y))
+            return;
 
         if (TryScrollNotificationHistoryAt(pt.x, pt.y, delta))
             return;
@@ -1606,6 +1706,7 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.98f, 0.68f, 0.10f, 0.22f), &m_draftFillBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.88f, 0.42f, 0.02f, 0.95f), &m_draftStrokeBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.10f, 0.16f, 0.86f), &m_earthquakeBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.02f, 0.48f, 0.64f, 0.92f), &m_weatherSystemBrush);
 
         if (g_dwriteFactory && !m_noteTextFormat) {
             g_dwriteFactory->CreateTextFormat(
@@ -1645,6 +1746,7 @@ private:
         m_draftFillBrush.Reset();
         m_draftStrokeBrush.Reset();
         m_earthquakeBrush.Reset();
+        m_weatherSystemBrush.Reset();
         m_laneBitmaps.clear();
         m_noteTextFormat.Reset();
         m_overlayUi.DiscardDeviceResources();
@@ -2033,6 +2135,75 @@ private:
         }
     }
 
+    std::wstring WeatherSystemOverlayText(const WeatherSystemEvent& system) const
+    {
+        std::wstring text = system.name.empty() ? L"Weather system" : system.name;
+        if (!system.category.empty()) {
+            text += L" ";
+            text += system.category;
+        }
+        if (!system.windText.empty()) {
+            text += L" ";
+            text += system.windText;
+        }
+        if (!system.basin.empty()) {
+            text += L" - ";
+            text += system.basin;
+        }
+        if (text.size() > 82)
+            text = text.substr(0, 79) + L"...";
+        return text;
+    }
+
+    void DrawWeatherSystemOverlayLabel(const ViewState& view, const WeatherSystemEvent& system, D2D1_POINT_2F anchor, float radius, bool forceVisible = false)
+    {
+        if ((!m_showWeatherSystemOverlayLabels && !forceVisible) || !m_noteTextFormat)
+            return;
+
+        std::wstring text = WeatherSystemOverlayText(system);
+        if (text.empty())
+            return;
+
+        const float width = ClampValue(92.0f + static_cast<float>(text.size()) * 5.6f, 140.0f, 330.0f);
+        D2D1_RECT_F rect = D2D1::RectF(
+            anchor.x + radius + 8.0f,
+            anchor.y - 19.0f,
+            anchor.x + radius + 8.0f + width,
+            anchor.y + 21.0f);
+        rect = ClampRectToView(rect, view);
+
+        m_rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 7.0f, 7.0f), m_panelBrush.Get());
+        m_rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 7.0f, 7.0f), m_weatherSystemBrush.Get(), 1.2f);
+        D2D1_RECT_F textRect = D2D1::RectF(rect.left + 9.0f, rect.top + 6.0f, rect.right - 8.0f, rect.bottom - 4.0f);
+        m_rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), m_noteTextFormat.Get(), textRect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+
+    void DrawWeatherSystems(const ViewState& view)
+    {
+        if (!m_rt || m_weatherSystems.empty())
+            return;
+
+        for (const WeatherSystemEvent& system : m_weatherSystems) {
+            if (!system.hasLocation || !IsGeoPointInView(view, system.latitude, system.longitude))
+                continue;
+
+            D2D1_POINT_2F p = GeoToScreen(view, system.latitude, system.longitude);
+            const float radius = static_cast<float>(ClampValue(8.0 + system.windKnots * 0.08, 9.0, 22.0));
+
+            m_rt->FillEllipse(D2D1::Ellipse(p, radius, radius), m_weatherSystemBrush.Get());
+            m_rt->DrawEllipse(D2D1::Ellipse(p, radius, radius), m_borderBrush.Get(), 1.35f);
+            m_rt->DrawEllipse(D2D1::Ellipse(p, radius + 5.0f, radius + 5.0f), m_weatherSystemBrush.Get(), 1.1f);
+
+            if (system.hasForecastLocation) {
+                D2D1_POINT_2F forecast = GeoToScreen(view, system.forecastLatitude, system.forecastLongitude);
+                m_rt->DrawLine(p, forecast, m_weatherSystemBrush.Get(), 1.4f);
+                m_rt->FillEllipse(D2D1::Ellipse(forecast, 4.5f, 4.5f), m_weatherSystemBrush.Get());
+            }
+
+            DrawWeatherSystemOverlayLabel(view, system, p, radius, system.id == m_hoveredWeatherSystemId);
+        }
+    }
+
     ComPtr<ID2D1Bitmap> LoadCachedLaneBitmap(const std::wstring& url)
     {
         auto cached = m_laneBitmaps.find(url);
@@ -2086,6 +2257,223 @@ private:
     {
         return static_cast<float>(x) >= rect.left && static_cast<float>(x) <= rect.right &&
             static_cast<float>(y) >= rect.top && static_cast<float>(y) <= rect.bottom;
+    }
+
+    struct ResponderChatLayout
+    {
+        D2D1_RECT_F panelRect{};
+        D2D1_RECT_F toggleRect{};
+        D2D1_RECT_F contentRect{};
+        D2D1_RECT_F inputRect{};
+        D2D1_RECT_F sendRect{};
+        float progress = 1.0f;
+    };
+
+    ResponderChatLayout BuildResponderChatLayout(const ViewState& view) const
+    {
+        ResponderChatLayout layout;
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float panelW = ClampValue(width * 0.52f, 460.0f, 760.0f);
+        const float clippedPanelW = MinValue(panelW, MaxValue(220.0f, width - kOverlayUiMargin * 2.0f));
+        const float panelH = ClampValue(height * 0.27f, 168.0f, 238.0f);
+        const float tabH = 38.0f;
+        layout.progress = ClampValue(m_responderChatOpenProgress, 0.0f, 1.0f);
+        const float offset = (1.0f - layout.progress) * MaxValue(0.0f, panelH - tabH);
+        const float left = kOverlayUiMargin + MaxValue(0.0f, (width - kOverlayUiMargin * 2.0f - clippedPanelW) * 0.5f);
+        const float bottom = height - kOverlayUiMargin + offset;
+        layout.panelRect = D2D1::RectF(left, bottom - panelH, left + clippedPanelW, bottom);
+        layout.toggleRect = D2D1::RectF(
+            layout.panelRect.left + 10.0f,
+            layout.panelRect.top + 8.0f,
+            layout.panelRect.left + 38.0f,
+            layout.panelRect.top + 35.0f);
+        layout.sendRect = D2D1::RectF(
+            layout.panelRect.right - kOverlayUiPadding - 78.0f,
+            layout.panelRect.bottom - kOverlayUiPadding - 32.0f,
+            layout.panelRect.right - kOverlayUiPadding,
+            layout.panelRect.bottom - kOverlayUiPadding);
+        layout.inputRect = D2D1::RectF(
+            layout.panelRect.left + kOverlayUiPadding,
+            layout.sendRect.top,
+            layout.sendRect.left - 8.0f,
+            layout.sendRect.bottom);
+        layout.contentRect = D2D1::RectF(
+            layout.panelRect.left + kOverlayUiPadding,
+            layout.panelRect.top + 52.0f,
+            layout.panelRect.right - kOverlayUiPadding,
+            layout.inputRect.top - 10.0f);
+        return layout;
+    }
+
+    std::wstring FormatChatLine(const ChatMessage& msg) const
+    {
+        std::wstring line;
+        if (!msg.timestamp.empty())
+            line += L"[" + msg.timestamp + L"] ";
+        if (!msg.author.empty())
+            line += msg.author + L": ";
+        line += msg.text;
+        return line;
+    }
+
+    bool HitResponderChatInterface(int x, int y) const
+    {
+        const ResponderChatLayout layout = BuildResponderChatLayout(BuildViewState());
+        if (PointInRect(x, y, layout.toggleRect))
+            return true;
+        return layout.progress > 0.04f && PointInRect(x, y, layout.panelRect);
+    }
+
+    void SubmitResponderChatDraft()
+    {
+        std::wstring text = Trim(m_responderChatDraft);
+        if (text.empty())
+            return;
+
+        m_responderChatDraft.clear();
+        if (m_onChatSend)
+            m_onChatSend(text);
+        Invalidate();
+    }
+
+    bool HandleResponderChatPointerDown(int x, int y)
+    {
+        const ResponderChatLayout layout = BuildResponderChatLayout(BuildViewState());
+        if (PointInRect(x, y, layout.toggleRect)) {
+            m_responderChatCollapsed = !m_responderChatCollapsed;
+            if (m_responderChatCollapsed)
+                m_responderChatInputFocused = false;
+            StartResponderChatAnimation(m_responderChatCollapsed ? 0.0f : 1.0f);
+            Invalidate();
+            return true;
+        }
+
+        if (layout.progress <= 0.04f || !PointInRect(x, y, layout.panelRect))
+            return false;
+
+        if (PointInRect(x, y, layout.sendRect)) {
+            SubmitResponderChatDraft();
+            m_responderChatInputFocused = true;
+            return true;
+        }
+
+        m_responderChatInputFocused = PointInRect(x, y, layout.inputRect);
+        Invalidate();
+        return true;
+    }
+
+    bool HandleResponderChatKeyDown(WPARAM key)
+    {
+        if (!m_responderChatInputFocused)
+            return false;
+
+        if (key == VK_RETURN) {
+            SubmitResponderChatDraft();
+            return true;
+        }
+        if (key == VK_BACK) {
+            if (!m_responderChatDraft.empty())
+                m_responderChatDraft.pop_back();
+            Invalidate();
+            return true;
+        }
+        if (key == VK_ESCAPE) {
+            m_responderChatInputFocused = false;
+            Invalidate();
+            return true;
+        }
+        return false;
+    }
+
+    bool HandleResponderChatChar(WPARAM ch)
+    {
+        if (!m_responderChatInputFocused)
+            return false;
+
+        if (ch == L'\r' || ch == L'\n' || ch == 8 || ch == 27)
+            return true;
+
+        if (ch >= 32 && ch != 127 && m_responderChatDraft.size() < 512) {
+            m_responderChatDraft.push_back(static_cast<wchar_t>(ch));
+            Invalidate();
+        }
+        return true;
+    }
+
+    void DrawResponderChat(const ViewState& view)
+    {
+        if (!m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return;
+
+        const ResponderChatLayout layout = BuildResponderChatLayout(view);
+        const OverlayButton toggleButton{ 0, m_responderChatCollapsed ? L"^" : L"v", layout.toggleRect, true, false, false };
+        if (layout.progress <= 0.04f) {
+            m_overlayUi.DrawButton(toggleButton);
+            return;
+        }
+
+        if (layout.panelRect.right - layout.panelRect.left < 180.0f ||
+            layout.panelRect.bottom - layout.panelRect.top < 120.0f)
+        {
+            return;
+        }
+
+        m_overlayUi.DrawGlassPanel(layout.panelRect, 12.0f);
+        m_overlayUi.DrawButton(toggleButton);
+
+        D2D1_RECT_F titleRect = D2D1::RectF(
+            layout.panelRect.left + kOverlayUiPadding + 30.0f,
+            layout.panelRect.top + kOverlayUiPadding - 2.0f,
+            layout.panelRect.right - kOverlayUiPadding,
+            layout.panelRect.top + kOverlayUiPadding + 22.0f);
+        m_overlayUi.DrawLabel(L"Responders Chat", m_overlayUi.TitleFormat(), titleRect);
+
+        std::wstring countText = m_chatMessages.empty()
+            ? L"No responder messages yet"
+            : std::to_wstring(m_chatMessages.size()) + L" responder message(s)";
+        D2D1_RECT_F countRect = D2D1::RectF(
+            layout.panelRect.left + kOverlayUiPadding,
+            layout.panelRect.top + kOverlayUiPadding + 23.0f,
+            layout.panelRect.right - kOverlayUiPadding,
+            layout.panelRect.top + kOverlayUiPadding + 42.0f);
+        m_overlayUi.DrawLabel(countText, m_overlayUi.SmallFormat(), countRect, m_overlayUi.MutedTextBrush());
+        m_overlayUi.DrawSeparator(layout.panelRect.left + kOverlayUiPadding, layout.panelRect.right - kOverlayUiPadding, layout.panelRect.top + 50.0f);
+
+        const float contentW = MaxValue(1.0f, layout.contentRect.right - layout.contentRect.left);
+        m_rt->PushAxisAlignedClip(layout.contentRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        if (m_chatMessages.empty()) {
+            D2D1_RECT_F emptyRect = D2D1::RectF(layout.contentRect.left, layout.contentRect.top + 6.0f, layout.contentRect.right, layout.contentRect.top + 34.0f);
+            m_overlayUi.DrawLabel(L"No responder messages yet.", m_overlayUi.BodyFormat(), emptyRect, m_overlayUi.MutedTextBrush());
+        }
+        else {
+            float y = layout.contentRect.bottom;
+            for (auto it = m_chatMessages.rbegin(); it != m_chatMessages.rend(); ++it) {
+                const std::wstring line = FormatChatLine(*it);
+                const float lineH = MaxValue(18.0f, m_overlayUi.MeasureTextHeight(line, m_overlayUi.BodyFormat(), contentW));
+                y -= lineH + 6.0f;
+                if (y < layout.contentRect.top)
+                    break;
+                D2D1_RECT_F lineRect = D2D1::RectF(layout.contentRect.left, y, layout.contentRect.right, y + lineH + 2.0f);
+                m_overlayUi.DrawLabel(line, m_overlayUi.BodyFormat(), lineRect);
+            }
+        }
+        m_rt->PopAxisAlignedClip();
+
+        OverlayTextBox input;
+        input.text = m_responderChatInputFocused && (GetTickCount64() / 550) % 2 == 0
+            ? m_responderChatDraft + L"|"
+            : m_responderChatDraft;
+        input.placeholder = L"Message local responders...";
+        input.bounds = layout.inputRect;
+        input.focused = m_responderChatInputFocused;
+        m_overlayUi.DrawTextBox(input);
+
+        OverlayButton sendButton;
+        sendButton.text = L"Send";
+        sendButton.bounds = layout.sendRect;
+        sendButton.enabled = !Trim(m_responderChatDraft).empty();
+        m_overlayUi.DrawButton(sendButton);
     }
 
     NotificationLayout BuildNotificationLayout(const ViewState& view) const
@@ -2955,10 +3343,13 @@ private:
 
     void DrawSceneOverlays(const ViewState& overlayView, const ViewState& boundaryView)
     {
-        DrawUkBoundary(boundaryView);
-        DrawCityAnchors(overlayView);
+        if (!m_displayWorldMap) {
+            DrawUkBoundary(boundaryView);
+            DrawCityAnchors(overlayView);
+        }
         DrawNotificationPolygons(overlayView);
         DrawEarthquakes(overlayView);
+        DrawWeatherSystems(overlayView);
         DrawNotes(overlayView);
         DrawMarkers(overlayView);
     }
@@ -3071,6 +3462,7 @@ private:
             DrawMapChrome();
             DrawAlertOverlay(overlayView);
             DrawNoteInterface(view);
+            DrawResponderChat(view);
             DrawNotificationInterface(view);
 
             HRESULT hr = m_rt->EndDraw();
@@ -3375,9 +3767,11 @@ private:
     HWND m_hwnd = nullptr;
     std::vector<TrafficAlert> m_alerts;
     std::vector<MapNote> m_notes;
+    std::vector<ChatMessage> m_chatMessages;
     std::vector<GeoPolygon> m_notificationPolygons;
     std::vector<GeoPoint> m_draftPolygon;
     std::vector<EarthquakeEvent> m_earthquakes;
+    std::vector<WeatherSystemEvent> m_weatherSystems;
     std::wstring m_selectedId;
     SelectCallback m_onSelect;
     NoteCreateCallback m_onNoteCreate;
@@ -3389,6 +3783,7 @@ private:
     PolygonClearCallback m_onPolygonClear;
     RefreshCallback m_onRefresh;
     NotificationHistoryClearCallback m_onNotificationHistoryClear;
+    ChatSendCallback m_onChatSend;
 
     int m_zoom = kDefaultZoom;
     double m_centerLat = kDefaultCenterLat;
@@ -3409,6 +3804,7 @@ private:
     int m_interactiveTileRequestsThisFrame = 0;
     std::wstring m_hoveredAlertId;
     std::wstring m_hoveredEarthquakeId;
+    std::wstring m_hoveredWeatherSystemId;
     NoteEditorMode m_noteEditorMode = NoteEditorMode::None;
     size_t m_noteEditorIndex = static_cast<size_t>(-1);
     std::wstring m_noteEditorText;
@@ -3432,7 +3828,17 @@ private:
     ULONGLONG m_notificationHistoryAnimationStartMs = 0;
     bool m_notificationHistoryAnimating = false;
     bool m_showEarthquakeOverlayLabels = false;
+    bool m_showWeatherSystemOverlayLabels = false;
+    bool m_displayWorldMap = false;
     bool m_draggingNotificationHistoryScrollbar = false;
+    bool m_responderChatCollapsed = false;
+    bool m_responderChatInputFocused = false;
+    float m_responderChatOpenProgress = 1.0f;
+    float m_responderChatAnimationStart = 1.0f;
+    float m_responderChatAnimationTarget = 1.0f;
+    ULONGLONG m_responderChatAnimationStartMs = 0;
+    bool m_responderChatAnimating = false;
+    std::wstring m_responderChatDraft;
     float m_notificationHistoryScroll = 0.0f;
     float m_notificationHistoryScrollbarDragOffset = 0.0f;
     D2D1_RECT_F m_lastActiveNotificationRect{};
@@ -3460,6 +3866,7 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_draftFillBrush;
     ComPtr<ID2D1SolidColorBrush> m_draftStrokeBrush;
     ComPtr<ID2D1SolidColorBrush> m_earthquakeBrush;
+    ComPtr<ID2D1SolidColorBrush> m_weatherSystemBrush;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
     ComPtr<ID2D1Bitmap> m_sceneBitmap;
     int m_sceneBitmapWidth = 0;
@@ -3544,6 +3951,11 @@ void MapView::SetNotificationHistoryClearCallback(NotificationHistoryClearCallba
     m_impl->SetNotificationHistoryClearCallback(std::move(cb));
 }
 
+void MapView::SetChatSendCallback(ChatSendCallback cb)
+{
+    m_impl->SetChatSendCallback(std::move(cb));
+}
+
 void MapView::SetAlerts(const std::vector<TrafficAlert>& alerts)
 {
     m_impl->SetAlerts(alerts);
@@ -3552,6 +3964,11 @@ void MapView::SetAlerts(const std::vector<TrafficAlert>& alerts)
 void MapView::SetNotes(const std::vector<MapNote>& notes)
 {
     m_impl->SetNotes(notes);
+}
+
+void MapView::SetChatMessages(const std::vector<ChatMessage>& messages)
+{
+    m_impl->SetChatMessages(messages);
 }
 
 void MapView::SetNotificationPolygons(const std::vector<GeoPolygon>& polygons)
@@ -3582,6 +3999,21 @@ void MapView::SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes)
 void MapView::SetEarthquakeOverlayVisible(bool visible)
 {
     m_impl->SetEarthquakeOverlayVisible(visible);
+}
+
+void MapView::SetWeatherSystems(const std::vector<WeatherSystemEvent>& systems)
+{
+    m_impl->SetWeatherSystems(systems);
+}
+
+void MapView::SetWeatherSystemOverlayVisible(bool visible)
+{
+    m_impl->SetWeatherSystemOverlayVisible(visible);
+}
+
+void MapView::SetDisplayWorldMap(bool visible)
+{
+    m_impl->SetDisplayWorldMap(visible);
 }
 
 void MapView::SetActiveNotification(const AppNotification& notification)

@@ -20,6 +20,7 @@ public:
     using PolygonClearCallback = std::function<void(size_t polygonIndex)>;
     using RefreshCallback = std::function<void()>;
     using NotificationHistoryClearCallback = std::function<void()>;
+    using ChatSendCallback = std::function<void(const std::wstring& text)>;
 
     MapView();
     ~MapView();
@@ -41,14 +42,19 @@ public:
     void SetPolygonClearCallback(PolygonClearCallback cb);
     void SetRefreshCallback(RefreshCallback cb);
     void SetNotificationHistoryClearCallback(NotificationHistoryClearCallback cb);
+    void SetChatSendCallback(ChatSendCallback cb);
     void SetAlerts(const std::vector<TrafficAlert>& alerts);
     void SetNotes(const std::vector<MapNote>& notes);
+    void SetChatMessages(const std::vector<ChatMessage>& messages);
     void SetNotificationPolygons(const std::vector<GeoPolygon>& polygons);
     void SetActiveNotificationPolygonIndex(size_t index);
     void SetDraftPolygon(const std::vector<GeoPoint>& points);
     void SetPolygonCaptureActive(bool active);
     void SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes);
     void SetEarthquakeOverlayVisible(bool visible);
+    void SetWeatherSystems(const std::vector<WeatherSystemEvent>& systems);
+    void SetWeatherSystemOverlayVisible(bool visible);
+    void SetDisplayWorldMap(bool visible);
     void SetActiveNotification(const AppNotification& notification);
     void ClearActiveNotification();
     void SetNotificationHistory(const std::vector<AppNotification>& notifications);

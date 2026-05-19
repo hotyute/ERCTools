@@ -40,6 +40,13 @@ constexpr int IDM_EARTHQUAKES_TEMPLATES_WIZARD = 2012;
 constexpr int IDM_EARTHQUAKES_EDIT_TEMPLATES = 2013;
 constexpr int IDM_EARTHQUAKE_OVERLAY_NONE = 2014;
 constexpr int IDM_EARTHQUAKE_OVERLAY_MAG_REGION = 2015;
+constexpr int IDM_WEATHER_SYSTEMS_LIST = 2016;
+constexpr int IDM_WEATHER_SYSTEM_NOTIFICATIONS = 2017;
+constexpr int IDM_WEATHER_SYSTEMS_TEMPLATES_WIZARD = 2018;
+constexpr int IDM_WEATHER_SYSTEMS_EDIT_TEMPLATES = 2019;
+constexpr int IDM_SHOW_WEATHER_SYSTEMS = 2020;
+constexpr int IDM_WEATHER_SYSTEM_OVERLAY_NONE = 2021;
+constexpr int IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND = 2022;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -53,6 +60,9 @@ constexpr int IDC_SETTINGS_REFRESH_ON_RADIO = 2110;
 constexpr int IDC_SETTINGS_REFRESH_INTERVAL_EDIT = 2111;
 constexpr int IDC_SETTINGS_REFRESH_LABEL = 2112;
 constexpr int IDC_SETTINGS_REFRESH_INTERVAL_LABEL = 2113;
+constexpr int IDC_SETTINGS_WORLD_LABEL = 2114;
+constexpr int IDC_SETTINGS_WORLD_OFF_RADIO = 2115;
+constexpr int IDC_SETTINGS_WORLD_ON_RADIO = 2116;
 constexpr int IDC_INCIDENT_FILTERS_TITLE_LABEL = 2201;
 constexpr int IDC_INCIDENT_FILTERS_DESC_LABEL = 2202;
 constexpr int IDC_INCIDENT_FILTERS_SEVERITY_LABEL = 2203;
@@ -105,6 +115,11 @@ constexpr int IDC_EARTHQUAKE_LIST_LISTVIEW = 2505;
 constexpr int IDC_EARTHQUAKE_LIST_CLOSE_BTN = 2506;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT = 2521;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN = 2522;
+constexpr int IDC_WEATHER_SYSTEMS_LIST_LISTVIEW = 2541;
+constexpr int IDC_WEATHER_SYSTEMS_LIST_REFRESH_BTN = 2542;
+constexpr int IDC_WEATHER_SYSTEMS_LIST_CLOSE_BTN = 2543;
+constexpr int IDC_WEATHER_SYSTEM_NOTIFICATIONS_WIND_EDIT = 2551;
+constexpr int IDC_WEATHER_SYSTEM_NOTIFICATIONS_CLOSE_BTN = 2552;
 constexpr int IDC_TEMPLATES_WIZARD_TITLE = 2601;
 constexpr int IDC_TEMPLATES_WIZARD_DESC = 2602;
 constexpr int IDC_TEMPLATES_WIZARD_LIST = 2603;
@@ -129,6 +144,8 @@ constexpr const wchar_t* kNotificationRegionsClassName = L"TrafficEnglandNotific
 constexpr const wchar_t* kNotificationRegionEditorClassName = L"TrafficEnglandNotificationRegionEditorWindow";
 constexpr const wchar_t* kEarthquakeListClassName = L"TrafficEnglandEarthquakeListWindow";
 constexpr const wchar_t* kEarthquakeNotificationsClassName = L"TrafficEnglandEarthquakeNotificationsWindow";
+constexpr const wchar_t* kWeatherSystemsListClassName = L"TrafficEnglandWeatherSystemsListWindow";
+constexpr const wchar_t* kWeatherSystemNotificationsClassName = L"TrafficEnglandWeatherSystemNotificationsWindow";
 constexpr const wchar_t* kTemplatesWizardClassName = L"TrafficEnglandTemplatesWizardWindow";
 constexpr const wchar_t* kTemplatesEditorClassName = L"TrafficEnglandTemplatesEditorWindow";
 constexpr UINT WM_APP_NOTIFY_ICON = WM_APP + 20;
@@ -138,6 +155,8 @@ constexpr UINT_PTR kAlertRefreshTimerId = 1;
 constexpr UINT_PTR kServerPollTimerId = 2;
 constexpr UINT_PTR kInAppNotificationTimerId = 3;
 constexpr UINT_PTR kEarthquakeRefreshTimerId = 4;
+constexpr UINT_PTR kWeatherSystemsRefreshTimerId = 5;
+constexpr const wchar_t* kWeatherSystemsSourceUrl = L"https://www.tropicalstormrisk.com/tracker/dynamic/main.html";
 
 struct FeedResult
 {
@@ -158,7 +177,17 @@ struct EarthquakeResult
     bool ok = false;
     bool notify = false;
     std::wstring error;
+    std::wstring statusText;
     std::vector<EarthquakeEvent> events;
+};
+
+struct WeatherSystemsResult
+{
+    bool ok = false;
+    bool notify = false;
+    std::wstring error;
+    std::wstring statusText;
+    std::vector<WeatherSystemEvent> systems;
 };
 
 enum class ServerAction
@@ -207,10 +236,17 @@ struct EarthquakeNotificationState
     std::wstring line;
 };
 
+struct WeatherSystemNotificationState
+{
+    std::wstring signature;
+    std::wstring line;
+};
+
 enum class TemplateContext
 {
     Roads,
-    Earthquakes
+    Earthquakes,
+    WeatherSystems
 };
 
 enum class PolygonCaptureTarget
@@ -829,6 +865,136 @@ static std::vector<EarthquakeEvent> ParseEarthquakeEvents(const std::string& bod
     return out;
 }
 
+static bool IsValidMapCoordinate(double lat, double lon);
+
+static bool TryParseHemisphereCoordinate(const std::wstring& text, double& valueOut)
+{
+    std::wstring value = ToLower(Trim(text));
+    if (value.empty())
+        return false;
+
+    wchar_t hemisphere = 0;
+    if (!value.empty()) {
+        wchar_t last = value.back();
+        if (last == L'n' || last == L's' || last == L'e' || last == L'w') {
+            hemisphere = last;
+            value.pop_back();
+        }
+    }
+
+    value = Trim(value);
+    if (value.empty())
+        return false;
+
+    wchar_t* end = nullptr;
+    double parsed = std::wcstod(value.c_str(), &end);
+    if (end == value.c_str() || !std::isfinite(parsed))
+        return false;
+
+    if (hemisphere == L's' || hemisphere == L'w')
+        parsed = -parsed;
+    valueOut = parsed;
+    return true;
+}
+
+static bool TryParseKnots(const std::wstring& text, double& knotsOut)
+{
+    std::wstring value = ToLower(Trim(text));
+    if (value.empty())
+        return false;
+
+    wchar_t* end = nullptr;
+    double parsed = std::wcstod(value.c_str(), &end);
+    if (end == value.c_str() || !std::isfinite(parsed))
+        return false;
+
+    knotsOut = parsed;
+    return true;
+}
+
+static std::vector<std::wstring> ExtractHtmlTableCells(const std::wstring& rowHtml)
+{
+    std::vector<std::wstring> cells;
+    std::wregex cellRe(LR"(<\s*t[hd]\b[^>]*>([\s\S]*?)</\s*t[hd]\s*>)", std::regex_constants::icase);
+    for (std::wsregex_iterator it(rowHtml.begin(), rowHtml.end(), cellRe), end; it != end; ++it) {
+        std::wstring cell = StripTemplateHtmlTags((*it)[1].str());
+        if (!cell.empty())
+            cells.push_back(std::move(cell));
+    }
+    return cells;
+}
+
+static std::wstring ExtractWeatherSystemsStatusText(const std::wstring& htmlText)
+{
+    std::wstring text = StripTemplateHtmlTags(htmlText);
+    std::wsmatch m;
+    std::wregex statusRe(LR"(Tropical Storm Tracker:\s*(.*?GMT))", std::regex_constants::icase);
+    if (std::regex_search(text, m, statusRe) && m.size() > 1)
+        return Trim(m[1].str());
+    return L"";
+}
+
+static std::vector<WeatherSystemEvent> ParseWeatherSystemEvents(const std::string& body, std::wstring& statusTextOut)
+{
+    std::vector<WeatherSystemEvent> systems;
+    std::wstring html = Utf8ToWide(body);
+    statusTextOut = ExtractWeatherSystemsStatusText(html);
+
+    std::wregex rowRe(LR"(<\s*tr\b[^>]*>([\s\S]*?)</\s*tr\s*>)", std::regex_constants::icase);
+    for (std::wsregex_iterator it(html.begin(), html.end(), rowRe), end; it != end; ++it) {
+        std::vector<std::wstring> cells = ExtractHtmlTableCells((*it)[1].str());
+        if (cells.size() < 10)
+            continue;
+
+        std::wstring first = ToLower(Trim(cells[0]));
+        if (first == L"system" || first == L"current data")
+            continue;
+
+        WeatherSystemEvent system;
+        system.name = Trim(cells[0]);
+        system.basin = Trim(cells[1]);
+        system.windText = Trim(cells[4]);
+        system.category = Trim(cells[5]);
+        system.forecastWindText = Trim(cells[8]);
+        system.forecastCategory = Trim(cells[9]);
+        system.updatedText = statusTextOut;
+
+        double lat = 0.0;
+        double lon = 0.0;
+        if (TryParseHemisphereCoordinate(cells[2], lat) &&
+            TryParseHemisphereCoordinate(cells[3], lon) &&
+            IsValidMapCoordinate(lat, lon))
+        {
+            system.latitude = lat;
+            system.longitude = lon;
+            system.hasLocation = true;
+        }
+
+        double forecastLat = 0.0;
+        double forecastLon = 0.0;
+        if (TryParseHemisphereCoordinate(cells[6], forecastLat) &&
+            TryParseHemisphereCoordinate(cells[7], forecastLon) &&
+            IsValidMapCoordinate(forecastLat, forecastLon))
+        {
+            system.forecastLatitude = forecastLat;
+            system.forecastLongitude = forecastLon;
+            system.hasForecastLocation = true;
+        }
+
+        TryParseKnots(system.windText, system.windKnots);
+        TryParseKnots(system.forecastWindText, system.forecastWindKnots);
+
+        system.id = system.name + L"|" + system.basin;
+        if (!system.updatedText.empty())
+            system.id += L"|" + system.updatedText;
+
+        if (!system.name.empty())
+            systems.push_back(std::move(system));
+    }
+
+    return systems;
+}
+
 static GeoPolygon GeoPolygonFromJson(const json& value)
 {
     GeoPolygon polygon;
@@ -1189,6 +1355,8 @@ private:
                 PollServerAsync();
             else if (wParam == kEarthquakeRefreshTimerId)
                 FetchEarthquakesAsync(true);
+            else if (wParam == kWeatherSystemsRefreshTimerId)
+                FetchWeatherSystemsAsync(true);
             else if (wParam == kInAppNotificationTimerId) {
                 KillTimer(m_hwnd, kInAppNotificationTimerId);
                 m_map.ClearActiveNotification();
@@ -1214,6 +1382,10 @@ private:
             OnEarthquakeReady(reinterpret_cast<EarthquakeResult*>(lParam));
             return 0;
 
+        case WM_APP_WEATHER_READY:
+            OnWeatherSystemsReady(reinterpret_cast<WeatherSystemsResult*>(lParam));
+            return 0;
+
         case WM_APP_UPDATE_READY:
             OnClientUpdateReady(reinterpret_cast<ClientUpdateResult*>(lParam));
             return 0;
@@ -1226,6 +1398,7 @@ private:
             KillTimer(m_hwnd, kServerPollTimerId);
             KillTimer(m_hwnd, kInAppNotificationTimerId);
             KillTimer(m_hwnd, kEarthquakeRefreshTimerId);
+            KillTimer(m_hwnd, kWeatherSystemsRefreshTimerId);
             if (m_font) {
                 DeleteObject(m_font);
                 m_font = nullptr;
@@ -1256,6 +1429,7 @@ private:
         LoadSettings();
         EnsureDefaultReportTemplates();
         EnsureDefaultEarthquakeReportTemplates();
+        EnsureDefaultWeatherSystemReportTemplates();
         ModernizeReportTemplates();
         CreateMainMenu();
 
@@ -1317,19 +1491,6 @@ private:
             m_hInst,
             nullptr);
 
-        m_chatHistory = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
-            0, 0, 0, 0, m_hwnd, ControlId(IDC_CHAT_HISTORY), m_hInst, nullptr);
-
-        m_chatEdit = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            0, 0, 0, 0, m_hwnd, ControlId(IDC_CHAT_EDIT), m_hInst, nullptr);
-
-        m_chatSendBtn = CreateWindowExW(
-            0, L"BUTTON", L"Send", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_DEFPUSHBUTTON,
-            0, 0, 0, 0, m_hwnd, ControlId(IDC_CHAT_SEND_BTN), m_hInst, nullptr);
-
         m_statusBar = CreateWindowExW(
             0,
             STATUSCLASSNAMEW,
@@ -1342,21 +1503,20 @@ private:
             nullptr);
 
         if (!m_searchLabel || !m_severityLabel ||
-            !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_chatHistory || !m_chatEdit || !m_chatSendBtn || !m_statusBar)
+            !m_panelTabBtn || !m_searchEdit || !m_severityCombo || !m_listView || !m_detailsEdit || !m_statusBar)
         {
             MessageBoxW(m_hwnd, L"Failed to create one or more child controls.", L"ERC Tools", MB_ICONERROR);
             return;
         }
 
-        for (HWND h : { m_panelTabBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn, m_statusBar }) {
+        for (HWND h : { m_panelTabBtn, m_searchEdit, m_severityCombo, m_listView, m_detailsEdit, m_statusBar }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
-        for (HWND h : { m_searchEdit, m_detailsEdit, m_chatHistory, m_chatEdit })
+        for (HWND h : { m_searchEdit, m_detailsEdit })
             ApplyModernEditChrome(h);
 
         SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, region, or description"));
-        SendMessageW(m_chatEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Message local responders..."));
 
         SendMessageW(m_severityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All"));
         SendMessageW(m_severityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Severe"));
@@ -1430,9 +1590,15 @@ private:
         m_map.SetNotificationHistoryClearCallback([this]() {
             ClearNotificationHistory();
             });
+        m_map.SetChatSendCallback([this](const std::wstring& text) {
+            SendChatTextAsync(text);
+            });
         m_map.SetNotificationPolygons(m_incidentNotificationRegions);
         m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
         m_map.SetEarthquakeOverlayVisible(m_showEarthquakes && m_showEarthquakeOverlayLabels);
+        m_map.SetWeatherSystemOverlayVisible(m_showWeatherSystems && m_showWeatherSystemOverlayLabels);
+        m_map.SetDisplayWorldMap(m_displayWorldMap);
+        RenderChatHistory();
         RenderNotificationHistory();
 
         Layout();
@@ -1441,9 +1607,11 @@ private:
         if (IsOnlineMode())
             SetTimer(m_hwnd, kServerPollTimerId, 8 * 1000, nullptr);
         SetTimer(m_hwnd, kEarthquakeRefreshTimerId, 10 * 60 * 1000, nullptr);
+        SetTimer(m_hwnd, kWeatherSystemsRefreshTimerId, 10 * 60 * 1000, nullptr);
 
         RefreshFeedAsync();
         FetchEarthquakesAsync(true);
+        FetchWeatherSystemsAsync(true);
         if (IsOnlineMode()) {
             PollServerAsync();
             CheckForClientUpdateAsync();
@@ -1471,14 +1639,13 @@ private:
         int bodyTop = topBarH;
         int leftW = m_isSidePanelVisible ? 440 : 0;
         int detailsH = 185;
-        int chatH = 154;
 
         int leftX = pad;
         int leftY = bodyTop + pad;
         int leftInnerW = MaxInt(10, leftW - pad * 2);
 
         const int panelShow = m_isSidePanelVisible ? SW_SHOW : SW_HIDE;
-        for (HWND h : { m_searchLabel, m_searchEdit, m_severityLabel, m_severityCombo, m_listView, m_detailsEdit, m_chatHistory, m_chatEdit, m_chatSendBtn })
+        for (HWND h : { m_searchLabel, m_searchEdit, m_severityLabel, m_severityCombo, m_listView, m_detailsEdit })
             ShowWindow(h, panelShow);
 
         if (m_isSidePanelVisible) {
@@ -1495,15 +1662,11 @@ private:
 
             int listTop = severityY + severityLabelH + controlH + 18;
             int bodyHeight = static_cast<int>(height) - bodyTop - statusH - pad * 2;
-            int listHeight = MaxInt(110, bodyHeight - (listTop - leftY) - detailsH - chatH - 58);
+            int listHeight = MaxInt(150, bodyHeight - (listTop - leftY) - detailsH - 20);
 
             MoveWindow(m_listView, leftX, listTop, leftInnerW, listHeight, TRUE);
             int detailsTop = listTop + listHeight + 10;
             MoveWindow(m_detailsEdit, leftX, detailsTop, leftInnerW, detailsH, TRUE);
-            int chatTop = detailsTop + detailsH + 10;
-            MoveWindow(m_chatHistory, leftX, chatTop, leftInnerW, chatH - controlH - 8, TRUE);
-            MoveWindow(m_chatEdit, leftX, chatTop + chatH - controlH, leftInnerW - 72, controlH, TRUE);
-            MoveWindow(m_chatSendBtn, leftX + leftInnerW - 66, chatTop + chatH - controlH, 66, controlH, TRUE);
         }
 
         int mapX = (m_isSidePanelVisible ? leftW + pad : pad);
@@ -1602,17 +1765,40 @@ private:
             SetEarthquakeOverlayLabels(true);
             break;
 
+        case IDM_WEATHER_SYSTEMS_LIST:
+            ShowWeatherSystemsListWindow();
+            break;
+
+        case IDM_WEATHER_SYSTEM_NOTIFICATIONS:
+            ShowWeatherSystemNotificationsWindow();
+            break;
+
+        case IDM_WEATHER_SYSTEMS_TEMPLATES_WIZARD:
+            ShowWeatherSystemsTemplatesWizardWindow();
+            break;
+
+        case IDM_WEATHER_SYSTEMS_EDIT_TEMPLATES:
+            ShowWeatherSystemsTemplatesEditorWindow();
+            break;
+
+        case IDM_SHOW_WEATHER_SYSTEMS:
+            ToggleShowWeatherSystems();
+            break;
+
+        case IDM_WEATHER_SYSTEM_OVERLAY_NONE:
+            SetWeatherSystemOverlayLabels(false);
+            break;
+
+        case IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND:
+            SetWeatherSystemOverlayLabels(true);
+            break;
+
         case IDM_VIEW_NOTIFICATION_HISTORY:
             ToggleNotificationHistory();
             break;
 
         case IDM_ABOUT:
             ShowAboutDialog();
-            break;
-
-        case IDC_CHAT_SEND_BTN:
-            if (code == BN_CLICKED)
-                SendChatAsync();
             break;
         }
     }
@@ -1756,6 +1942,7 @@ private:
             readBool("alertFilterUnplannedOnly", m_alertFilterUnplannedOnly);
             readBool("periodicRefreshEnabled", m_periodicRefreshEnabled);
             readBool("showNotificationHistory", m_showNotificationHistory);
+            readBool("displayWorldMap", m_displayWorldMap);
             readString("refreshIntervalText", m_refreshIntervalText);
             readUInt("refreshIntervalMs", m_refreshIntervalMs);
             UINT parsedRefreshMs = 0;
@@ -1828,9 +2015,29 @@ private:
                         m_earthquakeReportTemplates.push_back(std::move(reportTemplate));
                 }
             }
+            auto weatherTemplatesIt = settings->find("weatherSystemReportTemplates");
+            if (weatherTemplatesIt != settings->end() && weatherTemplatesIt->is_array()) {
+                m_weatherSystemReportTemplatesConfigured = true;
+                m_weatherSystemReportTemplates.clear();
+                for (const json& item : *weatherTemplatesIt) {
+                    if (!item.is_object())
+                        continue;
+                    ReportTemplate reportTemplate;
+                    auto nameIt = item.find("name");
+                    if (nameIt != item.end())
+                        reportTemplate.name = JsonValueToText(*nameIt);
+                    auto bodyIt = item.find("body");
+                    if (bodyIt != item.end())
+                        reportTemplate.body = JsonValueToText(*bodyIt);
+                    if (!reportTemplate.name.empty() || !reportTemplate.body.empty())
+                        m_weatherSystemReportTemplates.push_back(std::move(reportTemplate));
+                }
+            }
 
             readBool("showEarthquakes", m_showEarthquakes);
             readBool("showEarthquakeOverlayLabels", m_showEarthquakeOverlayLabels);
+            readBool("showWeatherSystems", m_showWeatherSystems);
+            readBool("showWeatherSystemOverlayLabels", m_showWeatherSystemOverlayLabels);
             readString("earthquakeListMagnitudeText", m_earthquakeListMagnitudeText);
             readString("earthquakeListTimeText", m_earthquakeListTimeText);
             readString("earthquakeNotificationMagnitudeText", m_earthquakeNotificationMagnitudeText);
@@ -1838,6 +2045,11 @@ private:
             double parsedMag = 0.0;
             if (TryParseDoubleText(m_earthquakeNotificationMagnitudeText, parsedMag))
                 m_earthquakeNotificationMagnitude = parsedMag;
+            readString("weatherSystemNotificationWindText", m_weatherSystemNotificationWindText);
+            readDouble("weatherSystemNotificationWindKnots", m_weatherSystemNotificationWindKnots);
+            double parsedWind = 0.0;
+            if (TryParseDoubleText(m_weatherSystemNotificationWindText, parsedWind))
+                m_weatherSystemNotificationWindKnots = parsedWind;
 
             auto earthquakeRegionIt = settings->find("earthquakeFilterRegion");
             if (earthquakeRegionIt != settings->end() && earthquakeRegionIt->is_array()) {
@@ -1884,25 +2096,51 @@ private:
         m_earthquakeReportTemplatesConfigured = true;
     }
 
+    void EnsureDefaultWeatherSystemReportTemplates()
+    {
+        if (!m_weatherSystemReportTemplates.empty() || m_weatherSystemReportTemplatesConfigured)
+            return;
+
+        ReportTemplate reportTemplate;
+        reportTemplate.name = L"Weather system report";
+        reportTemplate.body = L"$DATE: WEATHER SYSTEM REPORTS: $SYSTEM is active in the $BASIN basin as a $CATEGORY with winds of $WIND. Current position: %LATITUDE, %LONGITUDE. 24-hour projection: %FORECAST_LATITUDE, %FORECAST_LONGITUDE with $FORECAST_WIND winds.";
+        m_weatherSystemReportTemplates.push_back(std::move(reportTemplate));
+        m_weatherSystemReportTemplatesConfigured = true;
+    }
+
     std::vector<ReportTemplate>& TemplatesForContext(TemplateContext context)
     {
-        return context == TemplateContext::Earthquakes ? m_earthquakeReportTemplates : m_reportTemplates;
+        if (context == TemplateContext::Earthquakes)
+            return m_earthquakeReportTemplates;
+        if (context == TemplateContext::WeatherSystems)
+            return m_weatherSystemReportTemplates;
+        return m_reportTemplates;
     }
 
     const std::vector<ReportTemplate>& TemplatesForContext(TemplateContext context) const
     {
-        return context == TemplateContext::Earthquakes ? m_earthquakeReportTemplates : m_reportTemplates;
+        if (context == TemplateContext::Earthquakes)
+            return m_earthquakeReportTemplates;
+        if (context == TemplateContext::WeatherSystems)
+            return m_weatherSystemReportTemplates;
+        return m_reportTemplates;
     }
 
     bool& TemplatesConfiguredForContext(TemplateContext context)
     {
-        return context == TemplateContext::Earthquakes ? m_earthquakeReportTemplatesConfigured : m_reportTemplatesConfigured;
+        if (context == TemplateContext::Earthquakes)
+            return m_earthquakeReportTemplatesConfigured;
+        if (context == TemplateContext::WeatherSystems)
+            return m_weatherSystemReportTemplatesConfigured;
+        return m_reportTemplatesConfigured;
     }
 
     std::wstring DefaultTemplateBodyForContext(TemplateContext context) const
     {
         if (context == TemplateContext::Earthquakes)
             return L"$DATE: EARTHQUAKE REPORTS: An earthquake of magnitude $MAGNITUDE was recorded near $PLACE at $TIME. Coordinates: %LATITUDE, %LONGITUDE. Depth: %DEPTH km.";
+        if (context == TemplateContext::WeatherSystems)
+            return L"$DATE: WEATHER SYSTEM REPORTS: $SYSTEM is active in the $BASIN basin as a $CATEGORY with winds of $WIND. Current position: %LATITUDE, %LONGITUDE.";
         return L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION %JUNCTIONS_WITH_DATA with %LANECLOSURES closed. Allow extra time for your journey.";
     }
 
@@ -1910,6 +2148,8 @@ private:
     {
         if (context == TemplateContext::Earthquakes)
             EnsureDefaultEarthquakeReportTemplates();
+        else if (context == TemplateContext::WeatherSystems)
+            EnsureDefaultWeatherSystemReportTemplates();
         else
             EnsureDefaultReportTemplates();
     }
@@ -1953,6 +2193,7 @@ private:
             settings["alertFilterUnplannedOnly"] = m_alertFilterUnplannedOnly;
             settings["periodicRefreshEnabled"] = m_periodicRefreshEnabled;
             settings["showNotificationHistory"] = m_showNotificationHistory;
+            settings["displayWorldMap"] = m_displayWorldMap;
             settings["refreshIntervalText"] = WideToUtf8(m_refreshIntervalText);
             settings["refreshIntervalMs"] = m_refreshIntervalMs;
             settings["incidentFilterSevere"] = m_incidentFilterSevere;
@@ -1987,8 +2228,17 @@ private:
                 item["body"] = WideToUtf8(reportTemplate.body);
                 settings["earthquakeReportTemplates"].push_back(std::move(item));
             }
+            settings["weatherSystemReportTemplates"] = json::array();
+            for (const ReportTemplate& reportTemplate : m_weatherSystemReportTemplates) {
+                json item = json::object();
+                item["name"] = WideToUtf8(reportTemplate.name);
+                item["body"] = WideToUtf8(reportTemplate.body);
+                settings["weatherSystemReportTemplates"].push_back(std::move(item));
+            }
             settings["showEarthquakes"] = m_showEarthquakes;
             settings["showEarthquakeOverlayLabels"] = m_showEarthquakeOverlayLabels;
+            settings["showWeatherSystems"] = m_showWeatherSystems;
+            settings["showWeatherSystemOverlayLabels"] = m_showWeatherSystemOverlayLabels;
             settings["earthquakeListMagnitudeText"] = WideToUtf8(m_earthquakeListMagnitudeText);
             settings["earthquakeListTimeText"] = WideToUtf8(m_earthquakeListTimeText);
             settings["earthquakeFilterRegion"] = json::array();
@@ -2000,6 +2250,8 @@ private:
             }
             settings["earthquakeNotificationMagnitudeText"] = WideToUtf8(m_earthquakeNotificationMagnitudeText);
             settings["earthquakeNotificationMagnitude"] = m_earthquakeNotificationMagnitude;
+            settings["weatherSystemNotificationWindText"] = WideToUtf8(m_weatherSystemNotificationWindText);
+            settings["weatherSystemNotificationWindKnots"] = m_weatherSystemNotificationWindKnots;
 
             std::ofstream out(GetSettingsPath(), std::ios::binary | std::ios::trunc);
             if (out)
@@ -2685,16 +2937,8 @@ private:
 
     void RenderChatHistory()
     {
-        std::wstring text;
-        for (const auto& msg : m_chatMessages) {
-            if (!msg.timestamp.empty()) {
-                text += L"[" + msg.timestamp + L"] ";
-            }
-            if (!msg.author.empty())
-                text += msg.author + L": ";
-            text += msg.text + L"\r\n";
-        }
-        SetWindowTextSafe(m_chatHistory, text);
+        if (m_map.Hwnd())
+            m_map.SetChatMessages(m_chatMessages);
     }
 
     void PollServerAsync()
@@ -2824,13 +3068,12 @@ private:
         PostMessageW(m_hwnd, WM_CLOSE, 0, 0);
     }
 
-    void SendChatAsync()
+    void SendChatTextAsync(const std::wstring& inputText)
     {
-        std::wstring text = Trim(GetWindowTextString(m_chatEdit));
+        std::wstring text = Trim(inputText);
         if (text.empty())
             return;
 
-        SetWindowTextSafe(m_chatEdit, L"");
         std::wstring author = SessionDisplayName();
         ChatMessage local{ author, text, L"pending" };
         m_chatMessages.push_back(local);
@@ -3149,6 +3392,7 @@ private:
         HMENU fileMenu = CreatePopupMenu();
         HMENU roadsMenu = CreatePopupMenu();
         HMENU earthquakesMenu = CreatePopupMenu();
+        HMENU weatherMenu = CreatePopupMenu();
         HMENU viewMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_SETTINGS, L"Settings...");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
@@ -3181,6 +3425,29 @@ private:
         earthquakeOverlayInfo.fType = MFT_RADIOCHECK;
         SetMenuItemInfoW(earthquakeOverlayMenu, IDM_EARTHQUAKE_OVERLAY_NONE, FALSE, &earthquakeOverlayInfo);
         SetMenuItemInfoW(earthquakeOverlayMenu, IDM_EARTHQUAKE_OVERLAY_MAG_REGION, FALSE, &earthquakeOverlayInfo);
+        AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEMS_LIST, L"Weather Systems List...");
+        AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEM_NOTIFICATIONS, L"Weather System Notifications...");
+        AppendMenuW(weatherMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEMS_TEMPLATES_WIZARD, L"Templates Wizard...");
+        AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEMS_EDIT_TEMPLATES, L"Edit Templates...");
+        AppendMenuW(weatherMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(weatherMenu, m_showWeatherSystems ? MF_CHECKED : MF_UNCHECKED, IDM_SHOW_WEATHER_SYSTEMS, L"Show Weather Systems");
+        HMENU weatherOverlayMenu = CreatePopupMenu();
+        const UINT weatherOverlayEnabled = m_showWeatherSystems ? MF_ENABLED : MF_GRAYED;
+        AppendMenuW(weatherOverlayMenu, weatherOverlayEnabled | (m_showWeatherSystemOverlayLabels ? MF_UNCHECKED : MF_CHECKED), IDM_WEATHER_SYSTEM_OVERLAY_NONE, L"None");
+        AppendMenuW(weatherOverlayMenu, weatherOverlayEnabled | (m_showWeatherSystemOverlayLabels ? MF_CHECKED : MF_UNCHECKED), IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND, L"Name and Wind");
+        AppendMenuW(weatherMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(weatherOverlayMenu), L"Weather System Overlays");
+        MENUITEMINFOW showWeatherInfo{};
+        showWeatherInfo.cbSize = sizeof(showWeatherInfo);
+        showWeatherInfo.fMask = MIIM_FTYPE;
+        showWeatherInfo.fType = MFT_RADIOCHECK;
+        SetMenuItemInfoW(weatherMenu, IDM_SHOW_WEATHER_SYSTEMS, FALSE, &showWeatherInfo);
+        MENUITEMINFOW weatherOverlayInfo{};
+        weatherOverlayInfo.cbSize = sizeof(weatherOverlayInfo);
+        weatherOverlayInfo.fMask = MIIM_FTYPE;
+        weatherOverlayInfo.fType = MFT_RADIOCHECK;
+        SetMenuItemInfoW(weatherOverlayMenu, IDM_WEATHER_SYSTEM_OVERLAY_NONE, FALSE, &weatherOverlayInfo);
+        SetMenuItemInfoW(weatherOverlayMenu, IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND, FALSE, &weatherOverlayInfo);
         AppendMenuW(viewMenu, m_showNotificationHistory ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_NOTIFICATION_HISTORY, L"Notification History");
         MENUITEMINFOW historyInfo{};
         historyInfo.cbSize = sizeof(historyInfo);
@@ -3191,6 +3458,7 @@ private:
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"View");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(earthquakesMenu), L"Earthquakes");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(weatherMenu), L"Weather Systems");
         AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"About");
         SetMenu(m_hwnd, menu);
     }
@@ -4067,6 +4335,21 @@ private:
         return nullptr;
     }
 
+    const WeatherSystemEvent* FindSelectedWeatherSystem() const
+    {
+        if (m_weatherSystemsListView) {
+            int selected = static_cast<int>(SendMessageW(m_weatherSystemsListView, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED));
+            if (selected >= 0 && selected < static_cast<int>(m_filteredWeatherSystems.size()))
+                return &m_filteredWeatherSystems[static_cast<size_t>(selected)];
+        }
+
+        if (!m_filteredWeatherSystems.empty())
+            return &m_filteredWeatherSystems.front();
+        if (!m_allWeatherSystems.empty())
+            return &m_allWeatherSystems.front();
+        return nullptr;
+    }
+
     static std::wstring CurrentDateText()
     {
         std::time_t now = std::time(nullptr);
@@ -4701,6 +4984,41 @@ private:
         return variables;
     }
 
+    std::vector<std::pair<std::wstring, std::wstring>> BuildWeatherSystemTemplateVariables(const WeatherSystemEvent& system) const
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> variables;
+        wchar_t latitude[48]{};
+        wchar_t longitude[48]{};
+        wchar_t forecastLatitude[48]{};
+        wchar_t forecastLongitude[48]{};
+        wchar_t windKnots[32]{};
+        wchar_t forecastWindKnots[32]{};
+        swprintf_s(latitude, L"%.5f", system.latitude);
+        swprintf_s(longitude, L"%.5f", system.longitude);
+        swprintf_s(forecastLatitude, L"%.5f", system.forecastLatitude);
+        swprintf_s(forecastLongitude, L"%.5f", system.forecastLongitude);
+        swprintf_s(windKnots, L"%.0f", system.windKnots);
+        swprintf_s(forecastWindKnots, L"%.0f", system.forecastWindKnots);
+        std::wstring windText = system.windText.empty() ? std::wstring(windKnots) + L" kts" : system.windText;
+        std::wstring forecastWindText = system.forecastWindText.empty() ? std::wstring(forecastWindKnots) + L" kts" : system.forecastWindText;
+
+        SetTemplateVariable(variables, L"$DATE", CurrentDateText());
+        SetTemplateVariable(variables, L"$SYSTEM", system.name.empty() ? L"Weather system" : system.name);
+        SetTemplateVariable(variables, L"$BASIN", system.basin);
+        SetTemplateVariable(variables, L"$CATEGORY", system.category);
+        SetTemplateVariable(variables, L"$WIND", windText);
+        SetTemplateVariable(variables, L"$WIND_KNOTS", windKnots);
+        SetTemplateVariable(variables, L"$FORECAST_CATEGORY", system.forecastCategory);
+        SetTemplateVariable(variables, L"$FORECAST_WIND", forecastWindText);
+        SetTemplateVariable(variables, L"$FORECAST_WIND_KNOTS", forecastWindKnots);
+        SetTemplateVariable(variables, L"$UPDATED", system.updatedText);
+        SetTemplateVariable(variables, L"%LATITUDE", latitude);
+        SetTemplateVariable(variables, L"%LONGITUDE", longitude);
+        SetTemplateVariable(variables, L"%FORECAST_LATITUDE", forecastLatitude);
+        SetTemplateVariable(variables, L"%FORECAST_LONGITUDE", forecastLongitude);
+        return variables;
+    }
+
     std::wstring FormatTemplateVariablesForEdit() const
     {
         std::wstring text;
@@ -4903,6 +5221,7 @@ private:
 
         m_templateWizardAlertId = alert->id;
         m_templateWizardEarthquakeId.clear();
+        m_templateWizardWeatherSystemId.clear();
         m_templateWizardStep = 0;
         m_templateWizardTemplateIndex = 0;
         m_templateWizardVariables = BuildTemplateVariables(*alert);
@@ -4928,11 +5247,38 @@ private:
 
         m_templateWizardAlertId.clear();
         m_templateWizardEarthquakeId = EarthquakeStableKey(*event);
+        m_templateWizardWeatherSystemId.clear();
         m_templateWizardStep = 0;
         m_templateWizardTemplateIndex = 0;
         m_templateWizardVariables = BuildEarthquakeTemplateVariables(*event);
 
         ShowTemplatesWizardWindowShell(L"Earthquake Templates Wizard");
+    }
+
+    void ShowWeatherSystemsTemplatesWizardWindow()
+    {
+        m_templateWizardContext = TemplateContext::WeatherSystems;
+        EnsureDefaultTemplatesForContext(m_templateWizardContext);
+        const auto& templates = TemplatesForContext(m_templateWizardContext);
+        if (templates.empty()) {
+            MessageBoxW(m_hwnd, L"No templates are configured. Open Weather Systems > Edit Templates to add one.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        const WeatherSystemEvent* system = FindSelectedWeatherSystem();
+        if (!system) {
+            MessageBoxW(m_hwnd, L"Select a weather system in the Weather Systems List first, then open the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        m_templateWizardAlertId.clear();
+        m_templateWizardEarthquakeId.clear();
+        m_templateWizardWeatherSystemId = WeatherSystemStableKey(*system);
+        m_templateWizardStep = 0;
+        m_templateWizardTemplateIndex = 0;
+        m_templateWizardVariables = BuildWeatherSystemTemplateVariables(*system);
+
+        ShowTemplatesWizardWindowShell(L"Weather System Templates Wizard");
     }
 
     void ShowTemplatesWizardWindowShell(const wchar_t* title)
@@ -5029,8 +5375,14 @@ private:
         EnableWindow(m_templateWizardPrevBtn, m_templateWizardStep > 0);
         SetWindowTextSafe(m_templateWizardNextBtn, reviewStep ? L"Finish" : L"Next");
 
-        if (chooseStep)
-            SetWindowTextSafe(m_templateWizardDesc, m_templateWizardContext == TemplateContext::Earthquakes ? L"Choose the report template to use for the selected earthquake." : L"Choose the report template to use for the selected incident.");
+        if (chooseStep) {
+            const wchar_t* description = L"Choose the report template to use for the selected incident.";
+            if (m_templateWizardContext == TemplateContext::Earthquakes)
+                description = L"Choose the report template to use for the selected earthquake.";
+            else if (m_templateWizardContext == TemplateContext::WeatherSystems)
+                description = L"Choose the report template to use for the selected weather system.";
+            SetWindowTextSafe(m_templateWizardDesc, description);
+        }
         else if (variableStep)
             SetWindowTextSafe(m_templateWizardDesc, L"Review and edit the variables only. Leave the template text itself unchanged here.");
         else {
@@ -5153,6 +5505,13 @@ private:
         m_templateEditorContext = TemplateContext::Earthquakes;
         EnsureDefaultTemplatesForContext(m_templateEditorContext);
         ShowTemplatesEditorWindowShell(L"Edit Earthquake Templates");
+    }
+
+    void ShowWeatherSystemsTemplatesEditorWindow()
+    {
+        m_templateEditorContext = TemplateContext::WeatherSystems;
+        EnsureDefaultTemplatesForContext(m_templateEditorContext);
+        ShowTemplatesEditorWindowShell(L"Edit Weather System Templates");
     }
 
     void ShowTemplatesEditorWindowShell(const wchar_t* title)
@@ -5393,6 +5752,69 @@ private:
         delete result;
     }
 
+    void FetchWeatherSystemsAsync(bool notify)
+    {
+        if (g_weatherSystemsFetchInProgress.exchange(true))
+            return;
+
+        HWND hwnd = m_hwnd;
+        ScheduleBackgroundTask([hwnd, notify]() {
+            auto* result = new WeatherSystemsResult{};
+            result->notify = notify;
+            std::string body;
+            std::wstring error;
+            if (HttpGetText(kWeatherSystemsSourceUrl, body, error)) {
+                try {
+                    result->systems = ParseWeatherSystemEvents(body, result->statusText);
+                    result->ok = true;
+                }
+                catch (const std::exception& e) {
+                    result->ok = false;
+                    result->error = L"Weather systems parse failed: " + Utf8ToWide(e.what());
+                }
+            }
+            else {
+                result->ok = false;
+                result->error = L"Weather systems fetch failed: " + error;
+            }
+
+            if (g_appQuitting.load() || !IsWindow(hwnd)) {
+                delete result;
+                return;
+            }
+            if (!PostMessageW(hwnd, WM_APP_WEATHER_READY, 0, reinterpret_cast<LPARAM>(result)))
+                delete result;
+            });
+    }
+
+    void OnWeatherSystemsReady(WeatherSystemsResult* result)
+    {
+        g_weatherSystemsFetchInProgress.store(false);
+        if (!result)
+            return;
+
+        if (!result->ok) {
+            if (m_weatherSystemsListWnd && IsWindowVisible(m_weatherSystemsListWnd))
+                SetStatusText(result->error);
+            delete result;
+            return;
+        }
+
+        m_allWeatherSystems = std::move(result->systems);
+        m_filteredWeatherSystems = m_allWeatherSystems;
+        RenderWeatherSystemsListRows();
+        ApplyWeatherSystemVisibility();
+        if (result->notify)
+            NotifyForMatchingWeatherSystems(m_allWeatherSystems);
+        if (m_weatherSystemsListWnd && IsWindowVisible(m_weatherSystemsListWnd)) {
+            std::wstring status = L"Showing " + std::to_wstring(m_filteredWeatherSystems.size()) + L" weather system(s).";
+            if (!result->statusText.empty())
+                status += L" " + result->statusText;
+            SetStatusText(status);
+        }
+        delete result;
+    }
+
     void ApplyEarthquakeVisibility()
     {
         m_map.SetEarthquakeOverlayVisible(m_showEarthquakes && m_showEarthquakeOverlayLabels);
@@ -5411,6 +5833,18 @@ private:
             CheckMenuItem(menu, IDM_EARTHQUAKE_OVERLAY_MAG_REGION, MF_BYCOMMAND | (m_showEarthquakeOverlayLabels ? MF_CHECKED : MF_UNCHECKED));
             EnableMenuItem(menu, IDM_EARTHQUAKE_OVERLAY_NONE, MF_BYCOMMAND | (m_showEarthquakes ? MF_ENABLED : MF_GRAYED));
             EnableMenuItem(menu, IDM_EARTHQUAKE_OVERLAY_MAG_REGION, MF_BYCOMMAND | (m_showEarthquakes ? MF_ENABLED : MF_GRAYED));
+        }
+    }
+
+    void UpdateWeatherSystemsMenu()
+    {
+        HMENU menu = GetMenu(m_hwnd);
+        if (menu) {
+            CheckMenuItem(menu, IDM_SHOW_WEATHER_SYSTEMS, MF_BYCOMMAND | (m_showWeatherSystems ? MF_CHECKED : MF_UNCHECKED));
+            CheckMenuItem(menu, IDM_WEATHER_SYSTEM_OVERLAY_NONE, MF_BYCOMMAND | (m_showWeatherSystemOverlayLabels ? MF_UNCHECKED : MF_CHECKED));
+            CheckMenuItem(menu, IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND, MF_BYCOMMAND | (m_showWeatherSystemOverlayLabels ? MF_CHECKED : MF_UNCHECKED));
+            EnableMenuItem(menu, IDM_WEATHER_SYSTEM_OVERLAY_NONE, MF_BYCOMMAND | (m_showWeatherSystems ? MF_ENABLED : MF_GRAYED));
+            EnableMenuItem(menu, IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND, MF_BYCOMMAND | (m_showWeatherSystems ? MF_ENABLED : MF_GRAYED));
         }
     }
 
@@ -5448,6 +5882,36 @@ private:
         m_showEarthquakeOverlayLabels = visible;
         UpdateEarthquakeMenu();
         ApplyEarthquakeVisibility();
+        SaveSettings();
+    }
+
+    void ApplyWeatherSystemVisibility()
+    {
+        m_map.SetWeatherSystemOverlayVisible(m_showWeatherSystems && m_showWeatherSystemOverlayLabels);
+        if (m_showWeatherSystems)
+            m_map.SetWeatherSystems(m_filteredWeatherSystems);
+        else
+            m_map.SetWeatherSystems({});
+    }
+
+    void ToggleShowWeatherSystems()
+    {
+        m_showWeatherSystems = !m_showWeatherSystems;
+        UpdateWeatherSystemsMenu();
+        ApplyWeatherSystemVisibility();
+        SaveSettings();
+        if (m_showWeatherSystems && m_allWeatherSystems.empty())
+            FetchWeatherSystemsAsync(false);
+    }
+
+    void SetWeatherSystemOverlayLabels(bool visible)
+    {
+        if (m_showWeatherSystemOverlayLabels == visible)
+            return;
+
+        m_showWeatherSystemOverlayLabels = visible;
+        UpdateWeatherSystemsMenu();
+        ApplyWeatherSystemVisibility();
         SaveSettings();
     }
 
@@ -5580,6 +6044,136 @@ private:
         PublishEarthquakeNotificationBatch(newLines, L"Earthquake notification", L"earthquake notifications");
         PublishEarthquakeNotificationBatch(updateLines, L"Earthquake update", L"earthquake updates");
         PublishEarthquakeNotificationBatch(removedLines, L"Earthquake removed", L"earthquake removals");
+    }
+
+    bool WeatherSystemMatchesNotification(const WeatherSystemEvent& system) const
+    {
+        return system.windKnots + 0.0001 >= m_weatherSystemNotificationWindKnots;
+    }
+
+    std::wstring WeatherSystemStableKey(const WeatherSystemEvent& system) const
+    {
+        if (!system.id.empty())
+            return system.id;
+        return system.name + L"|" + system.basin;
+    }
+
+    std::wstring WeatherSystemSignature(const WeatherSystemEvent& system) const
+    {
+        std::wstring signature = system.name;
+        signature += L"|";
+        signature += system.basin;
+        signature += L"|";
+        signature += system.category;
+        signature += L"|";
+        signature += std::to_wstring(static_cast<int>(std::round(system.windKnots)));
+        signature += L"|";
+        signature += std::to_wstring(static_cast<int>(std::round(system.latitude * 1000.0)));
+        signature += L"|";
+        signature += std::to_wstring(static_cast<int>(std::round(system.longitude * 1000.0)));
+        signature += L"|";
+        signature += system.updatedText;
+        return signature;
+    }
+
+    std::wstring WeatherSystemNotificationLine(const WeatherSystemEvent& system) const
+    {
+        std::wstring line = system.name.empty() ? L"Weather system" : system.name;
+        if (!system.basin.empty()) {
+            line += L" - ";
+            line += system.basin;
+        }
+        if (!system.category.empty()) {
+            line += L" ";
+            line += system.category;
+        }
+        if (!system.windText.empty()) {
+            line += L" ";
+            line += system.windText;
+        }
+        return line;
+    }
+
+    void PublishWeatherSystemNotificationBatch(
+        const std::vector<std::wstring>& lines,
+        const std::wstring& singleTitle,
+        const std::wstring& pluralSuffix)
+    {
+        if (lines.empty())
+            return;
+
+        std::wstring title;
+        std::wstring body;
+        if (lines.size() == 1) {
+            title = singleTitle;
+            body = lines.front();
+        }
+        else {
+            title = std::to_wstring(lines.size()) + L" " + pluralSuffix;
+            const size_t displayCount = MinValue<size_t>(lines.size(), 3);
+            for (size_t i = 0; i < displayCount; ++i) {
+                if (!body.empty())
+                    body += L"\r\n";
+                body += lines[i];
+            }
+            if (lines.size() > displayCount)
+                body += L"\r\n...";
+        }
+
+        PublishNotification(title, body);
+    }
+
+    void NotifyForMatchingWeatherSystems(const std::vector<WeatherSystemEvent>& systems)
+    {
+        std::unordered_set<std::wstring> currentKeys;
+        std::vector<std::wstring> newLines;
+        std::vector<std::wstring> updateLines;
+        std::vector<std::wstring> removedLines;
+
+        for (const WeatherSystemEvent& system : systems) {
+            std::wstring key = WeatherSystemStableKey(system);
+            currentKeys.insert(key);
+
+            if (!WeatherSystemMatchesNotification(system)) {
+                auto existing = m_notifiedWeatherSystemStates.find(key);
+                if (m_haveWeatherSystemNotificationSnapshot && existing != m_notifiedWeatherSystemStates.end()) {
+                    removedLines.push_back(existing->second.line);
+                    m_notifiedWeatherSystemStates.erase(existing);
+                }
+                continue;
+            }
+
+            std::wstring signature = WeatherSystemSignature(system);
+            std::wstring line = WeatherSystemNotificationLine(system);
+            auto existing = m_notifiedWeatherSystemStates.find(key);
+            if (existing == m_notifiedWeatherSystemStates.end()) {
+                newLines.push_back(line);
+                m_notifiedWeatherSystemStates[key] = WeatherSystemNotificationState{ signature, line };
+            }
+            else if (existing->second.signature != signature) {
+                updateLines.push_back(line);
+                existing->second.signature = std::move(signature);
+                existing->second.line = std::move(line);
+            }
+        }
+
+        if (m_haveWeatherSystemNotificationSnapshot) {
+            for (auto it = m_notifiedWeatherSystemStates.begin(); it != m_notifiedWeatherSystemStates.end();) {
+                if (currentKeys.find(it->first) == currentKeys.end()) {
+                    removedLines.push_back(it->second.line);
+                    it = m_notifiedWeatherSystemStates.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+
+        m_haveWeatherSystemNotificationSnapshot = true;
+
+        PublishWeatherSystemNotificationBatch(newLines, L"Weather system notification", L"weather system notifications");
+        PublishWeatherSystemNotificationBatch(updateLines, L"Weather system update", L"weather system updates");
+        PublishWeatherSystemNotificationBatch(removedLines, L"Weather system removed", L"weather system removals");
     }
 
     static LRESULT CALLBACK EarthquakeListWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -5939,6 +6533,294 @@ private:
         }
     }
 
+    static LRESULT CALLBACK WeatherSystemsListWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleWeatherSystemsListMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleWeatherSystemsListMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateWeatherSystemsListControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnWeatherSystemsListCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowWeatherSystemsListWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = WeatherSystemsListWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kWeatherSystemsListClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_weatherSystemsListWnd || !IsWindow(m_weatherSystemsListWnd)) {
+            m_weatherSystemsListWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kWeatherSystemsListClassName,
+                L"Weather Systems List",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                900,
+                500,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        RenderWeatherSystemsListRows();
+        ShowWindow(m_weatherSystemsListWnd, SW_SHOW);
+        SetForegroundWindow(m_weatherSystemsListWnd);
+        if (m_allWeatherSystems.empty())
+            FetchWeatherSystemsAsync(false);
+    }
+
+    void CreateWeatherSystemsListControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Weather Systems List", 18, 18, m_headerFont);
+        HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 626, 54, 102, 32, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_REFRESH_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 742, 54, 102, 32, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_CLOSE_BTN), m_hInst, nullptr);
+        m_weatherSystemsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 102, 826, 320, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_LISTVIEW), m_hInst, nullptr);
+
+        for (HWND h : { refreshBtn, closeBtn, m_weatherSystemsListView }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+        SendMessageW(m_weatherSystemsListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
+
+        struct ColumnDef { const wchar_t* text; int width; };
+        const ColumnDef columns[] = {
+            { L"System", 140 },
+            { L"Basin", 120 },
+            { L"Lat", 70 },
+            { L"Long", 80 },
+            { L"Wind", 80 },
+            { L"Cat", 70 },
+            { L"24h Lat", 80 },
+            { L"24h Long", 80 },
+            { L"24h Wind", 90 },
+            { L"24h Cat", 80 }
+        };
+        for (int i = 0; i < static_cast<int>(_countof(columns)); ++i) {
+            LVCOLUMNW col{};
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            col.pszText = const_cast<LPWSTR>(columns[i].text);
+            col.cx = columns[i].width;
+            col.iSubItem = i;
+            SendMessageW(m_weatherSystemsListView, LVM_INSERTCOLUMNW, i, reinterpret_cast<LPARAM>(&col));
+        }
+        RenderWeatherSystemsListRows();
+        AutoFitWindowToChildren(parent);
+    }
+
+    static std::wstring FormatCoordinateForList(double value, bool lat)
+    {
+        wchar_t buffer[48]{};
+        const wchar_t hemi = lat ? (value < 0.0 ? L'S' : L'N') : (value < 0.0 ? L'W' : L'E');
+        swprintf_s(buffer, L"%.1f %c", std::abs(value), hemi);
+        return buffer;
+    }
+
+    void RenderWeatherSystemsListRows()
+    {
+        if (!m_weatherSystemsListView)
+            return;
+
+        SendMessageW(m_weatherSystemsListView, LVM_DELETEALLITEMS, 0, 0);
+        int row = 0;
+        for (const WeatherSystemEvent& system : m_filteredWeatherSystems) {
+            LVITEMW item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = row;
+            item.iSubItem = 0;
+            item.pszText = const_cast<LPWSTR>(system.name.c_str());
+            int inserted = static_cast<int>(SendMessageW(m_weatherSystemsListView, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+            if (inserted < 0)
+                continue;
+
+            std::wstring lat = system.hasLocation ? FormatCoordinateForList(system.latitude, true) : L"";
+            std::wstring lon = system.hasLocation ? FormatCoordinateForList(system.longitude, false) : L"";
+            std::wstring forecastLat = system.hasForecastLocation ? FormatCoordinateForList(system.forecastLatitude, true) : L"";
+            std::wstring forecastLon = system.hasForecastLocation ? FormatCoordinateForList(system.forecastLongitude, false) : L"";
+            const std::wstring values[] = {
+                system.basin,
+                lat,
+                lon,
+                system.windText,
+                system.category,
+                forecastLat,
+                forecastLon,
+                system.forecastWindText,
+                system.forecastCategory
+            };
+            for (int i = 0; i < static_cast<int>(_countof(values)); ++i) {
+                LVITEMW sub{};
+                sub.iSubItem = i + 1;
+                sub.pszText = const_cast<LPWSTR>(values[i].c_str());
+                SendMessageW(m_weatherSystemsListView, LVM_SETITEMTEXTW, inserted, reinterpret_cast<LPARAM>(&sub));
+            }
+            ++row;
+        }
+    }
+
+    void OnWeatherSystemsListCommand(int id, int code)
+    {
+        if (id == IDC_WEATHER_SYSTEMS_LIST_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_weatherSystemsListWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_WEATHER_SYSTEMS_LIST_REFRESH_BTN && code == BN_CLICKED) {
+            FetchWeatherSystemsAsync(false);
+            return;
+        }
+    }
+
+    static LRESULT CALLBACK WeatherSystemNotificationsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleWeatherSystemNotificationsMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleWeatherSystemNotificationsMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateWeatherSystemNotificationsControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnWeatherSystemNotificationsCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowWeatherSystemNotificationsWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = WeatherSystemNotificationsWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kWeatherSystemNotificationsClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_weatherSystemNotificationsWnd || !IsWindow(m_weatherSystemNotificationsWnd)) {
+            m_weatherSystemNotificationsWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kWeatherSystemNotificationsClassName,
+                L"Weather System Notifications",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                470,
+                230,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+        SyncWeatherSystemNotificationControls();
+        ShowWindow(m_weatherSystemNotificationsWnd, SW_SHOW);
+        SetForegroundWindow(m_weatherSystemNotificationsWnd);
+    }
+
+    void CreateWeatherSystemNotificationsControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Weather System Notifications", 18, 18, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Notify when an active weather system is at or above this sustained wind speed.", 18, 58, nullptr, 400);
+        CreateAutoLabel(parent, 0, L"Minimum wind (kts)", 18, 104);
+        m_weatherSystemNotificationWindEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 130, 120, 26, parent, ControlId(IDC_WEATHER_SYSTEM_NOTIFICATIONS_WIND_EDIT), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 130, 102, 32, parent, ControlId(IDC_WEATHER_SYSTEM_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
+        for (HWND h : { m_weatherSystemNotificationWindEdit, closeBtn }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+        SendMessageW(m_weatherSystemNotificationWindEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"34"));
+        SyncWeatherSystemNotificationControls();
+        AutoFitWindowToChildren(parent);
+    }
+
+    void SyncWeatherSystemNotificationControls()
+    {
+        m_syncingControls = true;
+        if (m_weatherSystemNotificationWindEdit)
+            SetWindowTextSafe(m_weatherSystemNotificationWindEdit, m_weatherSystemNotificationWindText);
+        m_syncingControls = false;
+    }
+
+    void OnWeatherSystemNotificationsCommand(int id, int code)
+    {
+        if (m_syncingControls)
+            return;
+        if (id == IDC_WEATHER_SYSTEM_NOTIFICATIONS_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_weatherSystemNotificationsWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_WEATHER_SYSTEM_NOTIFICATIONS_WIND_EDIT && (code == EN_CHANGE || code == EN_KILLFOCUS)) {
+            std::wstring text = Trim(GetWindowTextString(m_weatherSystemNotificationWindEdit));
+            double parsed = 0.0;
+            if (TryParseDoubleText(text, parsed) && parsed >= 0.0) {
+                m_weatherSystemNotificationWindText = text;
+                m_weatherSystemNotificationWindKnots = parsed;
+                SaveSettings();
+            }
+            else if (code == EN_KILLFOCUS) {
+                SetWindowTextSafe(m_weatherSystemNotificationWindEdit, m_weatherSystemNotificationWindText);
+                SetStatusText(L"Weather system wind should be a number such as 34.");
+            }
+        }
+    }
+
     void SortAlertsForCurrentOrder()
     {
         std::wstring order = ToLower(Trim(m_alertOrder));
@@ -6046,7 +6928,7 @@ private:
 
         if (!m_settingsWnd || !IsWindow(m_settingsWnd)) {
             m_settingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClassName, L"Settings", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                CW_USEDEFAULT, CW_USEDEFAULT, 470, 465, m_hwnd, nullptr, m_hInst, this);
+                CW_USEDEFAULT, CW_USEDEFAULT, 470, 535, m_hwnd, nullptr, m_hInst, this);
         }
         SyncSettingsControls();
         ShowWindow(m_settingsWnd, SW_SHOW);
@@ -6064,14 +6946,17 @@ private:
         m_settingsRefreshOnRadio = CreateWindowExW(0, L"BUTTON", L"Refresh every", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 176, 120, 24, parent, ControlId(IDC_SETTINGS_REFRESH_ON_RADIO), m_hInst, nullptr);
         CreateAutoLabel(parent, IDC_SETTINGS_REFRESH_INTERVAL_LABEL, L"Interval", 18, 214);
         m_settingsRefreshIntervalEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 178, 208, 120, 26, parent, ControlId(IDC_SETTINGS_REFRESH_INTERVAL_EDIT), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 252);
-        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 278, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 316);
-        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 342, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
-        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 388, 260, 32, parent, ControlId(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 388, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_WORLD_LABEL, L"Map display", 18, 252);
+        m_settingsWorldOffRadio = CreateWindowExW(0, L"BUTTON", L"UK depiction", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 278, 130, 24, parent, ControlId(IDC_SETTINGS_WORLD_OFF_RADIO), m_hInst, nullptr);
+        m_settingsWorldOnRadio = CreateWindowExW(0, L"BUTTON", L"Display rest of world", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 278, 190, 24, parent, ControlId(IDC_SETTINGS_WORLD_ON_RADIO), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 316);
+        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 342, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 380);
+        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 406, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
+        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 452, 260, 32, parent, ControlId(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 452, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsFilterCombo, m_settingsOrderCombo, boundary, close }) {
+        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsWorldOffRadio, m_settingsWorldOnRadio, m_settingsFilterCombo, m_settingsOrderCombo, boundary, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -6115,6 +7000,10 @@ private:
             SetWindowTextSafe(m_settingsRefreshIntervalEdit, m_refreshIntervalText);
             EnableWindow(m_settingsRefreshIntervalEdit, m_periodicRefreshEnabled);
         }
+        if (m_settingsWorldOffRadio)
+            SendMessageW(m_settingsWorldOffRadio, BM_SETCHECK, m_displayWorldMap ? BST_UNCHECKED : BST_CHECKED, 0);
+        if (m_settingsWorldOnRadio)
+            SendMessageW(m_settingsWorldOnRadio, BM_SETCHECK, m_displayWorldMap ? BST_CHECKED : BST_UNCHECKED, 0);
         if (m_settingsFilterCombo)
             SendMessageW(m_settingsFilterCombo, CB_SETCURSEL, m_alertFilterUnplannedOnly ? 0 : 1, 0);
         if (m_settingsOrderCombo) {
@@ -6173,6 +7062,18 @@ private:
                 SetStatusText(L"Refresh interval must be at least 1 second, e.g. 5s, 3s, or 10s.");
             }
         }
+        else if (id == IDC_SETTINGS_WORLD_OFF_RADIO && code == BN_CLICKED) {
+            m_displayWorldMap = false;
+            m_map.SetDisplayWorldMap(m_displayWorldMap);
+            SyncSettingsControls();
+            SaveSettings();
+        }
+        else if (id == IDC_SETTINGS_WORLD_ON_RADIO && code == BN_CLICKED) {
+            m_displayWorldMap = true;
+            m_map.SetDisplayWorldMap(m_displayWorldMap);
+            SyncSettingsControls();
+            SaveSettings();
+        }
         else if (id == IDC_SETTINGS_ALERT_FILTER && code == CBN_SELCHANGE) {
             m_alertFilterUnplannedOnly = SendMessageW(m_settingsFilterCombo, CB_GETCURSEL, 0, 0) == 0;
             SaveSettings();
@@ -6224,6 +7125,8 @@ private:
     HWND m_settingsRefreshOffRadio = nullptr;
     HWND m_settingsRefreshOnRadio = nullptr;
     HWND m_settingsRefreshIntervalEdit = nullptr;
+    HWND m_settingsWorldOffRadio = nullptr;
+    HWND m_settingsWorldOnRadio = nullptr;
     HWND m_incidentSevereCheck = nullptr;
     HWND m_incidentModerateCheck = nullptr;
     HWND m_incidentMinorCheck = nullptr;
@@ -6246,6 +7149,10 @@ private:
     HWND m_earthquakeListClearRegionBtn = nullptr;
     HWND m_earthquakeListView = nullptr;
     HWND m_earthquakeNotificationMagnitudeEdit = nullptr;
+    HWND m_weatherSystemsListWnd = nullptr;
+    HWND m_weatherSystemNotificationsWnd = nullptr;
+    HWND m_weatherSystemsListView = nullptr;
+    HWND m_weatherSystemNotificationWindEdit = nullptr;
     HWND m_templateWizardDesc = nullptr;
     HWND m_templateWizardList = nullptr;
     HWND m_templateWizardVariablesEdit = nullptr;
@@ -6257,9 +7164,6 @@ private:
     HWND m_templateEditorList = nullptr;
     HWND m_templateEditorNameEdit = nullptr;
     HWND m_templateEditorBodyEdit = nullptr;
-    HWND m_chatHistory = nullptr;
-    HWND m_chatEdit = nullptr;
-    HWND m_chatSendBtn = nullptr;
 
     MapView m_map;
     ClientSession m_session;
@@ -6273,13 +7177,17 @@ private:
     std::vector<GeoPolygon> m_incidentNotificationRegions;
     std::vector<ReportTemplate> m_reportTemplates;
     std::vector<ReportTemplate> m_earthquakeReportTemplates;
+    std::vector<ReportTemplate> m_weatherSystemReportTemplates;
     std::vector<std::pair<std::wstring, std::wstring>> m_templateWizardVariables;
     std::vector<EarthquakeEvent> m_allEarthquakes;
     std::vector<EarthquakeEvent> m_filteredEarthquakes;
+    std::vector<WeatherSystemEvent> m_allWeatherSystems;
+    std::vector<WeatherSystemEvent> m_filteredWeatherSystems;
     std::vector<GeoPoint> m_earthquakeFilterRegion;
     std::wstring m_selectedId;
     std::wstring m_templateWizardAlertId;
     std::wstring m_templateWizardEarthquakeId;
+    std::wstring m_templateWizardWeatherSystemId;
     size_t m_templateWizardStep = 0;
     size_t m_templateWizardTemplateIndex = 0;
     TemplateContext m_templateWizardContext = TemplateContext::Roads;
@@ -6306,10 +7214,15 @@ private:
     std::wstring m_incidentNotifyLocationExclusions = L"entry, exit";
     bool m_showEarthquakes = false;
     bool m_showEarthquakeOverlayLabels = false;
+    bool m_showWeatherSystems = false;
+    bool m_showWeatherSystemOverlayLabels = false;
+    bool m_displayWorldMap = false;
     std::wstring m_earthquakeListMagnitudeText;
     std::wstring m_earthquakeListTimeText;
     std::wstring m_earthquakeNotificationMagnitudeText = L"4.0";
     double m_earthquakeNotificationMagnitude = 4.0;
+    std::wstring m_weatherSystemNotificationWindText = L"34";
+    double m_weatherSystemNotificationWindKnots = 34.0;
     std::wstring m_alertOrder = L"Road";
     std::wstring m_alertsEndpoint = L"https://www.trafficengland.com/traffic-alerts";
     std::wstring m_serverBaseUrl = L"http://localhost:8080";
@@ -6322,10 +7235,13 @@ private:
     bool m_notificationIconAdded = false;
     bool m_haveIncidentNotificationSnapshot = false;
     bool m_haveEarthquakeNotificationSnapshot = false;
+    bool m_haveWeatherSystemNotificationSnapshot = false;
     bool m_reportTemplatesConfigured = false;
     bool m_earthquakeReportTemplatesConfigured = false;
+    bool m_weatherSystemReportTemplatesConfigured = false;
     std::unordered_map<std::wstring, IncidentNotificationState> m_notifiedIncidentStates;
     std::unordered_map<std::wstring, EarthquakeNotificationState> m_notifiedEarthquakeStates;
+    std::unordered_map<std::wstring, WeatherSystemNotificationState> m_notifiedWeatherSystemStates;
     PolygonCaptureTarget m_polygonCaptureTarget = PolygonCaptureTarget::None;
     size_t m_activeIncidentRegionIndex = static_cast<size_t>(-1);
     std::unordered_set<std::wstring> m_deletedNoteIds;

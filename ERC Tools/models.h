@@ -58,6 +58,26 @@ struct EarthquakeEvent
     bool hasLocation = false;
 };
 
+struct WeatherSystemEvent
+{
+    std::wstring id;
+    std::wstring name;
+    std::wstring basin;
+    std::wstring category;
+    std::wstring windText;
+    std::wstring forecastCategory;
+    std::wstring forecastWindText;
+    std::wstring updatedText;
+    double windKnots = 0.0;
+    double forecastWindKnots = 0.0;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    double forecastLatitude = 0.0;
+    double forecastLongitude = 0.0;
+    bool hasLocation = false;
+    bool hasForecastLocation = false;
+};
+
 struct AppNotification
 {
     std::wstring title;

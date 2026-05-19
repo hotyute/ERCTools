@@ -48,6 +48,7 @@
 #include <filesystem>
 #include <cstdio>
 #include <iostream>
+#include <sstream>
 
 using Microsoft::WRL::ComPtr;
 using json = nlohmann::json;
