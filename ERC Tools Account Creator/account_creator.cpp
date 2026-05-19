@@ -50,6 +50,7 @@ struct AccountInput
     bool updateExisting = false;
     bool listOdbcDrivers = false;
     bool testConnection = false;
+    bool printSql = false;
 };
 
 static std::wstring Utf8ToWide(const std::string& s)
@@ -77,6 +78,21 @@ static std::wstring ToLower(std::wstring s)
 {
     std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
     return s;
+}
+
+static std::wstring SqlString(const std::wstring& value)
+{
+    std::wstring escaped;
+    escaped.reserve(value.size() + 2);
+    escaped.push_back(L'\'');
+    for (wchar_t ch : value) {
+        if (ch == L'\'')
+            escaped += L"''";
+        else
+            escaped.push_back(ch);
+    }
+    escaped.push_back(L'\'');
+    return escaped;
 }
 
 static std::string HexFromBytes(const std::vector<unsigned char>& bytes)
@@ -459,6 +475,7 @@ static void ShowUsage()
         << L"  --config <path>          Server config JSON containing databaseConnectionString.\n"
         << L"  --list-odbc-drivers     List installed Windows ODBC driver names.\n"
         << L"  --test-connection       Test the configured MySQL ODBC connection and exit.\n"
+        << L"  --print-sql             Print a MySQL INSERT statement instead of connecting through ODBC.\n"
         << L"  --username <value>       Unique login username.\n"
         << L"  --display-name <value>   Name shown in ERC Tools.\n"
         << L"  --password <value>       Initial password. If omitted, you will be prompted.\n"
@@ -498,6 +515,9 @@ static bool ReadArgs(int argc, wchar_t** argv, std::filesystem::path& configPath
         }
         else if (arg == L"--test-connection") {
             input.testConnection = true;
+        }
+        else if (arg == L"--print-sql") {
+            input.printSql = true;
         }
         else if (arg == L"--username") {
             if (!next(input.username))
@@ -633,6 +653,49 @@ static bool CreateOrUpdateAccount(const CreatorConfig& config, const AccountInpu
         errorOut);
 }
 
+static bool PrintAccountSql(const AccountInput& input, std::wstring& errorOut)
+{
+    std::vector<unsigned char> salt(16);
+    std::string passwordHash;
+    if (!RandomBytes(salt) || !DerivePasswordHash(input.password, salt, kPasswordIterations, passwordHash)) {
+        errorOut = L"Could not create password hash.";
+        return false;
+    }
+
+    const std::wstring active = input.active ? L"1" : L"0";
+    const std::wstring saltHex = Utf8ToWide(HexFromBytes(salt));
+    const std::wstring hashHex = Utf8ToWide(passwordHash);
+    const std::wstring iterations = std::to_wstring(kPasswordIterations);
+
+    std::wcout
+        << L"USE erc_tools;\n\n"
+        << L"INSERT INTO users (username, display_name, position, pod, password_salt, password_hash, password_iterations, active)\n"
+        << L"VALUES ("
+        << SqlString(input.username) << L", "
+        << SqlString(input.displayName) << L", "
+        << SqlString(input.position) << L", "
+        << SqlString(input.pod) << L", "
+        << SqlString(saltHex) << L", "
+        << SqlString(hashHex) << L", "
+        << iterations << L", "
+        << active << L")";
+
+    if (input.updateExisting) {
+        std::wcout
+            << L"\nON DUPLICATE KEY UPDATE\n"
+            << L"    display_name = VALUES(display_name),\n"
+            << L"    position = VALUES(position),\n"
+            << L"    pod = VALUES(pod),\n"
+            << L"    password_salt = VALUES(password_salt),\n"
+            << L"    password_hash = VALUES(password_hash),\n"
+            << L"    password_iterations = VALUES(password_iterations),\n"
+            << L"    active = VALUES(active)";
+    }
+
+    std::wcout << L";\n";
+    return true;
+}
+
 static bool TestConnection(const CreatorConfig& config, std::wstring& errorOut)
 {
     OdbcConnection db(config.databaseConnectionString);
@@ -675,7 +738,7 @@ int wmain(int argc, wchar_t** argv)
 
     CreatorConfig config;
     std::wstring error;
-    if (!LoadConfig(configPath, config, error)) {
+    if ((!input.printSql || input.testConnection) && !LoadConfig(configPath, config, error)) {
         std::wcerr << error << L"\n";
         return 1;
     }
@@ -692,6 +755,14 @@ int wmain(int argc, wchar_t** argv)
 
     if (!CompleteInteractiveInput(input))
         return 1;
+
+    if (input.printSql) {
+        if (!PrintAccountSql(input, error)) {
+            std::wcerr << L"SQL generation failed: " << error << L"\n";
+            return 1;
+        }
+        return 0;
+    }
 
     if (!CreateOrUpdateAccount(config, input, error)) {
         std::wcerr << L"Account creation failed: " << error << L"\n";

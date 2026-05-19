@@ -31,6 +31,16 @@ Or provide the fields directly:
 
 Omit `--password` to enter it through the hidden console prompt instead of putting it in command history. Use a dedicated MySQL user for ERC Tools rather than the MySQL root account once the connection is working.
 
+When running under Wine on Linux, ODBC can require extra Wine-side driver setup. To create the first account through phpMyAdmin or the MySQL CLI without ODBC, print a ready-to-run SQL statement:
+
+```powershell
+.\ERC Tools Account Creator.exe --print-sql --username sam --display-name "Sam" --position Administrator --pod "Pod 1"
+```
+
+Run the printed SQL against the `erc_tools` database.
+
+This only bypasses ODBC for account creation. `ERC Tools Server.exe` still needs a working ODBC driver inside the Wine prefix for login, chat, notes, and update authentication.
+
 7. Copy `updates\manifest.example.json` to `updates\manifest.json` when you are ready to publish updates.
 
 ## Accounts and 401 Responses

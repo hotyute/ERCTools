@@ -497,6 +497,10 @@ public:
             L"SELECT id, username, display_name, position, pod, password_salt, password_hash, password_iterations, active FROM users WHERE username = ? LIMIT 1",
             { username },
             errorOut);
+        if (!errorOut.empty()) {
+            errorOut = L"Database login lookup failed: " + errorOut;
+            return false;
+        }
         if (rows.empty()) {
             errorOut = L"Invalid username or password.";
             return false;
@@ -578,6 +582,10 @@ public:
             L"WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP AND u.active = 1 LIMIT 1",
             { Utf8ToWide(tokenHash) },
             errorOut);
+        if (!errorOut.empty()) {
+            errorOut = L"Database session lookup failed: " + errorOut;
+            return false;
+        }
         if (rows.empty()) {
             errorOut = L"Session is invalid or expired.";
             return false;
@@ -718,6 +726,11 @@ static HttpResponse ErrorResponse(int status, const std::wstring& message)
     return JsonResponse(status, { { "ok", false }, { "error", WideToUtf8(message) } });
 }
 
+static bool IsDatabaseErrorMessage(const std::wstring& message)
+{
+    return message.rfind(L"Database ", 0) == 0;
+}
+
 static bool IsSafeRelativePath(const std::filesystem::path& path)
 {
     if (path.empty() || path.is_absolute())
@@ -777,7 +790,7 @@ public:
             UserRecord user;
             std::wstring authError;
             if (!m_database.Authenticate(BearerToken(req), user, authError))
-                return ErrorResponse(401, authError);
+                return ErrorResponse(IsDatabaseErrorMessage(authError) ? 500 : 401, authError);
 
             if (req.method == "GET" && req.path == "/api/chat")
                 return HandleGetChat();
@@ -830,7 +843,7 @@ private:
         UserRecord user;
         std::wstring error;
         if (!m_database.ValidateLogin(username, password, position, pod, user, error))
-            return ErrorResponse(401, error);
+            return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 401, error);
 
         std::wstring token;
         if (!m_database.CreateSession(user, token, error))
