@@ -4181,10 +4181,45 @@ private:
         return refs;
     }
 
+    static bool TrySplitLeadingBracketedRoadSignItem(const std::wstring& item, std::wstring& bracketedRoadOut, std::wstring& remainderOut)
+    {
+        static const std::wregex bracketedRoadRe(LR"(^\s*(\([AMB]\d{1,4}[A-Z]?(?:\([A-Z]+\))?\))\s*,?\s*(.*?)\s*$)", std::regex_constants::icase);
+        std::wsmatch m;
+        if (!std::regex_match(item, m, bracketedRoadRe) || m.size() < 3)
+            return false;
+
+        bracketedRoadOut = CompactTemplateWhitespace(m[1].str());
+        remainderOut = CompactTemplateWhitespace(m[2].str());
+        return !bracketedRoadOut.empty();
+    }
+
     static bool IsBracketedRoadSignItem(const std::wstring& item)
     {
-        static const std::wregex bracketedRoadRe(LR"(^\s*\([AMB]\d{1,4}[A-Z]?(?:\([A-Z]+\))?\)\s*$)", std::regex_constants::icase);
-        return std::regex_match(item, bracketedRoadRe);
+        std::wstring bracketedRoad;
+        std::wstring remainder;
+        return TrySplitLeadingBracketedRoadSignItem(item, bracketedRoad, remainder) && remainder.empty();
+    }
+
+    static std::vector<std::wstring> MergeBracketedRoadSignItems(const std::vector<std::wstring>& items)
+    {
+        std::vector<std::wstring> merged;
+        for (const std::wstring& item : items) {
+            std::wstring bracketedRoad;
+            std::wstring remainder;
+            if (TrySplitLeadingBracketedRoadSignItem(item, bracketedRoad, remainder)) {
+                if (!merged.empty())
+                    merged.back() = CompactTemplateWhitespace(merged.back() + L" " + bracketedRoad);
+                else
+                    PushUniqueText(merged, bracketedRoad);
+
+                if (!remainder.empty())
+                    PushUniqueText(merged, remainder);
+                continue;
+            }
+
+            PushUniqueText(merged, item);
+        }
+        return merged;
     }
 
     static std::vector<std::wstring> ExtractRoadsOrgSignPanelItems(const std::wstring& fragment, const std::wstring& currentRoad)
@@ -4234,7 +4269,7 @@ private:
                     }),
                 items.end());
         }
-        return items;
+        return MergeBracketedRoadSignItems(items);
     }
 
     static bool TryStandaloneSignRoad(const std::wstring& item, std::wstring& roadOut)
@@ -4260,6 +4295,7 @@ private:
 
     static std::wstring FormatRoadsOrgSignPanelItems(const std::vector<std::wstring>& items)
     {
+        std::vector<std::wstring> normalizedItems = MergeBracketedRoadSignItems(items);
         std::vector<std::wstring> groups;
         std::vector<std::wstring> pendingDestinations;
         std::wstring activeRoad;
@@ -4271,7 +4307,7 @@ private:
             pendingDestinations.clear();
             };
 
-        for (const std::wstring& item : items) {
+        for (const std::wstring& item : normalizedItems) {
             std::wstring road;
             if (TryStandaloneSignRoad(item, road)) {
                 if (pendingDestinations.empty()) {
@@ -4596,6 +4632,14 @@ private:
         SetTemplateVariable(variables, L"$ROAD", road);
         SetTemplateVariable(variables, L"$DIRECTION", direction);
         SetTemplateVariable(variables, L"%LOCATION", location);
+        if (alert.hasLocation) {
+            wchar_t latitude[48]{};
+            wchar_t longitude[48]{};
+            swprintf_s(latitude, L"%.5f", alert.latitude);
+            swprintf_s(longitude, L"%.5f", alert.longitude);
+            SetTemplateVariable(variables, L"%LATITUDE", latitude);
+            SetTemplateVariable(variables, L"%LONGITUDE", longitude);
+        }
 
         std::vector<std::wstring> junctionNames;
         std::vector<std::wstring> junctionsWithData;
@@ -4942,7 +4986,7 @@ private:
         m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 188, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
         m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 298, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
         m_templateWizardCopyBtn = CreateWindowExW(0, L"BUTTON", L"Copy", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 408, 344, 72, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY), m_hInst, nullptr);
-        m_templateWizardCopyLocationBtn = CreateWindowExW(0, L"BUTTON", L"Copy Location", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 488, 344, 118, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_LOCATION), m_hInst, nullptr);
+        m_templateWizardCopyLocationBtn = CreateWindowExW(0, L"BUTTON", L"Copy Coords", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 488, 344, 118, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_LOCATION), m_hInst, nullptr);
         HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 614, 344, 68, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_CLOSE), m_hInst, nullptr);
 
         for (HWND h : { m_templateWizardDesc, m_templateWizardList, m_templateWizardVariablesEdit, m_templateWizardPreviewEdit, m_templateWizardPrevBtn, m_templateWizardNextBtn, m_templateWizardCopyBtn, m_templateWizardCopyLocationBtn, close }) {
@@ -5046,11 +5090,19 @@ private:
             return;
         }
         if (id == IDC_TEMPLATES_WIZARD_COPY_LOCATION && code == BN_CLICKED) {
-            std::wstring location = TemplateVariableValue(m_templateWizardContext == TemplateContext::Earthquakes ? L"$PLACE" : L"%LOCATION");
-            if (CopyTextToClipboard(location, m_templatesWizardWnd))
-                SetStatusText(m_templateWizardContext == TemplateContext::Earthquakes ? L"Earthquake place copied to clipboard." : L"Incident location copied to clipboard.");
+            std::wstring latitude = TemplateVariableValue(L"%LATITUDE");
+            std::wstring longitude = TemplateVariableValue(L"%LONGITUDE");
+            std::wstring coords;
+            if (!latitude.empty() && !longitude.empty())
+                coords = latitude + L", " + longitude;
+
+            if (coords.empty()) {
+                SetStatusText(L"No coordinates are available for this report.");
+            }
+            else if (CopyTextToClipboard(coords, m_templatesWizardWnd))
+                SetStatusText(L"Coordinates copied to clipboard.");
             else
-                SetStatusText(L"Could not copy location to clipboard.");
+                SetStatusText(L"Could not copy coordinates to clipboard.");
             return;
         }
     }

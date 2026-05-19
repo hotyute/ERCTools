@@ -679,8 +679,9 @@ private:
 
         case WM_MOUSELEAVE:
             m_trackingMouseLeave = false;
-            if (!m_hoveredAlertId.empty()) {
+            if (!m_hoveredAlertId.empty() || !m_hoveredEarthquakeId.empty()) {
                 m_hoveredAlertId.clear();
+                m_hoveredEarthquakeId.clear();
                 Invalidate();
             }
             return 0;
@@ -915,6 +916,34 @@ private:
             if (d < bestDist) {
                 bestDist = d;
                 bestId = m_alerts[i].id;
+            }
+        }
+
+        return bestId;
+    }
+
+    std::wstring HitTestEarthquake(int x, int y) const
+    {
+        std::wstring bestId;
+        double bestDist = 26.0;
+        const ViewState view = BuildViewState(bestDist + 8.0);
+
+        if (m_zoom <= 4 && m_earthquakes.size() > 800)
+            return bestId;
+
+        for (const EarthquakeEvent& event : m_earthquakes) {
+            if (event.id.empty() || !event.hasLocation || !IsGeoPointInView(view, event.latitude, event.longitude))
+                continue;
+
+            D2D1_POINT_2F pt = GeoToScreen(view, event.latitude, event.longitude);
+            const double radius = ClampValue(4.0 + event.magnitude * 2.2, 5.0, 22.0) + 6.0;
+            const double dx = pt.x - x;
+            const double dy = pt.y - y;
+            const double d = std::sqrt(dx * dx + dy * dy);
+
+            if (d <= radius && d < bestDist) {
+                bestDist = d;
+                bestId = event.id;
             }
         }
 
@@ -1381,8 +1410,9 @@ private:
         }
 
         if (m_notificationUiMouseDown || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
-            if (!m_hoveredAlertId.empty()) {
+            if (!m_hoveredAlertId.empty() || !m_hoveredEarthquakeId.empty()) {
                 m_hoveredAlertId.clear();
+                m_hoveredEarthquakeId.clear();
                 Invalidate();
             }
             return;
@@ -1398,8 +1428,10 @@ private:
         }
 
         std::wstring hoveredId = HitTestAlert(x, y);
-        if (hoveredId != m_hoveredAlertId) {
+        std::wstring hoveredEarthquakeId = hoveredId.empty() ? HitTestEarthquake(x, y) : L"";
+        if (hoveredId != m_hoveredAlertId || hoveredEarthquakeId != m_hoveredEarthquakeId) {
             m_hoveredAlertId = std::move(hoveredId);
+            m_hoveredEarthquakeId = std::move(hoveredEarthquakeId);
             Invalidate();
         }
 
@@ -1923,9 +1955,9 @@ private:
         return text;
     }
 
-    void DrawEarthquakeOverlayLabel(const ViewState& view, const EarthquakeEvent& event, D2D1_POINT_2F anchor, float radius)
+    void DrawEarthquakeOverlayLabel(const ViewState& view, const EarthquakeEvent& event, D2D1_POINT_2F anchor, float radius, bool forceVisible = false)
     {
-        if (!m_showEarthquakeOverlayLabels || !m_noteTextFormat)
+        if ((!m_showEarthquakeOverlayLabels && !forceVisible) || !m_noteTextFormat)
             return;
 
         std::wstring text = EarthquakeOverlayText(event);
@@ -1997,7 +2029,7 @@ private:
             float radius = static_cast<float>(ClampValue(4.0 + event.magnitude * 2.2, 5.0, 22.0));
             m_rt->FillEllipse(D2D1::Ellipse(p, radius, radius), m_earthquakeBrush.Get());
             m_rt->DrawEllipse(D2D1::Ellipse(p, radius, radius), m_borderBrush.Get(), 1.25f);
-            DrawEarthquakeOverlayLabel(view, event, p, radius);
+            DrawEarthquakeOverlayLabel(view, event, p, radius, event.id == m_hoveredEarthquakeId);
         }
     }
 
@@ -3376,6 +3408,7 @@ private:
     bool m_trackingMouseLeave = false;
     int m_interactiveTileRequestsThisFrame = 0;
     std::wstring m_hoveredAlertId;
+    std::wstring m_hoveredEarthquakeId;
     NoteEditorMode m_noteEditorMode = NoteEditorMode::None;
     size_t m_noteEditorIndex = static_cast<size_t>(-1);
     std::wstring m_noteEditorText;
