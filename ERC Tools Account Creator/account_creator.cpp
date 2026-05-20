@@ -36,7 +36,7 @@ constexpr int kPasswordIterations = 150000;
 struct CreatorConfig
 {
     std::wstring databaseConnectionString =
-        L"DRIVER={MySQL ODBC 8.0 Unicode Driver};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=erc_tools;PWD=change-me;OPTION=3;";
+        L"DRIVER={Maria Unicode};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=erc_tools;PWD=change-me;OPTION=3;";
 };
 
 struct AccountInput

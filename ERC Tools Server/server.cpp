@@ -48,7 +48,7 @@ struct ServerConfig
     int workerThreads = 0;
     int sessionMinutes = 12 * 60;
     std::wstring databaseConnectionString =
-        L"DRIVER={MySQL ODBC 8.0 Unicode Driver};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=erc_tools;PWD=change-me;OPTION=3;";
+        L"DRIVER={Maria Unicode};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=root;PWD=!Derickandjr1010;OPTION=3;";
     std::filesystem::path updateRoot = L"updates";
     std::filesystem::path manifestPath = L"updates\\manifest.json";
     std::filesystem::path globalSettingsPath = L"global_settings.json";
@@ -842,8 +842,10 @@ private:
 
         UserRecord user;
         std::wstring error;
-        if (!m_database.ValidateLogin(username, password, position, pod, user, error))
+        if (!m_database.ValidateLogin(username, password, position, pod, user, error)) {
+            printf("Error: %ls\n", error.c_str());
             return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 401, error);
+        }
 
         std::wstring token;
         if (!m_database.CreateSession(user, token, error))

@@ -2,7 +2,7 @@
   "port": 8081,
   "workerThreads": 8,
   "sessionMinutes": 720,
-  "databaseConnectionString": "DRIVER={MySQL ODBC 8.0 Unicode Driver};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=erc_tools;PWD=change-me;OPTION=3;",
+  "databaseConnectionString": "DRIVER={Maria Unicode};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=root;PWD=!Derickandjr1010;OPTION=3;",
   "updateRoot": "updates",
   "manifestPath": "updates/manifest.json",
   "globalSettingsPath": "global_settings.json"
