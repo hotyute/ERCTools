@@ -8,6 +8,7 @@
 bool HttpGetText(const std::wstring& inputUrl, std::string& bodyOut, std::wstring& errorOut);
 bool HttpGetBinary(const std::wstring& inputUrl, std::vector<BYTE>& bodyOut, std::wstring& errorOut);
 bool HttpPostJsonText(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, std::wstring& errorOut);
+bool HttpPostJsonTextStatus(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, DWORD& statusOut, std::wstring& errorOut);
 bool HttpPutJsonText(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, std::wstring& errorOut);
 bool HttpPatchJsonText(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, std::wstring& errorOut);
 bool HttpDeleteText(const std::wstring& inputUrl, std::string& bodyOut, std::wstring& errorOut);

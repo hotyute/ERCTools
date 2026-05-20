@@ -247,6 +247,65 @@ static bool ParseLoginResponse(const std::string& response, ClientSession& sessi
     }
 }
 
+static std::wstring LoginErrorMessageForCode(std::wstring code, DWORD status)
+{
+    code = ToLower(Trim(code));
+    if (code == L"missing_fields")
+        return L"All fields are required.";
+    if (code == L"invalid_json")
+        return L"The login request was not understood by the server.";
+    if (code == L"invalid_credentials")
+        return L"Invalid username or password.";
+    if (code == L"account_disabled")
+        return L"This account is disabled.";
+    if (code == L"position_not_allowed")
+        return L"This account cannot sign in as the selected position.";
+    if (code == L"pod_mismatch")
+        return L"Selected pod does not match this account.";
+    if (code == L"database_error")
+        return L"The server could not reach the account database.";
+    if (code == L"session_create_failed")
+        return L"Your credentials were accepted, but the server could not create a session.";
+    if (code == L"missing_token")
+        return L"The login response did not include a session token.";
+    if (code == L"session_invalid")
+        return L"Your login session is invalid or expired.";
+    if (code == L"forbidden")
+        return L"This account is not allowed to complete that action.";
+
+    if (status == 401)
+        return L"Login details were not accepted.";
+    if (status == 403)
+        return L"This account is not allowed to complete that action.";
+    if (status >= 500)
+        return L"The server could not complete login.";
+    return L"";
+}
+
+static std::wstring LoginErrorMessageFromResponse(const std::string& response, DWORD status, const std::wstring& fallback)
+{
+    try {
+        json root = json::parse(response.empty() ? "{}" : response);
+        if (root.is_object()) {
+            std::wstring code = PickString(root, { "code", "errorCode", "error_code" });
+            std::wstring mapped = LoginErrorMessageForCode(code, status);
+            if (!mapped.empty())
+                return mapped;
+
+            std::wstring message = PickString(root, { "error", "message" });
+            if (!message.empty() && status < 500)
+                return message;
+        }
+    }
+    catch (...) {
+    }
+
+    std::wstring mapped = LoginErrorMessageForCode(L"", status);
+    if (!mapped.empty())
+        return mapped;
+    return fallback.empty() ? L"Login failed." : fallback;
+}
+
 static void AttemptLogin(LoginContext* ctx)
 {
     if (!ctx || !ctx->session)
@@ -279,8 +338,11 @@ static void AttemptLogin(LoginContext* ctx)
     std::string response;
     std::wstring error;
     ClientSession session;
-    bool ok = HttpPostJsonText(AppendApiPath(ctx->serverBaseUrl, L"/api/auth/login"), body, response, error) &&
-        ParseLoginResponse(response, session, error);
+    DWORD httpStatus = 0;
+    bool httpOk = HttpPostJsonTextStatus(AppendApiPath(ctx->serverBaseUrl, L"/api/auth/login"), body, response, httpStatus, error);
+    bool ok = httpOk && ParseLoginResponse(response, session, error);
+    if (!httpOk || !ok)
+        error = LoginErrorMessageFromResponse(response, httpStatus, error);
 
     EnableWindow(ctx->hwnd, TRUE);
     SetForegroundWindow(ctx->hwnd);
@@ -343,16 +405,16 @@ static void CreateLoginControls(LoginContext* ctx)
     CreateLabel(ctx->hwnd, (L"Server: " + ctx->serverBaseUrl).c_str(), 24, 58, 420, 22, font);
 
     CreateLabel(ctx->hwnd, L"Display Name:", 24, 96, 130, 22, font);
-    ctx->displayNameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 154, 92, 270, 26, ctx->hwnd, ControlMenuId(IDC_LOGIN_DISPLAY_NAME), ctx->hInst, nullptr);
+    ctx->displayNameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | ES_AUTOHSCROLL, 154, 92, 270, 26, ctx->hwnd, ControlMenuId(IDC_LOGIN_DISPLAY_NAME), ctx->hInst, nullptr);
 
     CreateLabel(ctx->hwnd, L"Username:", 24, 134, 130, 22, font);
-    ctx->usernameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 154, 130, 270, 26, ctx->hwnd, ControlMenuId(IDC_LOGIN_USERNAME), ctx->hInst, nullptr);
+    ctx->usernameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 154, 130, 270, 26, ctx->hwnd, ControlMenuId(IDC_LOGIN_USERNAME), ctx->hInst, nullptr);
 
     CreateLabel(ctx->hwnd, L"Password:", 24, 172, 130, 22, font);
-    ctx->passwordEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_PASSWORD | ES_AUTOHSCROLL, 154, 168, 270, 26, ctx->hwnd, ControlMenuId(IDC_LOGIN_PASSWORD), ctx->hInst, nullptr);
+    ctx->passwordEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL, 154, 168, 270, 26, ctx->hwnd, ControlMenuId(IDC_LOGIN_PASSWORD), ctx->hInst, nullptr);
 
     CreateLabel(ctx->hwnd, L"Position:", 24, 210, 130, 22, font);
-    ctx->positionCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 154, 206, 270, 160, ctx->hwnd, ControlMenuId(IDC_LOGIN_POSITION), ctx->hInst, nullptr);
+    ctx->positionCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 154, 206, 270, 160, ctx->hwnd, ControlMenuId(IDC_LOGIN_POSITION), ctx->hInst, nullptr);
     AddComboItem(ctx->positionCombo, L"Administrator");
     AddComboItem(ctx->positionCombo, L"Supervisor");
     AddComboItem(ctx->positionCombo, L"Manager");
@@ -360,14 +422,14 @@ static void CreateLoginControls(LoginContext* ctx)
     SendMessageW(ctx->positionCombo, CB_SETCURSEL, 3, 0);
 
     CreateLabel(ctx->hwnd, L"Pod:", 24, 248, 130, 22, font);
-    ctx->podCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 154, 244, 270, 220, ctx->hwnd, ControlMenuId(IDC_LOGIN_POD), ctx->hInst, nullptr);
+    ctx->podCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 154, 244, 270, 220, ctx->hwnd, ControlMenuId(IDC_LOGIN_POD), ctx->hInst, nullptr);
     for (int i = 1; i <= 9; ++i) {
         std::wstring pod = L"Pod " + std::to_wstring(i);
         AddComboItem(ctx->podCombo, pod.c_str());
     }
     SendMessageW(ctx->podCombo, CB_SETCURSEL, 0, 0);
 
-    ctx->rememberCheck = CreateWindowExW(0, L"BUTTON", L"Remember username and password", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 154, 284, 270, 24, ctx->hwnd, ControlMenuId(IDC_LOGIN_REMEMBER), ctx->hInst, nullptr);
+    ctx->rememberCheck = CreateWindowExW(0, L"BUTTON", L"Remember username and password", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 154, 284, 270, 24, ctx->hwnd, ControlMenuId(IDC_LOGIN_REMEMBER), ctx->hInst, nullptr);
     ctx->statusLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 24, 316, 400, 42, ctx->hwnd, ControlMenuId(IDC_LOGIN_STATUS), ctx->hInst, nullptr);
 
     RememberedLogin remembered = LoadRememberedLogin();
@@ -398,12 +460,13 @@ static LRESULT CALLBACK LoginWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             HFONT font = CreateUiFont(10);
             for (HWND h : { ctx->displayNameEdit, ctx->usernameEdit, ctx->passwordEdit, ctx->positionCombo, ctx->podCombo, ctx->rememberCheck, ctx->statusLabel })
                 SetChildFont(h, font);
-            HWND offline = CreateWindowExW(0, L"BUTTON", L"Offline Mode", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 24, 376, 128, 32, hwnd, ControlMenuId(IDC_LOGIN_OFFLINE), ctx->hInst, nullptr);
-            HWND login = CreateWindowExW(0, L"BUTTON", L"Login", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 222, 376, 96, 32, hwnd, ControlMenuId(IDC_LOGIN_BUTTON), ctx->hInst, nullptr);
-            HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 328, 376, 96, 32, hwnd, ControlMenuId(IDC_LOGIN_CANCEL), ctx->hInst, nullptr);
+            HWND offline = CreateWindowExW(0, L"BUTTON", L"Offline Mode", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 24, 376, 128, 32, hwnd, ControlMenuId(IDC_LOGIN_OFFLINE), ctx->hInst, nullptr);
+            HWND login = CreateWindowExW(0, L"BUTTON", L"Login", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 222, 376, 96, 32, hwnd, ControlMenuId(IDC_LOGIN_BUTTON), ctx->hInst, nullptr);
+            HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 328, 376, 96, 32, hwnd, ControlMenuId(IDC_LOGIN_CANCEL), ctx->hInst, nullptr);
             SetChildFont(offline, font);
             SetChildFont(login, font);
             SetChildFont(cancel, font);
+            SendMessageW(hwnd, DM_SETDEFID, IDC_LOGIN_BUTTON, 0);
         }
         return 0;
 
@@ -478,13 +541,12 @@ bool ShowLoginDialog(HINSTANCE hInst, ClientSession& sessionOut)
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
+    SetFocus(ctx.displayNameEdit);
 
     MSG msg{};
     while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) {
-            AttemptLogin(&ctx);
+        if (IsWindow(hwnd) && IsDialogMessageW(hwnd, &msg))
             continue;
-        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

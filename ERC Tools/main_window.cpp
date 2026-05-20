@@ -356,6 +356,45 @@ static HMENU ControlId(int id)
     return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id));
 }
 
+static bool IsTabStopCandidate(HWND hwnd)
+{
+    if (!hwnd || !IsWindowEnabled(hwnd))
+        return false;
+
+    wchar_t className[64]{};
+    if (!GetClassNameW(hwnd, className, static_cast<int>(_countof(className))))
+        return false;
+
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if (lstrcmpiW(className, L"Button") == 0)
+        return (style & BS_TYPEMASK) != BS_GROUPBOX;
+    if (lstrcmpiW(className, L"Edit") == 0)
+        return true;
+    if (lstrcmpiW(className, L"ComboBox") == 0)
+        return true;
+    if (lstrcmpiW(className, L"ListBox") == 0)
+        return true;
+    if (lstrcmpiW(className, L"SysListView32") == 0)
+        return true;
+    return false;
+}
+
+static BOOL CALLBACK EnableChildTabStopsProc(HWND child, LPARAM)
+{
+    if (IsTabStopCandidate(child)) {
+        LONG_PTR style = GetWindowLongPtrW(child, GWL_STYLE);
+        if ((style & WS_TABSTOP) == 0)
+            SetWindowLongPtrW(child, GWL_STYLE, style | WS_TABSTOP);
+    }
+    return TRUE;
+}
+
+static void EnableChildTabStops(HWND parent)
+{
+    if (parent)
+        EnumChildWindows(parent, EnableChildTabStopsProc, 0);
+}
+
 static constexpr COLORREF kUiBackground = RGB(246, 248, 251);
 static constexpr COLORREF kUiSurface = RGB(255, 255, 255);
 static constexpr COLORREF kUiText = RGB(22, 34, 49);
@@ -1267,6 +1306,8 @@ public:
 
         MSG msg{};
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            if (RouteOwnedDialogMessage(msg))
+                continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -1276,6 +1317,30 @@ public:
 
 private:
     static constexpr const wchar_t* kBaseTitle = L"ERC Tools";
+
+    bool RouteOwnedDialogMessage(MSG& msg)
+    {
+        if (!m_hwnd || !msg.hwnd)
+            return false;
+
+        HWND root = GetAncestor(msg.hwnd, GA_ROOT);
+        if (!root || !IsWindow(root) || !IsWindowVisible(root))
+            return false;
+
+        if (root == m_hwnd) {
+            HWND map = m_map.Hwnd();
+            if (map && (msg.hwnd == map || IsChild(map, msg.hwnd)))
+                return false;
+            EnableChildTabStops(m_hwnd);
+            return IsDialogMessageW(m_hwnd, &msg) != FALSE;
+        }
+
+        if (GetWindow(root, GW_OWNER) != m_hwnd)
+            return false;
+
+        EnableChildTabStops(root);
+        return IsDialogMessageW(root, &msg) != FALSE;
+    }
 
     static bool RegisterClass()
     {

@@ -135,6 +135,34 @@ static std::wstring TrimWide(std::wstring s)
     return s;
 }
 
+static std::wstring CanonicalPosition(std::wstring position)
+{
+    std::wstring key = ToLower(TrimWide(position));
+    if (key == L"administrator" || key == L"admin")
+        return L"Administrator";
+    if (key == L"supervisor" || key == L"sup")
+        return L"Supervisor";
+    if (key == L"manager" || key == L"mgr")
+        return L"Manager";
+    if (key == L"erc")
+        return L"ERC";
+    return TrimWide(position);
+}
+
+static int PositionRank(const std::wstring& position)
+{
+    std::wstring key = ToLower(TrimWide(position));
+    if (key == L"administrator" || key == L"admin")
+        return 4;
+    if (key == L"supervisor" || key == L"sup")
+        return 3;
+    if (key == L"manager" || key == L"mgr")
+        return 2;
+    if (key == L"erc")
+        return 1;
+    return 0;
+}
+
 static std::wstring PickWide(const json& obj, std::initializer_list<const char*> keys)
 {
     if (!obj.is_object())
@@ -490,8 +518,9 @@ class Database
 public:
     explicit Database(ServerConfig config) : m_config(std::move(config)) {}
 
-    bool ValidateLogin(const std::wstring& username, const std::wstring& password, const std::wstring& position, const std::wstring& pod, UserRecord& userOut, std::wstring& errorOut)
+    bool ValidateLogin(const std::wstring& username, const std::wstring& password, const std::wstring& position, const std::wstring& pod, UserRecord& userOut, std::wstring& errorOut, std::string& codeOut)
     {
+        codeOut.clear();
         OdbcConnection db(m_config.databaseConnectionString);
         auto rows = db.Query(
             L"SELECT id, username, display_name, position, pod, password_salt, password_hash, password_iterations, active FROM users WHERE username = ? LIMIT 1",
@@ -499,16 +528,19 @@ public:
             errorOut);
         if (!errorOut.empty()) {
             errorOut = L"Database login lookup failed: " + errorOut;
+            codeOut = "database_error";
             return false;
         }
         if (rows.empty()) {
             errorOut = L"Invalid username or password.";
+            codeOut = "invalid_credentials";
             return false;
         }
 
         const auto& row = rows.front();
         if (row.size() < 9 || row[8] == L"0") {
             errorOut = L"This account is disabled.";
+            codeOut = "account_disabled";
             return false;
         }
 
@@ -519,21 +551,28 @@ public:
             !ConstantTimeEquals(actualHash, WideToUtf8(ToLower(row[6]))))
         {
             errorOut = L"Invalid username or password.";
+            codeOut = "invalid_credentials";
             return false;
         }
 
-        if (!position.empty() && ToLower(position) != ToLower(row[3])) {
-            errorOut = L"Selected position does not match this account.";
+        std::wstring requestedPosition = CanonicalPosition(position);
+        int requestedRank = PositionRank(requestedPosition);
+        int accountRank = PositionRank(row[3]);
+        if (requestedRank <= 0 || accountRank <= 0 || requestedRank > accountRank) {
+            errorOut = L"This account cannot sign in as the selected position.";
+            codeOut = "position_not_allowed";
             return false;
         }
         if (!pod.empty() && ToLower(pod) != ToLower(row[4])) {
             errorOut = L"Selected pod does not match this account.";
+            codeOut = "pod_mismatch";
             return false;
         }
 
-        userOut = UserRecord{ row[0], row[1], row[2], row[3], row[4] };
+        userOut = UserRecord{ row[0], row[1], row[2], requestedPosition, row[4] };
         db.Execute(L"UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", { userOut.id }, errorOut);
         errorOut.clear();
+        codeOut.clear();
         return true;
     }
 
@@ -721,9 +760,12 @@ static HttpResponse JsonResponse(int status, json body)
     return response;
 }
 
-static HttpResponse ErrorResponse(int status, const std::wstring& message)
+static HttpResponse ErrorResponse(int status, const std::wstring& message, const char* code = nullptr)
 {
-    return JsonResponse(status, { { "ok", false }, { "error", WideToUtf8(message) } });
+    json body = { { "ok", false }, { "error", WideToUtf8(message) } };
+    if (code && *code)
+        body["code"] = code;
+    return JsonResponse(status, body);
 }
 
 static bool IsDatabaseErrorMessage(const std::wstring& message)
@@ -790,7 +832,7 @@ public:
             UserRecord user;
             std::wstring authError;
             if (!m_database.Authenticate(BearerToken(req), user, authError))
-                return ErrorResponse(IsDatabaseErrorMessage(authError) ? 500 : 401, authError);
+                return ErrorResponse(IsDatabaseErrorMessage(authError) ? 500 : 401, authError, IsDatabaseErrorMessage(authError) ? "database_error" : "session_invalid");
 
             if (req.method == "GET" && req.path == "/api/chat")
                 return HandleGetChat();
@@ -830,7 +872,7 @@ private:
             body = json::parse(req.body);
         }
         catch (...) {
-            return ErrorResponse(400, L"Invalid login JSON.");
+            return ErrorResponse(400, L"Invalid login JSON.", "invalid_json");
         }
 
         std::wstring username = PickWide(body, { "username" });
@@ -838,18 +880,19 @@ private:
         std::wstring position = PickWide(body, { "position" });
         std::wstring pod = PickWide(body, { "pod" });
         if (username.empty() || password.empty() || position.empty() || pod.empty())
-            return ErrorResponse(400, L"Username, password, position and pod are required.");
+            return ErrorResponse(400, L"Username, password, position and pod are required.", "missing_fields");
 
         UserRecord user;
         std::wstring error;
-        if (!m_database.ValidateLogin(username, password, position, pod, user, error)) {
+        std::string code;
+        if (!m_database.ValidateLogin(username, password, position, pod, user, error, code)) {
             printf("Error: %ls\n", error.c_str());
-            return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 401, error);
+            return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 401, error, code.empty() ? nullptr : code.c_str());
         }
 
         std::wstring token;
         if (!m_database.CreateSession(user, token, error))
-            return ErrorResponse(500, error);
+            return ErrorResponse(500, error, IsDatabaseErrorMessage(error) ? "database_error" : "session_create_failed");
 
         return JsonResponse(200, {
             { "ok", true },

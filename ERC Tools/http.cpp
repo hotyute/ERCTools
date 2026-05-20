@@ -572,10 +572,11 @@ bool HttpJsonMethodText(const std::wstring& method, const std::wstring& inputUrl
     return true;
 }
 
-bool HttpPostJsonText(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, std::wstring& errorOut)
+bool HttpPostJsonTextStatus(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, DWORD& statusOut, std::wstring& errorOut)
 {
     bodyOut.clear();
     errorOut.clear();
+    statusOut = 0;
 
     std::wstring url = NormalizeUrl(inputUrl);
     if (url.empty()) {
@@ -681,7 +682,7 @@ bool HttpPostJsonText(const std::wstring& inputUrl, const std::string& jsonBody,
         return false;
     }
 
-    if (!EnsureHttpSuccess(request.h, errorOut))
+    if (!QueryHttpStatus(request.h, statusOut, errorOut))
         return false;
 
     std::vector<unsigned char> bytes;
@@ -708,7 +709,18 @@ bool HttpPostJsonText(const std::wstring& inputUrl, const std::string& jsonBody,
     }
 
     bodyOut.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    if (statusOut < 200 || statusOut >= 300) {
+        EnsureHttpSuccess(request.h, errorOut);
+        return false;
+    }
+
     return true;
+}
+
+bool HttpPostJsonText(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, std::wstring& errorOut)
+{
+    DWORD status = 0;
+    return HttpPostJsonTextStatus(inputUrl, jsonBody, bodyOut, status, errorOut);
 }
 
 bool HttpPutJsonText(const std::wstring& inputUrl, const std::string& jsonBody, std::string& bodyOut, std::wstring& errorOut)
