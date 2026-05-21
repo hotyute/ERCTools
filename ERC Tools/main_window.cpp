@@ -47,6 +47,8 @@ constexpr int IDM_WEATHER_SYSTEMS_EDIT_TEMPLATES = 2019;
 constexpr int IDM_SHOW_WEATHER_SYSTEMS = 2020;
 constexpr int IDM_WEATHER_SYSTEM_OVERLAY_NONE = 2021;
 constexpr int IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND = 2022;
+constexpr int IDM_FILE_LOGOUT = 2023;
+constexpr int IDM_ROADS_INCIDENTS_LIST = 2024;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -97,6 +99,9 @@ constexpr int IDC_INCIDENT_NOTIFICATIONS_LOCATION_EXCLUSIONS_LABEL = 2316;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_LOCATION_EXCLUSIONS_EDIT = 2317;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_ROAD_EXCLUSIONS_LABEL = 2318;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_ROAD_EXCLUSIONS_EDIT = 2319;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_UPDATE_LABEL = 2320;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_UPDATE_NOTIFY_RADIO = 2321;
+constexpr int IDC_INCIDENT_NOTIFICATIONS_UPDATE_IGNORE_RADIO = 2322;
 constexpr int IDC_NOTIFICATION_REGIONS_LIST = 2401;
 constexpr int IDC_NOTIFICATION_REGIONS_NEW_BTN = 2402;
 constexpr int IDC_NOTIFICATION_REGIONS_EDIT_BTN = 2403;
@@ -111,6 +116,10 @@ constexpr int IDC_NOTIFICATION_REGION_CLOSE_BTN = 2416;
 constexpr int IDC_NOTIFICATION_REGION_POINTS_LABEL = 2417;
 constexpr int IDC_NOTIFICATION_REGION_UNDO_BTN = 2418;
 constexpr int IDC_NOTIFICATION_REGION_FINISH_BTN = 2419;
+constexpr int IDC_INCIDENTS_LIST_SEARCH_EDIT = 2451;
+constexpr int IDC_INCIDENTS_LIST_SEVERITY_COMBO = 2452;
+constexpr int IDC_INCIDENTS_LIST_LISTVIEW = 2453;
+constexpr int IDC_INCIDENTS_LIST_CLOSE_BTN = 2454;
 constexpr int IDC_EARTHQUAKE_LIST_MAG_EDIT = 2501;
 constexpr int IDC_EARTHQUAKE_LIST_TIME_EDIT = 2502;
 constexpr int IDC_EARTHQUAKE_LIST_REGION_BTN = 2503;
@@ -144,6 +153,7 @@ constexpr int IDC_TEMPLATES_EDITOR_CLOSE = 2627;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
 constexpr const wchar_t* kIncidentNotificationsClassName = L"TrafficEnglandIncidentNotificationsWindow";
+constexpr const wchar_t* kIncidentsListClassName = L"TrafficEnglandIncidentsListWindow";
 constexpr const wchar_t* kNotificationRegionsClassName = L"TrafficEnglandNotificationRegionsWindow";
 constexpr const wchar_t* kNotificationRegionEditorClassName = L"TrafficEnglandNotificationRegionEditorWindow";
 constexpr const wchar_t* kEarthquakeListClassName = L"TrafficEnglandEarthquakeListWindow";
@@ -247,6 +257,7 @@ struct IncidentNotificationState
 {
     std::wstring signature;
     std::wstring line;
+    TrafficAlert alert;
 };
 
 struct EarthquakeNotificationState
@@ -1496,7 +1507,7 @@ private:
                 DeleteObject(m_headerFont);
                 m_headerFont = nullptr;
             }
-            PostQuitMessage(0);
+            PostQuitMessage(m_logoutRequested ? kMainWindowLogoutExitCode : 0);
             return 0;
         }
 
@@ -1814,6 +1825,11 @@ private:
             ShowSettingsWindow();
             break;
 
+        case IDM_FILE_LOGOUT:
+            m_logoutRequested = true;
+            DestroyWindow(m_hwnd);
+            break;
+
         case IDM_FILE_EXIT:
             DestroyWindow(m_hwnd);
             break;
@@ -1824,6 +1840,10 @@ private:
 
         case IDM_ROADS_INCIDENT_NOTIFICATIONS:
             ShowIncidentNotificationsWindow();
+            break;
+
+        case IDM_ROADS_INCIDENTS_LIST:
+            ShowIncidentsListWindow();
             break;
 
         case IDM_ROADS_TEMPLATES_WIZARD:
@@ -1906,6 +1926,9 @@ private:
         if (nmh->hwndFrom == m_listView && nmh->code == NM_CUSTOMDRAW)
             return OnAlertListCustomDraw(reinterpret_cast<NMLVCUSTOMDRAW*>(nmh));
 
+        if (nmh->hwndFrom == m_incidentsListView && nmh->code == NM_CUSTOMDRAW)
+            return OnIncidentsListCustomDraw(reinterpret_cast<NMLVCUSTOMDRAW*>(nmh));
+
         if (nmh->hwndFrom == m_listView && nmh->code == LVN_ITEMCHANGED) {
             if (m_programmaticSelection)
                 return 0;
@@ -1916,6 +1939,18 @@ private:
                 if (selected >= 0 && selected < static_cast<int>(m_filteredAlerts.size())) {
                     const std::wstring& id = m_filteredAlerts[static_cast<size_t>(selected)].id;
                     SelectAlertById(id, true);
+                }
+            }
+        }
+
+        if (nmh->hwndFrom == m_incidentsListView && nmh->code == LVN_ITEMCHANGED) {
+            NMLISTVIEW* lv = reinterpret_cast<NMLISTVIEW*>(nmh);
+            if ((lv->uChanged & LVIF_STATE) && (lv->uNewState & LVIS_SELECTED)) {
+                int selected = static_cast<int>(SendMessageW(m_incidentsListView, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED));
+                if (selected >= 0 && selected < static_cast<int>(m_incidentsListKeys.size())) {
+                    const auto it = m_notifiedIncidentStates.find(m_incidentsListKeys[static_cast<size_t>(selected)]);
+                    if (it != m_notifiedIncidentStates.end() && !it->second.alert.id.empty())
+                        SelectAlertById(it->second.alert.id, true);
                 }
             }
         }
@@ -1943,10 +1978,45 @@ private:
         {
             const int row = static_cast<int>(cd->nmcd.dwItemSpec);
             const bool selected = (cd->nmcd.uItemState & CDIS_SELECTED) != 0;
-            if (row >= 0 && row < static_cast<int>(m_filteredAlerts.size()) && cd->iSubItem == 0 && !selected)
+            if (row >= 0 && row < static_cast<int>(m_filteredAlerts.size()) && cd->iSubItem == 0)
                 cd->clrText = SeverityLabelColor(m_filteredAlerts[static_cast<size_t>(row)].severity);
             else
                 cd->clrText = selected ? RGB(12, 75, 142) : kUiText;
+            cd->clrTextBk = selected ? kUiSelection : kUiSurface;
+            return CDRF_DODEFAULT;
+        }
+        }
+
+        return CDRF_DODEFAULT;
+    }
+
+    LRESULT OnIncidentsListCustomDraw(NMLVCUSTOMDRAW* cd)
+    {
+        if (!cd)
+            return CDRF_DODEFAULT;
+
+        switch (cd->nmcd.dwDrawStage) {
+        case CDDS_PREPAINT:
+            return CDRF_NOTIFYITEMDRAW;
+        case CDDS_ITEMPREPAINT:
+        {
+            const bool selected = (cd->nmcd.uItemState & CDIS_SELECTED) != 0;
+            const bool hot = (cd->nmcd.uItemState & CDIS_HOT) != 0;
+            cd->clrText = selected ? RGB(12, 75, 142) : kUiText;
+            cd->clrTextBk = selected ? kUiSelection : (hot ? RGB(240, 246, 253) : kUiSurface);
+            return CDRF_NOTIFYSUBITEMDRAW;
+        }
+        case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
+        {
+            const int row = static_cast<int>(cd->nmcd.dwItemSpec);
+            const bool selected = (cd->nmcd.uItemState & CDIS_SELECTED) != 0;
+            if (row >= 0 && row < static_cast<int>(m_incidentsListKeys.size()) && cd->iSubItem == 0) {
+                auto it = m_notifiedIncidentStates.find(m_incidentsListKeys[static_cast<size_t>(row)]);
+                cd->clrText = it == m_notifiedIncidentStates.end() ? kUiText : SeverityLabelColor(it->second.alert.severity);
+            }
+            else {
+                cd->clrText = selected ? RGB(12, 75, 142) : kUiText;
+            }
             cd->clrTextBk = selected ? kUiSelection : kUiSurface;
             return CDRF_DODEFAULT;
         }
@@ -2072,6 +2142,7 @@ private:
             if (TryParseDurationMinutes(m_incidentNotifyDelayThresholdText, parsedDelayMinutes))
                 m_incidentNotifyDelayThresholdMinutes = parsedDelayMinutes;
             readBool("incidentNotifyThresholdUseOr", m_incidentNotifyThresholdUseOr);
+            readBool("incidentIgnoreUpdates", m_incidentIgnoreUpdates);
             readString("incidentNotifyReasonExclusions", m_incidentNotifyReasonExclusions);
             readString("incidentNotifyLocationExclusions", m_incidentNotifyLocationExclusions);
             auto regionsIt = settings->find("incidentNotificationRegions");
@@ -2314,6 +2385,7 @@ private:
             settings["incidentNotifyDelayThresholdText"] = WideToUtf8(m_incidentNotifyDelayThresholdText);
             settings["incidentNotifyDelayThresholdMinutes"] = m_incidentNotifyDelayThresholdMinutes;
             settings["incidentNotifyThresholdUseOr"] = m_incidentNotifyThresholdUseOr;
+            settings["incidentIgnoreUpdates"] = m_incidentIgnoreUpdates;
             settings["incidentNotifyReasonExclusions"] = WideToUtf8(m_incidentNotifyReasonExclusions);
             settings["incidentNotifyLocationExclusions"] = WideToUtf8(m_incidentNotifyLocationExclusions);
             settings["incidentNotificationRegions"] = json::array();
@@ -2883,12 +2955,17 @@ private:
             auto existing = m_notifiedIncidentStates.find(stableKey);
             if (existing == m_notifiedIncidentStates.end()) {
                 newLines.push_back(line);
-                m_notifiedIncidentStates[stableKey] = IncidentNotificationState{ signature, line };
+                m_notifiedIncidentStates[stableKey] = IncidentNotificationState{ signature, line, alert };
             }
             else if (existing->second.signature != signature) {
-                updateLines.push_back(line);
+                if (!m_incidentIgnoreUpdates)
+                    updateLines.push_back(line);
                 existing->second.signature = std::move(signature);
                 existing->second.line = std::move(line);
+                existing->second.alert = alert;
+            }
+            else {
+                existing->second.alert = alert;
             }
         }
 
@@ -2906,9 +2983,10 @@ private:
 
         m_haveIncidentNotificationSnapshot = true;
 
-        PublishIncidentNotificationBatch(newLines, L"Incident notification", L"matching incident notifications");
+        PublishIncidentNotificationBatch(newLines, L"Incident added", L"incident additions");
         PublishIncidentNotificationBatch(updateLines, L"Incident update", L"incident updates");
         PublishIncidentNotificationBatch(removedLines, L"Incident removed", L"incident removals");
+        RefreshIncidentsListRows();
     }
 
     void EnsureNotificationIcon()
@@ -3658,8 +3736,10 @@ private:
         HMENU weatherMenu = CreatePopupMenu();
         HMENU viewMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_SETTINGS, L"Settings...");
+        AppendMenuW(fileMenu, MF_STRING, IDM_FILE_LOGOUT, L"Logout");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
+        AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENTS_LIST, L"Incidents List...");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_FILTERS, L"Incident Filters...");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_NOTIFICATIONS, L"Incident Notifications...");
         AppendMenuW(roadsMenu, MF_SEPARATOR, 0, nullptr);
@@ -3950,7 +4030,7 @@ private:
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 540,
-                660,
+                720,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -4003,6 +4083,12 @@ private:
         m_incidentNotifyDelayThresholdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, 120, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_DELAY_EDIT), m_hInst, nullptr);
         y += 42;
 
+        CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_UPDATE_LABEL, L"Incident updates", left, y);
+        y += 26;
+        m_incidentNotifyUpdatesRadio = CreateWindowExW(0, L"BUTTON", L"Notify incident updates", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, editX, y, 190, 24, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_UPDATE_NOTIFY_RADIO), m_hInst, nullptr);
+        m_incidentIgnoreUpdatesRadio = CreateWindowExW(0, L"BUTTON", L"Ignore incident updates", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, editX + 210, y, 190, 24, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_UPDATE_IGNORE_RADIO), m_hInst, nullptr);
+        y += 42;
+
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_REGIONS_LABEL, L"Notification regions", left, y);
         y += 26;
         m_incidentNotifyRegionsBtn = CreateWindowExW(0, L"BUTTON", L"Manage regions...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, editX, y, 168, 32, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_REGIONS_BTN), m_hInst, nullptr);
@@ -4019,7 +4105,7 @@ private:
 
         HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 392, y + 42, 102, 32, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyRoadExclusionsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyAndRadio, m_incidentNotifyOrRadio, m_incidentNotifyDelayThresholdEdit, m_incidentNotifyRegionsBtn, m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyLocationExclusionsEdit, close }) {
+        for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyRoadExclusionsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyAndRadio, m_incidentNotifyOrRadio, m_incidentNotifyDelayThresholdEdit, m_incidentNotifyUpdatesRadio, m_incidentIgnoreUpdatesRadio, m_incidentNotifyRegionsBtn, m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyLocationExclusionsEdit, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -4049,6 +4135,10 @@ private:
             SendMessageW(m_incidentNotifyAndRadio, BM_SETCHECK, m_incidentNotifyThresholdUseOr ? BST_UNCHECKED : BST_CHECKED, 0);
         if (m_incidentNotifyOrRadio)
             SendMessageW(m_incidentNotifyOrRadio, BM_SETCHECK, m_incidentNotifyThresholdUseOr ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_incidentNotifyUpdatesRadio)
+            SendMessageW(m_incidentNotifyUpdatesRadio, BM_SETCHECK, m_incidentIgnoreUpdates ? BST_UNCHECKED : BST_CHECKED, 0);
+        if (m_incidentIgnoreUpdatesRadio)
+            SendMessageW(m_incidentIgnoreUpdatesRadio, BM_SETCHECK, m_incidentIgnoreUpdates ? BST_CHECKED : BST_UNCHECKED, 0);
         if (m_incidentNotifyReasonExclusionsEdit)
             SetWindowTextSafe(m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyReasonExclusions);
         if (m_incidentNotifyLocationExclusionsEdit)
@@ -4071,6 +4161,11 @@ private:
         }
         if ((id == IDC_INCIDENT_NOTIFICATIONS_AND_RADIO || id == IDC_INCIDENT_NOTIFICATIONS_OR_RADIO) && code == BN_CLICKED) {
             m_incidentNotifyThresholdUseOr = (id == IDC_INCIDENT_NOTIFICATIONS_OR_RADIO);
+            SaveSettings();
+            return;
+        }
+        if ((id == IDC_INCIDENT_NOTIFICATIONS_UPDATE_NOTIFY_RADIO || id == IDC_INCIDENT_NOTIFICATIONS_UPDATE_IGNORE_RADIO) && code == BN_CLICKED) {
+            m_incidentIgnoreUpdates = (id == IDC_INCIDENT_NOTIFICATIONS_UPDATE_IGNORE_RADIO);
             SaveSettings();
             return;
         }
@@ -4119,6 +4214,233 @@ private:
                 SetWindowTextSafe(m_incidentNotifyDelayThresholdEdit, m_incidentNotifyDelayThresholdText);
                 SetStatusText(L"Delay threshold should be a duration such as 1 hour or 60 minutes.");
             }
+        }
+    }
+
+    static LRESULT CALLBACK IncidentsListWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleIncidentsListMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleIncidentsListMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateIncidentsListControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnIncidentsListCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_NOTIFY:
+            return OnNotify(reinterpret_cast<NMHDR*>(lParam));
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowIncidentsListWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = IncidentsListWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kIncidentsListClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_incidentsListWnd || !IsWindow(m_incidentsListWnd)) {
+            m_incidentsListWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kIncidentsListClassName,
+                L"Incidents List",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                820,
+                520,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        RefreshIncidentsListRows();
+        ShowWindow(m_incidentsListWnd, SW_SHOW);
+        SetForegroundWindow(m_incidentsListWnd);
+    }
+
+    void CreateIncidentsListControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Incidents List", 18, 18, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Search", 18, 64);
+        m_incidentsListSearchEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 90, 360, 26, parent, ControlId(IDC_INCIDENTS_LIST_SEARCH_EDIT), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Severity", 396, 64);
+        m_incidentsListSeverityCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 396, 90, 160, 160, parent, ControlId(IDC_INCIDENTS_LIST_SEVERITY_COMBO), m_hInst, nullptr);
+        m_incidentsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 132, 756, 300, parent, ControlId(IDC_INCIDENTS_LIST_LISTVIEW), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 672, 446, 102, 32, parent, ControlId(IDC_INCIDENTS_LIST_CLOSE_BTN), m_hInst, nullptr);
+
+        for (HWND h : { m_incidentsListSearchEdit, m_incidentsListSeverityCombo, m_incidentsListView, closeBtn }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+
+        SendMessageW(m_incidentsListSearchEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by road, location, title, or update text"));
+        for (const wchar_t* item : { L"All", L"Severe", L"Moderate", L"Minor", L"Unknown" })
+            SendMessageW(m_incidentsListSeverityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
+        SendMessageW(m_incidentsListSeverityCombo, CB_SETCURSEL, 0, 0);
+
+        SendMessageW(m_incidentsListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_INFOTIP);
+        ListView_SetBkColor(m_incidentsListView, kUiSurface);
+        ListView_SetTextBkColor(m_incidentsListView, CLR_NONE);
+        ListView_SetTextColor(m_incidentsListView, kUiText);
+
+        LVCOLUMNW col{};
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        std::wstring c0 = L"Severity";
+        col.pszText = const_cast<LPWSTR>(c0.c_str());
+        col.cx = 90;
+        SendMessageW(m_incidentsListView, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&col));
+        std::wstring c1 = L"Road";
+        col.pszText = const_cast<LPWSTR>(c1.c_str());
+        col.cx = 90;
+        SendMessageW(m_incidentsListView, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&col));
+        std::wstring c2 = L"Incident";
+        col.pszText = const_cast<LPWSTR>(c2.c_str());
+        col.cx = 360;
+        SendMessageW(m_incidentsListView, LVM_INSERTCOLUMNW, 2, reinterpret_cast<LPARAM>(&col));
+        std::wstring c3 = L"Updated";
+        col.pszText = const_cast<LPWSTR>(c3.c_str());
+        col.cx = 170;
+        SendMessageW(m_incidentsListView, LVM_INSERTCOLUMNW, 3, reinterpret_cast<LPARAM>(&col));
+
+        ApplyModernEditChrome(m_incidentsListSearchEdit);
+        RefreshIncidentsListRows();
+    }
+
+    std::wstring IncidentsListSeverityFilter() const
+    {
+        int idx = m_incidentsListSeverityCombo
+            ? static_cast<int>(SendMessageW(m_incidentsListSeverityCombo, CB_GETCURSEL, 0, 0))
+            : 0;
+        switch (idx) {
+        case 1: return L"severe";
+        case 2: return L"moderate";
+        case 3: return L"minor";
+        case 4: return L"unknown";
+        default: return L"";
+        }
+    }
+
+    bool IncidentStateMatchesListFilters(const IncidentNotificationState& state) const
+    {
+        std::wstring severityFilter = IncidentsListSeverityFilter();
+        if (!severityFilter.empty() && SeverityBucket(state.alert.severity) != severityFilter)
+            return false;
+
+        std::wstring search = m_incidentsListSearchEdit ? ToLower(Trim(GetWindowTextString(m_incidentsListSearchEdit))) : L"";
+        if (search.empty())
+            return true;
+
+        std::wstring haystack = ToLower(
+            state.line + L" " +
+            state.alert.road + L" " +
+            state.alert.region + L" " +
+            state.alert.title + L" " +
+            state.alert.description + L" " +
+            state.alert.updatedText + L" " +
+            BuildSeverityDisplay(state.alert.severity));
+        return haystack.find(search) != std::wstring::npos;
+    }
+
+    void RefreshIncidentsListRows()
+    {
+        if (!m_incidentsListView)
+            return;
+
+        std::vector<std::wstring> keys;
+        keys.reserve(m_notifiedIncidentStates.size());
+        for (const auto& item : m_notifiedIncidentStates) {
+            if (IncidentStateMatchesListFilters(item.second))
+                keys.push_back(item.first);
+        }
+        std::sort(keys.begin(), keys.end(), [this](const std::wstring& a, const std::wstring& b) {
+            const auto ia = m_notifiedIncidentStates.find(a);
+            const auto ib = m_notifiedIncidentStates.find(b);
+            if (ia == m_notifiedIncidentStates.end() || ib == m_notifiedIncidentStates.end())
+                return a < b;
+            int sa = (SeverityBucket(ia->second.alert.severity) == L"severe") ? 0 : (SeverityBucket(ia->second.alert.severity) == L"moderate" ? 1 : (SeverityBucket(ia->second.alert.severity) == L"minor" ? 2 : 3));
+            int sb = (SeverityBucket(ib->second.alert.severity) == L"severe") ? 0 : (SeverityBucket(ib->second.alert.severity) == L"moderate" ? 1 : (SeverityBucket(ib->second.alert.severity) == L"minor" ? 2 : 3));
+            if (sa != sb)
+                return sa < sb;
+            if (ia->second.alert.road != ib->second.alert.road)
+                return ia->second.alert.road < ib->second.alert.road;
+            return ia->second.line < ib->second.line;
+            });
+
+        m_incidentsListKeys = keys;
+        SendMessageW(m_incidentsListView, LVM_DELETEALLITEMS, 0, 0);
+        for (size_t i = 0; i < m_incidentsListKeys.size(); ++i) {
+            const IncidentNotificationState& state = m_notifiedIncidentStates[m_incidentsListKeys[i]];
+            std::wstring sev = BuildSeverityDisplay(state.alert.severity);
+            std::wstring road = state.alert.road.empty() ? state.alert.region : state.alert.road;
+            std::wstring incident = state.line.empty() ? BuildAlertSummary(state.alert) : state.line;
+            std::wstring updated = state.alert.updatedText;
+
+            LVITEMW item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = static_cast<int>(i);
+            item.iSubItem = 0;
+            item.pszText = const_cast<LPWSTR>(sev.c_str());
+            int row = static_cast<int>(SendMessageW(m_incidentsListView, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+            if (row >= 0) {
+                LVITEMW sub{};
+                sub.iSubItem = 1;
+                sub.pszText = const_cast<LPWSTR>(road.c_str());
+                SendMessageW(m_incidentsListView, LVM_SETITEMTEXTW, row, reinterpret_cast<LPARAM>(&sub));
+                sub.iSubItem = 2;
+                sub.pszText = const_cast<LPWSTR>(incident.c_str());
+                SendMessageW(m_incidentsListView, LVM_SETITEMTEXTW, row, reinterpret_cast<LPARAM>(&sub));
+                sub.iSubItem = 3;
+                sub.pszText = const_cast<LPWSTR>(updated.c_str());
+                SendMessageW(m_incidentsListView, LVM_SETITEMTEXTW, row, reinterpret_cast<LPARAM>(&sub));
+            }
+        }
+
+        if (m_incidentsListWnd && IsWindowVisible(m_incidentsListWnd)) {
+            SetStatusText(L"Showing " + std::to_wstring(m_incidentsListKeys.size()) + L" notified incident(s).");
+        }
+    }
+
+    void OnIncidentsListCommand(int id, int code)
+    {
+        if (id == IDC_INCIDENTS_LIST_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_incidentsListWnd, SW_HIDE);
+            return;
+        }
+        if ((id == IDC_INCIDENTS_LIST_SEARCH_EDIT && code == EN_CHANGE) ||
+            (id == IDC_INCIDENTS_LIST_SEVERITY_COMBO && code == CBN_SELCHANGE))
+        {
+            RefreshIncidentsListRows();
         }
     }
 
@@ -5225,6 +5547,46 @@ private:
         return variables;
     }
 
+    static std::wstring ExpandCompassDirectionToken(const std::wstring& token)
+    {
+        static const std::unordered_map<std::wstring, std::wstring> names = {
+            { L"N", L"North" },
+            { L"NNE", L"North-North-East" },
+            { L"NE", L"North-East" },
+            { L"ENE", L"East-North-East" },
+            { L"E", L"East" },
+            { L"ESE", L"East-South-East" },
+            { L"SE", L"South-East" },
+            { L"SSE", L"South-South-East" },
+            { L"S", L"South" },
+            { L"SSW", L"South-South-West" },
+            { L"SW", L"South-West" },
+            { L"WSW", L"West-South-West" },
+            { L"W", L"West" },
+            { L"WNW", L"West-North-West" },
+            { L"NW", L"North-West" },
+            { L"NNW", L"North-North-West" }
+        };
+        auto it = names.find(token);
+        return it == names.end() ? token : it->second;
+    }
+
+    static std::wstring ExpandCompassDirectionsInText(const std::wstring& text)
+    {
+        static const std::wregex compassRe(LR"(\b(N|NNE|NE|ENE|E|ESE|SE|SSE|S|SSW|SW|WSW|W|WNW|NW|NNW)\b)");
+        std::wstring output;
+        size_t cursor = 0;
+        for (std::wsregex_iterator it(text.begin(), text.end(), compassRe), end; it != end; ++it) {
+            const auto& match = *it;
+            const size_t pos = static_cast<size_t>(match.position(0));
+            output.append(text, cursor, pos - cursor);
+            output += ExpandCompassDirectionToken(match[1].str());
+            cursor = pos + static_cast<size_t>(match.length(0));
+        }
+        output.append(text, cursor, std::wstring::npos);
+        return output;
+    }
+
     std::vector<std::pair<std::wstring, std::wstring>> BuildEarthquakeTemplateVariables(const EarthquakeEvent& event) const
     {
         std::vector<std::pair<std::wstring, std::wstring>> variables;
@@ -5239,7 +5601,7 @@ private:
 
         SetTemplateVariable(variables, L"$DATE", CurrentDateText());
         SetTemplateVariable(variables, L"$MAGNITUDE", magnitude);
-        SetTemplateVariable(variables, L"$PLACE", event.place.empty() ? L"unknown region" : event.place);
+        SetTemplateVariable(variables, L"$PLACE", event.place.empty() ? L"unknown region" : ExpandCompassDirectionsInText(event.place));
         SetTemplateVariable(variables, L"$TIME", event.timeText);
         SetTemplateVariable(variables, L"%LATITUDE", latitude);
         SetTemplateVariable(variables, L"%LONGITUDE", longitude);
@@ -7429,10 +7791,16 @@ private:
     HWND m_incidentNotifyDelayThresholdEdit = nullptr;
     HWND m_incidentNotifyAndRadio = nullptr;
     HWND m_incidentNotifyOrRadio = nullptr;
+    HWND m_incidentNotifyUpdatesRadio = nullptr;
+    HWND m_incidentIgnoreUpdatesRadio = nullptr;
     HWND m_incidentNotifyRegionsBtn = nullptr;
     HWND m_incidentNotifyReasonExclusionsEdit = nullptr;
     HWND m_incidentNotifyLocationExclusionsEdit = nullptr;
     HWND m_notificationRegionsList = nullptr;
+    HWND m_incidentsListWnd = nullptr;
+    HWND m_incidentsListSearchEdit = nullptr;
+    HWND m_incidentsListSeverityCombo = nullptr;
+    HWND m_incidentsListView = nullptr;
     HWND m_earthquakeListMagnitudeEdit = nullptr;
     HWND m_earthquakeListTimeEdit = nullptr;
     HWND m_earthquakeListRegionBtn = nullptr;
@@ -7474,6 +7842,7 @@ private:
     std::vector<WeatherSystemEvent> m_allWeatherSystems;
     std::vector<WeatherSystemEvent> m_filteredWeatherSystems;
     std::vector<GeoPoint> m_earthquakeFilterRegion;
+    std::vector<std::wstring> m_incidentsListKeys;
     std::wstring m_selectedId;
     std::wstring m_templateWizardAlertId;
     std::wstring m_templateWizardEarthquakeId;
@@ -7500,6 +7869,7 @@ private:
     std::wstring m_incidentNotifyDelayThresholdText = L"1 hour";
     double m_incidentNotifyDelayThresholdMinutes = 60.0;
     bool m_incidentNotifyThresholdUseOr = false;
+    bool m_incidentIgnoreUpdates = false;
     std::wstring m_incidentNotifyReasonExclusions = L"Road Management";
     std::wstring m_incidentNotifyLocationExclusions = L"entry, exit";
     bool m_showEarthquakes = false;
@@ -7524,6 +7894,7 @@ private:
     std::atomic_bool m_serverRequestInProgress{ false };
     std::atomic_bool m_earthquakeFetchInProgress{ false };
     bool m_notificationIconAdded = false;
+    bool m_logoutRequested = false;
     bool m_haveIncidentNotificationSnapshot = false;
     bool m_haveEarthquakeNotificationSnapshot = false;
     bool m_haveWeatherSystemNotificationSnapshot = false;

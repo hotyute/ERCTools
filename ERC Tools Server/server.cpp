@@ -515,10 +515,17 @@ private:
 
 class Database
 {
+    struct SessionMetadata
+    {
+        std::wstring displayName;
+        std::wstring position;
+        std::wstring pod;
+    };
+
 public:
     explicit Database(ServerConfig config) : m_config(std::move(config)) {}
 
-    bool ValidateLogin(const std::wstring& username, const std::wstring& password, const std::wstring& position, const std::wstring& pod, UserRecord& userOut, std::wstring& errorOut, std::string& codeOut)
+    bool ValidateLogin(const std::wstring& username, const std::wstring& password, const std::wstring& displayName, const std::wstring& position, const std::wstring& pod, UserRecord& userOut, std::wstring& errorOut, std::string& codeOut)
     {
         codeOut.clear();
         OdbcConnection db(m_config.databaseConnectionString);
@@ -563,13 +570,15 @@ public:
             codeOut = "position_not_allowed";
             return false;
         }
-        if (!pod.empty() && ToLower(pod) != ToLower(row[4])) {
-            errorOut = L"Selected pod does not match this account.";
-            codeOut = "pod_mismatch";
-            return false;
-        }
-
-        userOut = UserRecord{ row[0], row[1], row[2], requestedPosition, row[4] };
+        std::wstring sessionDisplayName = TrimWide(displayName);
+        std::wstring sessionPod = TrimWide(pod);
+        userOut = UserRecord{
+            row[0],
+            row[1],
+            sessionDisplayName.empty() ? row[2] : sessionDisplayName,
+            requestedPosition,
+            sessionPod.empty() ? row[4] : sessionPod
+        };
         db.Execute(L"UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", { userOut.id }, errorOut);
         errorOut.clear();
         codeOut.clear();
@@ -598,6 +607,10 @@ public:
             errorOut);
         if (!ok)
             return false;
+        {
+            std::lock_guard<std::mutex> lock(m_sessionMetaMutex);
+            m_sessionMetadata[tokenHash] = SessionMetadata{ user.displayName, user.position, user.pod };
+        }
         tokenOut = Utf8ToWide(token);
         return true;
     }
@@ -632,6 +645,18 @@ public:
 
         const auto& row = rows.front();
         userOut = UserRecord{ row[0], row[1], row[2], row[3], row[4] };
+        {
+            std::lock_guard<std::mutex> lock(m_sessionMetaMutex);
+            auto metaIt = m_sessionMetadata.find(tokenHash);
+            if (metaIt != m_sessionMetadata.end()) {
+                if (!metaIt->second.displayName.empty())
+                    userOut.displayName = metaIt->second.displayName;
+                if (!metaIt->second.position.empty())
+                    userOut.position = metaIt->second.position;
+                if (!metaIt->second.pod.empty())
+                    userOut.pod = metaIt->second.pod;
+            }
+        }
         db.Execute(L"UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?", { Utf8ToWide(tokenHash) }, errorOut);
         errorOut.clear();
         return true;
@@ -737,6 +762,8 @@ public:
 
 private:
     ServerConfig m_config;
+    std::mutex m_sessionMetaMutex;
+    std::unordered_map<std::string, SessionMetadata> m_sessionMetadata;
 };
 
 static std::string BearerToken(const HttpRequest& req)
@@ -877,15 +904,16 @@ private:
 
         std::wstring username = PickWide(body, { "username" });
         std::wstring password = PickWide(body, { "password" });
+        std::wstring displayName = PickWide(body, { "displayName", "display_name", "name" });
         std::wstring position = PickWide(body, { "position" });
         std::wstring pod = PickWide(body, { "pod" });
-        if (username.empty() || password.empty() || position.empty() || pod.empty())
-            return ErrorResponse(400, L"Username, password, position and pod are required.", "missing_fields");
+        if (username.empty() || password.empty() || position.empty())
+            return ErrorResponse(400, L"Username, password and position are required.", "missing_fields");
 
         UserRecord user;
         std::wstring error;
         std::string code;
-        if (!m_database.ValidateLogin(username, password, position, pod, user, error, code)) {
+        if (!m_database.ValidateLogin(username, password, displayName, position, pod, user, error, code)) {
             printf("Error: %ls\n", error.c_str());
             return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 401, error, code.empty() ? nullptr : code.c_str());
         }

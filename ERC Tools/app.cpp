@@ -60,13 +60,19 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
         return 0;
     }
 
-    ClientSession session;
-    if (!ShowLoginDialog(hInstance, session)) {
-        CoUninitialize();
-        return 0;
-    }
+    int rc = 0;
+    for (;;) {
+        ClientSession session;
+        if (!ShowLoginDialog(hInstance, session))
+            break;
 
-    const int rc = RunMainWindow(hInstance, nCmdShow, session);
+        g_appQuitting.store(false);
+        rc = RunMainWindow(hInstance, nCmdShow, session);
+        if (rc != kMainWindowLogoutExitCode)
+            break;
+
+        rc = 0;
+    }
 
     g_dwriteFactory.Reset();
     g_wicFactory.Reset();

@@ -251,7 +251,7 @@ static std::wstring LoginErrorMessageForCode(std::wstring code, DWORD status)
 {
     code = ToLower(Trim(code));
     if (code == L"missing_fields")
-        return L"All fields are required.";
+        return L"Username, password and position are required.";
     if (code == L"invalid_json")
         return L"The login request was not understood by the server.";
     if (code == L"invalid_credentials")
@@ -317,8 +317,8 @@ static void AttemptLogin(LoginContext* ctx)
     std::wstring position = ComboText(ctx->positionCombo);
     std::wstring pod = ComboText(ctx->podCombo);
 
-    if (displayName.empty() || username.empty() || password.empty() || position.empty() || pod.empty()) {
-        SetWindowTextSafe(ctx->statusLabel, L"All fields are required.");
+    if (username.empty() || password.empty() || position.empty()) {
+        SetWindowTextSafe(ctx->statusLabel, L"Username, password and position are required.");
         return;
     }
 
