@@ -769,6 +769,12 @@ public:
             errorOut);
     }
 
+    bool ClearChatMessages(std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        return db.Execute(L"DELETE FROM chat_messages", {}, errorOut);
+    }
+
     json Notes(std::wstring& errorOut)
     {
         OdbcConnection db(m_config.databaseConnectionString);
@@ -1009,6 +1015,8 @@ public:
                 return HandleGetChat();
             if (req.method == "POST" && req.path == "/api/chat")
                 return HandlePostChat(req, user);
+            if (req.method == "DELETE" && req.path == "/api/chat")
+                return HandleClearChat(user);
             if (req.method == "GET" && req.path == "/api/notes")
                 return HandleGetNotes();
             if (req.method == "POST" && req.path == "/api/notes")
@@ -1117,6 +1125,17 @@ private:
         if (!m_database.AddChatMessage(user, text, error))
             return ErrorResponse(500, error);
         return JsonResponse(201, { { "ok", true } });
+    }
+
+    HttpResponse HandleClearChat(const UserRecord& user)
+    {
+        if (!CanEditGlobalSettings(user))
+            return ErrorResponse(403, L"Only Administrators and Supervisors can clear responder chat.", "forbidden");
+
+        std::wstring error;
+        if (!m_database.ClearChatMessages(error))
+            return ErrorResponse(500, error, "database_error");
+        return JsonResponse(200, { { "ok", true } });
     }
 
     HttpResponse HandleGetNotes()

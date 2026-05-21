@@ -93,6 +93,15 @@ struct ChatMessage
     std::wstring timestamp;
 };
 
+struct OnlineUser
+{
+    std::wstring displayName;
+    std::wstring username;
+    std::wstring position;
+    std::wstring pod;
+    std::wstring lastSeen;
+};
+
 struct MapNote
 {
     std::wstring id;

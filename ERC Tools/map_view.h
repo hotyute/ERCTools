@@ -21,6 +21,7 @@ public:
     using RefreshCallback = std::function<void()>;
     using NotificationHistoryClearCallback = std::function<void()>;
     using ChatSendCallback = std::function<void(const std::wstring& text)>;
+    using ChatClearCallback = std::function<void()>;
 
     MapView();
     ~MapView();
@@ -43,9 +44,13 @@ public:
     void SetRefreshCallback(RefreshCallback cb);
     void SetNotificationHistoryClearCallback(NotificationHistoryClearCallback cb);
     void SetChatSendCallback(ChatSendCallback cb);
+    void SetChatClearCallback(ChatClearCallback cb);
+    void SetChatClearEnabled(bool enabled);
     void SetAlerts(const std::vector<TrafficAlert>& alerts);
     void SetNotes(const std::vector<MapNote>& notes);
     void SetChatMessages(const std::vector<ChatMessage>& messages);
+    void SetOnlineUsers(const std::vector<OnlineUser>& users);
+    void SetUsersVisible(bool visible);
     void SetNotificationPolygons(const std::vector<GeoPolygon>& polygons);
     void SetActiveNotificationPolygonIndex(size_t index);
     void SetDraftPolygon(const std::vector<GeoPoint>& points);

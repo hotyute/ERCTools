@@ -151,11 +151,7 @@ constexpr int IDC_TEMPLATES_EDITOR_NEW = 2624;
 constexpr int IDC_TEMPLATES_EDITOR_SAVE = 2625;
 constexpr int IDC_TEMPLATES_EDITOR_DELETE = 2626;
 constexpr int IDC_TEMPLATES_EDITOR_CLOSE = 2627;
-constexpr int IDC_USERS_LIST = 2641;
-constexpr int IDC_USERS_REFRESH_BTN = 2642;
-constexpr int IDC_USERS_CLOSE_BTN = 2643;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
-constexpr const wchar_t* kUsersClassName = L"TrafficEnglandUsersWindow";
 constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
 constexpr const wchar_t* kIncidentNotificationsClassName = L"TrafficEnglandIncidentNotificationsWindow";
 constexpr const wchar_t* kIncidentsListClassName = L"TrafficEnglandIncidentsListWindow";
@@ -217,15 +213,6 @@ struct WeatherSystemsResult
     std::vector<WeatherSystemEvent> systems;
 };
 
-struct OnlineUser
-{
-    std::wstring displayName;
-    std::wstring username;
-    std::wstring position;
-    std::wstring pod;
-    std::wstring lastSeen;
-};
-
 enum class ServerAction
 {
     Poll,
@@ -233,7 +220,7 @@ enum class ServerAction
     SendNote,
     UpdateNote,
     DeleteNote,
-    FetchUsers
+    ClearChat
 };
 
 struct ServerResult
@@ -242,6 +229,7 @@ struct ServerResult
     bool ok = false;
     bool chatOk = false;
     bool notesOk = false;
+    bool usersOk = false;
     std::wstring error;
     std::vector<ChatMessage> chat;
     std::vector<MapNote> notes;
@@ -1745,12 +1733,18 @@ private:
         m_map.SetChatSendCallback([this](const std::wstring& text) {
             SendChatTextAsync(text);
             });
+        m_map.SetChatClearCallback([this]() {
+            ClearResponderChatAsync();
+            });
+        m_map.SetChatClearEnabled(CanClearResponderChat());
         m_map.SetNotificationPolygons(m_incidentNotificationRegions);
         m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
+        m_map.SetUsersVisible(m_showUsersOverlay);
         m_map.SetEarthquakeOverlayVisible(m_showEarthquakes && m_showEarthquakeOverlayLabels);
         m_map.SetWeatherSystemOverlayVisible(m_showWeatherSystems && m_showWeatherSystemOverlayLabels);
         m_map.SetDisplayWorldMap(m_displayWorldMap);
         RenderChatHistory();
+        RenderOnlineUsers();
         RenderNotificationHistory();
 
         Layout();
@@ -1874,7 +1868,7 @@ private:
             break;
 
         case IDM_FILE_USERS:
-            ShowUsersWindow();
+            ToggleUsersOverlay();
             break;
 
         case IDM_FILE_LOGOUT:
@@ -2103,6 +2097,12 @@ private:
     bool IsOnlineMode() const
     {
         return IsOnlineSession(m_session);
+    }
+
+    bool CanClearResponderChat() const
+    {
+        std::wstring role = ToLower(Trim(m_session.position));
+        return role == L"administrator" || role == L"admin" || role == L"supervisor" || role == L"sup";
     }
 
     void LogoutOnlineSession()
@@ -3339,6 +3339,12 @@ private:
             m_map.SetChatMessages(m_chatMessages);
     }
 
+    void RenderOnlineUsers()
+    {
+        if (m_map.Hwnd())
+            m_map.SetOnlineUsers(m_onlineUsers);
+    }
+
     void PollServerAsync()
     {
         if (!IsOnlineMode())
@@ -3391,6 +3397,24 @@ private:
             }
             else if (result->error.empty()) {
                 result->error = L"Notes poll failed: " + noteError;
+            }
+
+            std::string usersBody;
+            std::wstring usersError;
+            if (HttpGetTextWithHeaders(AppendPath(server, L"/api/users/online"), authHeaders, usersBody, usersError)) {
+                try {
+                    result->users = ParseOnlineUsers(json::parse(usersBody));
+                    result->usersOk = true;
+                    result->ok = true;
+                }
+                catch (const std::exception& e) {
+                    if (!result->error.empty())
+                        result->error += L" ";
+                    result->error += L"Online users parse failed: " + Utf8ToWide(e.what());
+                }
+            }
+            else if (result->error.empty()) {
+                result->error = L"Online users poll failed: " + usersError;
             }
 
             if (g_appQuitting.load() || !IsWindow(hwnd)) {
@@ -3492,6 +3516,45 @@ private:
             std::wstring error;
             std::string body = "{\"author\":" + JsonEscape(author) + ",\"text\":" + JsonEscape(text) + "}";
             result->ok = HttpPostJsonTextWithHeaders(AppendPath(server, L"/api/chat"), body, authHeaders, response, error);
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            });
+    }
+
+    void ClearResponderChatAsync()
+    {
+        if (!CanClearResponderChat()) {
+            SetStatusText(L"Only Administrators and Supervisors can clear responder chat.");
+            return;
+        }
+
+        if (m_chatMessages.empty())
+            return;
+
+        if (!IsOnlineMode()) {
+            m_chatMessages.clear();
+            RenderChatHistory();
+            SetStatusText(L"Responder chat cleared locally.");
+            return;
+        }
+
+        std::wstring server = ServerBaseUrl();
+        if (server.empty()) {
+            SetStatusText(L"Responder chat clear failed: no collaboration server configured.");
+            return;
+        }
+
+        HWND hwnd = m_hwnd;
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ScheduleBackgroundTask([hwnd, server, authHeaders]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::ClearChat;
+            std::string response;
+            std::wstring error;
+            result->ok = HttpDeleteTextWithHeaders(AppendPath(server, L"/api/chat"), authHeaders, response, error);
             result->error = error;
             if (!g_appQuitting.load() && IsWindow(hwnd))
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
@@ -3674,10 +3737,7 @@ private:
 
     void OnServerReady(ServerResult* result)
     {
-        if (result && result->action == ServerAction::FetchUsers)
-            m_usersRequestInProgress.store(false);
-        else
-            m_serverRequestInProgress.store(false);
+        m_serverRequestInProgress.store(false);
         if (!result)
             return;
 
@@ -3695,9 +3755,25 @@ private:
                     m_map.SetNotes(m_notes);
                 }
             }
+
+            if (result->usersOk) {
+                m_onlineUsers = std::move(result->users);
+                RenderOnlineUsers();
+            }
         }
         else if (result->action == ServerAction::SendChat) {
             SetStatusText(result->ok ? L"Chat message sent." : L"Chat send failed; kept locally.");
+            PollServerAsync();
+        }
+        else if (result->action == ServerAction::ClearChat) {
+            if (result->ok) {
+                m_chatMessages.clear();
+                RenderChatHistory();
+                SetStatusText(L"Responder chat cleared.");
+            }
+            else {
+                SetStatusText(result->error.empty() ? L"Responder chat clear failed." : L"Responder chat clear failed: " + result->error);
+            }
             PollServerAsync();
         }
         else if (result->action == ServerAction::SendNote) {
@@ -3712,17 +3788,6 @@ private:
             SetStatusText(result->ok ? L"Map note deleted." : L"Note delete kept locally.");
             PollServerAsync();
         }
-        else if (result->action == ServerAction::FetchUsers) {
-            if (result->ok) {
-                m_onlineUsers = std::move(result->users);
-                RenderUsersList();
-                SetStatusText(L"Loaded " + std::to_wstring(m_onlineUsers.size()) + L" online user(s).");
-            }
-            else {
-                SetStatusText(result->error.empty() ? L"Could not load online users." : L"Online users failed: " + result->error);
-            }
-        }
-
         delete result;
     }
 
@@ -3814,7 +3879,7 @@ private:
         HMENU weatherMenu = CreatePopupMenu();
         HMENU viewMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_SETTINGS, L"Settings...");
-        AppendMenuW(fileMenu, MF_STRING, IDM_FILE_USERS, L"Users...");
+        AppendMenuW(fileMenu, MF_STRING, IDM_FILE_USERS, L"Users");
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_LOGOUT, L"Logout");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
@@ -3892,217 +3957,6 @@ private:
             L"ERC Tools\n\nView live alerts on a UK map, collaborate with local responders, and share map notes.",
             L"About ERC Tools",
             MB_OK | MB_ICONINFORMATION);
-    }
-
-    static LRESULT CALLBACK UsersWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-    {
-        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        if (msg == WM_NCCREATE) {
-            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-        }
-        return self ? self->HandleUsersMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
-    }
-
-    LRESULT HandleUsersMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-    {
-        switch (msg) {
-        case WM_CREATE:
-            CreateUsersControls(hwnd);
-            return 0;
-        case WM_COMMAND:
-            if (LOWORD(wParam) == IDC_USERS_REFRESH_BTN && HIWORD(wParam) == BN_CLICKED) {
-                RefreshOnlineUsersAsync();
-                return 0;
-            }
-            if (LOWORD(wParam) == IDC_USERS_CLOSE_BTN && HIWORD(wParam) == BN_CLICKED) {
-                ShowWindow(hwnd, SW_HIDE);
-                return 0;
-            }
-            return 0;
-        case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLORBTN:
-            return HandleModernCtlColor(msg, wParam);
-        case WM_DRAWITEM:
-            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
-        case WM_CLOSE:
-            ShowWindow(hwnd, SW_HIDE);
-            return 0;
-        }
-        return DefWindowProcW(hwnd, msg, wParam, lParam);
-    }
-
-    void ShowUsersWindow()
-    {
-        static bool registered = false;
-        if (!registered) {
-            WNDCLASSEXW wc{};
-            wc.cbSize = sizeof(wc);
-            wc.lpfnWndProc = UsersWndProc;
-            wc.hInstance = m_hInst;
-            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = ModernWindowBrush();
-            wc.lpszClassName = kUsersClassName;
-            RegisterClassExW(&wc);
-            registered = true;
-        }
-
-        if (!m_usersWnd || !IsWindow(m_usersWnd)) {
-            m_usersWnd = CreateWindowExW(
-                WS_EX_TOOLWINDOW,
-                kUsersClassName,
-                L"Users",
-                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                760,
-                430,
-                m_hwnd,
-                nullptr,
-                m_hInst,
-                this);
-        }
-
-        RenderUsersList();
-        ShowWindow(m_usersWnd, SW_SHOW);
-        SetForegroundWindow(m_usersWnd);
-        RefreshOnlineUsersAsync();
-    }
-
-    void CreateUsersControls(HWND parent)
-    {
-        CreateAutoLabel(parent, 0, L"Users", 18, 18, m_headerFont);
-        CreateAutoLabel(parent, 0, L"Currently online ERC Tools sessions.", 18, 54, nullptr, 480);
-
-        m_usersListView = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
-            WC_LISTVIEWW,
-            L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            18,
-            92,
-            704,
-            240,
-            parent,
-            ControlId(IDC_USERS_LIST),
-            m_hInst,
-            nullptr);
-
-        HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 350, 112, 32, parent, ControlId(IDC_USERS_REFRESH_BTN), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 610, 350, 112, 32, parent, ControlId(IDC_USERS_CLOSE_BTN), m_hInst, nullptr);
-
-        for (HWND h : { m_usersListView, refreshBtn, closeBtn }) {
-            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
-            ApplyExplorerTheme(h);
-        }
-
-        SendMessageW(m_usersListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_INFOTIP);
-        ListView_SetBkColor(m_usersListView, kUiSurface);
-        ListView_SetTextBkColor(m_usersListView, CLR_NONE);
-        ListView_SetTextColor(m_usersListView, kUiText);
-
-        LVCOLUMNW col{};
-        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-        std::wstring c0 = L"Display Name";
-        col.pszText = const_cast<LPWSTR>(c0.c_str());
-        col.cx = 170;
-        SendMessageW(m_usersListView, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&col));
-        std::wstring c1 = L"Username";
-        col.pszText = const_cast<LPWSTR>(c1.c_str());
-        col.cx = 150;
-        SendMessageW(m_usersListView, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&col));
-        std::wstring c2 = L"Position";
-        col.pszText = const_cast<LPWSTR>(c2.c_str());
-        col.cx = 130;
-        SendMessageW(m_usersListView, LVM_INSERTCOLUMNW, 2, reinterpret_cast<LPARAM>(&col));
-        std::wstring c3 = L"Pod";
-        col.pszText = const_cast<LPWSTR>(c3.c_str());
-        col.cx = 90;
-        SendMessageW(m_usersListView, LVM_INSERTCOLUMNW, 3, reinterpret_cast<LPARAM>(&col));
-        std::wstring c4 = L"Last Seen";
-        col.pszText = const_cast<LPWSTR>(c4.c_str());
-        col.cx = 150;
-        SendMessageW(m_usersListView, LVM_INSERTCOLUMNW, 4, reinterpret_cast<LPARAM>(&col));
-
-        RenderUsersList();
-    }
-
-    void RefreshOnlineUsersAsync()
-    {
-        if (!m_usersListView)
-            return;
-
-        if (!IsOnlineMode()) {
-            m_onlineUsers.clear();
-            RenderUsersList();
-            SetStatusText(L"Offline mode: online users are unavailable.");
-            return;
-        }
-
-        if (m_usersRequestInProgress.exchange(true))
-            return;
-
-        std::wstring server = ServerBaseUrl();
-        if (server.empty()) {
-            m_usersRequestInProgress.store(false);
-            SetStatusText(L"Online users failed: no collaboration server configured.");
-            return;
-        }
-
-        HWND hwnd = m_hwnd;
-        std::wstring authHeaders = BearerAuthHeader(m_session);
-        ScheduleBackgroundTask([hwnd, server, authHeaders]() {
-            auto* result = new ServerResult{};
-            result->action = ServerAction::FetchUsers;
-            std::string body;
-            std::wstring error;
-            if (HttpGetTextWithHeaders(AppendPath(server, L"/api/users/online"), authHeaders, body, error)) {
-                try {
-                    result->users = ParseOnlineUsers(json::parse(body));
-                    result->ok = true;
-                }
-                catch (const std::exception& e) {
-                    result->error = L"Online users parse failed: " + Utf8ToWide(e.what());
-                }
-            }
-            else {
-                result->error = L"Online users request failed: " + error;
-            }
-
-            if (!g_appQuitting.load() && IsWindow(hwnd))
-                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
-            else
-                delete result;
-            });
-    }
-
-    void RenderUsersList()
-    {
-        if (!m_usersListView)
-            return;
-
-        SendMessageW(m_usersListView, LVM_DELETEALLITEMS, 0, 0);
-        for (size_t i = 0; i < m_onlineUsers.size(); ++i) {
-            const OnlineUser& user = m_onlineUsers[i];
-            std::wstring display = user.displayName.empty() ? user.username : user.displayName;
-            LVITEMW item{};
-            item.mask = LVIF_TEXT;
-            item.iItem = static_cast<int>(i);
-            item.pszText = const_cast<LPWSTR>(display.c_str());
-            int row = static_cast<int>(SendMessageW(m_usersListView, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
-
-            auto setSub = [&](int subItem, const std::wstring& text) {
-                LVITEMW sub{};
-                sub.iSubItem = subItem;
-                sub.pszText = const_cast<LPWSTR>(text.c_str());
-                SendMessageW(m_usersListView, LVM_SETITEMTEXTW, row, reinterpret_cast<LPARAM>(&sub));
-                };
-            setSub(1, user.username);
-            setSub(2, user.position);
-            setSub(3, user.pod);
-            setSub(4, user.lastSeen);
-        }
     }
 
     static LRESULT CALLBACK IncidentFiltersWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -6779,6 +6633,15 @@ private:
         SaveSettings();
     }
 
+    void ToggleUsersOverlay()
+    {
+        m_showUsersOverlay = !m_showUsersOverlay;
+        m_map.SetUsersVisible(m_showUsersOverlay);
+        RenderOnlineUsers();
+        if (m_showUsersOverlay)
+            PollServerAsync();
+    }
+
     void ToggleShowEarthquakes()
     {
         m_showEarthquakes = !m_showEarthquakes;
@@ -8052,8 +7915,6 @@ private:
     HWND m_listView = nullptr;
     HWND m_detailsEdit = nullptr;
     HWND m_settingsWnd = nullptr;
-    HWND m_usersWnd = nullptr;
-    HWND m_usersListView = nullptr;
     HWND m_incidentFiltersWnd = nullptr;
     HWND m_incidentNotificationsWnd = nullptr;
     HWND m_notificationRegionsWnd = nullptr;
@@ -8148,6 +8009,7 @@ private:
     bool m_syncingControls = false;
     bool m_isSidePanelVisible = true;
     bool m_showNotificationHistory = false;
+    bool m_showUsersOverlay = false;
     bool m_alertFilterUnplannedOnly = true;
     bool m_incidentFilterSevere = true;
     bool m_incidentFilterModerate = true;
@@ -8185,7 +8047,6 @@ private:
     std::wstring m_refreshIntervalText = L"300s";
     UINT m_refreshIntervalMs = 5 * 60 * 1000;
     std::atomic_bool m_serverRequestInProgress{ false };
-    std::atomic_bool m_usersRequestInProgress{ false };
     std::atomic_bool m_earthquakeFetchInProgress{ false };
     bool m_notificationIconAdded = false;
     bool m_logoutRequested = false;

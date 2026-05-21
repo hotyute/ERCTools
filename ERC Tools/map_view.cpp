@@ -136,6 +136,7 @@ public:
     using RefreshCallback = std::function<void()>;
     using NotificationHistoryClearCallback = std::function<void()>;
     using ChatSendCallback = std::function<void(const std::wstring& text)>;
+    using ChatClearCallback = std::function<void()>;
 
     bool Create(HWND parent, int x, int y, int w, int h)
     {
@@ -216,6 +217,20 @@ public:
         m_onChatSend = std::move(cb);
     }
 
+    void SetChatClearCallback(ChatClearCallback cb)
+    {
+        m_onChatClear = std::move(cb);
+    }
+
+    void SetChatClearEnabled(bool enabled)
+    {
+        if (m_canClearResponderChat == enabled)
+            return;
+
+        m_canClearResponderChat = enabled;
+        Invalidate();
+    }
+
     void SetAlerts(const std::vector<TrafficAlert>& alerts)
     {
         m_alerts = alerts;
@@ -238,6 +253,24 @@ public:
     void SetChatMessages(const std::vector<ChatMessage>& messages)
     {
         m_chatMessages = messages;
+        Invalidate();
+    }
+
+    void SetOnlineUsers(const std::vector<OnlineUser>& users)
+    {
+        m_onlineUsers = users;
+        Invalidate();
+    }
+
+    void SetUsersVisible(bool visible)
+    {
+        if (m_showUsersPanel == visible)
+            return;
+
+        m_showUsersPanel = visible;
+        if (visible)
+            m_usersPanelCollapsed = false;
+        StartUsersPanelAnimation(visible ? 1.0f : 0.0f);
         Invalidate();
     }
 
@@ -400,6 +433,15 @@ public:
         EnsureOverlayAnimationTimer();
     }
 
+    void StartUsersPanelAnimation(float target)
+    {
+        m_usersPanelAnimationStart = m_usersPanelOpenProgress;
+        m_usersPanelAnimationTarget = ClampValue(target, 0.0f, 1.0f);
+        m_usersPanelAnimationStartMs = GetTickCount64();
+        m_usersPanelAnimating = true;
+        EnsureOverlayAnimationTimer();
+    }
+
     static bool AdvanceAnimatedValue(float& value, float start, float target, ULONGLONG startMs)
     {
         const ULONGLONG now = GetTickCount64();
@@ -449,6 +491,16 @@ public:
                 m_responderChatAnimationTarget,
                 m_responderChatAnimationStartMs);
             m_responderChatAnimating = !done;
+            anyRunning = anyRunning || !done;
+        }
+
+        if (m_usersPanelAnimating) {
+            const bool done = AdvanceAnimatedValue(
+                m_usersPanelOpenProgress,
+                m_usersPanelAnimationStart,
+                m_usersPanelAnimationTarget,
+                m_usersPanelAnimationStartMs);
+            m_usersPanelAnimating = !done;
             anyRunning = anyRunning || !done;
         }
 
@@ -724,11 +776,14 @@ private:
 
         case WM_LBUTTONDOWN:
             SetFocus(m_hwnd);
+            if (HandleUsersPanelPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
             if (HandleResponderChatPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             if (HandleNotificationPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
-            if (HitResponderChatInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
+            if (HitUsersPanelInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
+                HitResponderChatInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
                 HitNotificationInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
                 SetCapture(m_hwnd);
                 m_notificationUiMouseDown = true;
@@ -1626,7 +1681,7 @@ private:
             return;
         }
 
-        if (m_notificationUiMouseDown || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
+        if (m_notificationUiMouseDown || HitUsersPanelInterface(x, y) || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
             if (!m_hoveredAlertId.empty() || !m_hoveredEarthquakeId.empty() || !m_hoveredWeatherSystemId.empty()) {
                 m_hoveredAlertId.clear();
                 m_hoveredEarthquakeId.clear();
@@ -1706,7 +1761,7 @@ private:
             return;
         }
 
-        if (m_notificationUiMouseDown || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
+        if (m_notificationUiMouseDown || HitUsersPanelInterface(x, y) || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
             m_notificationUiMouseDown = false;
             m_dragging = false;
             m_interactivePan = false;
@@ -1739,7 +1794,7 @@ private:
 
     void OnDoubleClick(int x, int y)
     {
-        if (HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y))
+        if (HitUsersPanelInterface(x, y) || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y))
             return;
 
         GeoPoint geo = ScreenToGeo(x, y);
@@ -1751,6 +1806,8 @@ private:
         POINT pt{ screenX, screenY };
         ScreenToClient(m_hwnd, &pt);
 
+        if (HitUsersPanelInterface(pt.x, pt.y))
+            return;
         if (HitResponderChatInterface(pt.x, pt.y))
             return;
 
@@ -2371,7 +2428,17 @@ private:
         D2D1_RECT_F contentRect{};
         D2D1_RECT_F inputRect{};
         D2D1_RECT_F sendRect{};
+        D2D1_RECT_F clearRect{};
         float progress = 1.0f;
+    };
+
+    struct UsersPanelLayout
+    {
+        D2D1_RECT_F panelRect{};
+        D2D1_RECT_F toggleRect{};
+        D2D1_RECT_F contentRect{};
+        float progress = 0.0f;
+        bool hasPanel = false;
     };
 
     ResponderChatLayout BuildResponderChatLayout(const ViewState& view) const
@@ -2398,6 +2465,11 @@ private:
             layout.panelRect.bottom - kOverlayUiPadding - 32.0f,
             layout.panelRect.right - kOverlayUiPadding,
             layout.panelRect.bottom - kOverlayUiPadding);
+        layout.clearRect = D2D1::RectF(
+            layout.panelRect.right - kOverlayUiPadding - 72.0f,
+            layout.panelRect.top + kOverlayUiPadding - 2.0f,
+            layout.panelRect.right - kOverlayUiPadding,
+            layout.panelRect.top + kOverlayUiPadding + 25.0f);
         layout.inputRect = D2D1::RectF(
             layout.panelRect.left + kOverlayUiPadding,
             layout.sendRect.top,
@@ -2408,6 +2480,39 @@ private:
             layout.panelRect.top + 52.0f,
             layout.panelRect.right - kOverlayUiPadding,
             layout.inputRect.top - 10.0f);
+        return layout;
+    }
+
+    UsersPanelLayout BuildUsersPanelLayout(const ViewState& view) const
+    {
+        UsersPanelLayout layout;
+        if (!m_showUsersPanel)
+            return layout;
+
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float panelW = ClampValue(width * 0.20f, 230.0f, 300.0f);
+        const float panelH = ClampValue(height * 0.36f, 220.0f, 360.0f);
+        const float clippedPanelW = MinValue(panelW, MaxValue(190.0f, width - kOverlayUiMargin * 2.0f));
+        const float clippedPanelH = MinValue(panelH, MaxValue(170.0f, height - kOverlayUiMargin * 2.0f - 120.0f));
+        const float tabW = 32.0f;
+
+        layout.progress = ClampValue(m_usersPanelOpenProgress, 0.0f, 1.0f);
+        const float offset = (1.0f - layout.progress) * MaxValue(0.0f, clippedPanelW - tabW);
+        const float left = kOverlayUiMargin - offset;
+        const float top = kOverlayUiMargin + 64.0f;
+        layout.panelRect = D2D1::RectF(left, top, left + clippedPanelW, top + clippedPanelH);
+        layout.toggleRect = D2D1::RectF(
+            layout.panelRect.right - 8.0f,
+            layout.panelRect.top + 10.0f,
+            layout.panelRect.right + 22.0f,
+            layout.panelRect.top + 38.0f);
+        layout.contentRect = D2D1::RectF(
+            layout.panelRect.left + kOverlayUiPadding,
+            layout.panelRect.top + 58.0f,
+            layout.panelRect.right - kOverlayUiPadding,
+            layout.panelRect.bottom - kOverlayUiPadding);
+        layout.hasPanel = true;
         return layout;
     }
 
@@ -2449,6 +2554,144 @@ private:
         if (role == L"manager")
             return m_weatherSystemBrush.Get();
         return m_overlayUi.TextBrush();
+    }
+
+    ID2D1Brush* UserRoleBrush(const OnlineUser& user) const
+    {
+        ChatMessage msg;
+        msg.position = user.position;
+        return ChatRoleBrush(msg);
+    }
+
+    std::wstring UserRolePrefixText(const OnlineUser& user) const
+    {
+        ChatMessage msg;
+        msg.position = user.position;
+        return ChatRolePrefixText(msg);
+    }
+
+    std::wstring UserDisplayText(const OnlineUser& user) const
+    {
+        std::wstring name = user.displayName.empty() ? user.username : user.displayName;
+        if (name.empty())
+            name = L"Unknown";
+
+        std::wstring text = name;
+        if (!user.pod.empty())
+            text += L" - " + user.pod;
+        return text;
+    }
+
+    bool HitUsersPanelInterface(int x, int y) const
+    {
+        const UsersPanelLayout layout = BuildUsersPanelLayout(BuildViewState());
+        if (!layout.hasPanel)
+            return false;
+        if (PointInRect(x, y, layout.toggleRect))
+            return true;
+        return layout.progress > 0.04f && PointInRect(x, y, layout.panelRect);
+    }
+
+    bool HandleUsersPanelPointerDown(int x, int y)
+    {
+        const UsersPanelLayout layout = BuildUsersPanelLayout(BuildViewState());
+        if (!layout.hasPanel)
+            return false;
+
+        if (PointInRect(x, y, layout.toggleRect)) {
+            m_usersPanelCollapsed = !m_usersPanelCollapsed;
+            StartUsersPanelAnimation(m_usersPanelCollapsed ? 0.0f : 1.0f);
+            Invalidate();
+            return true;
+        }
+
+        return layout.progress > 0.04f && PointInRect(x, y, layout.panelRect);
+    }
+
+    void DrawUsersPanel(const ViewState& view)
+    {
+        if (!m_showUsersPanel || !m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return;
+
+        const UsersPanelLayout layout = BuildUsersPanelLayout(view);
+        if (!layout.hasPanel)
+            return;
+
+        const OverlayButton toggleButton{ 0, m_usersPanelCollapsed ? L">" : L"<", layout.toggleRect, true, false, false };
+        if (layout.progress <= 0.04f) {
+            m_overlayUi.DrawButton(toggleButton);
+            return;
+        }
+
+        if (layout.panelRect.right - layout.panelRect.left < 160.0f ||
+            layout.panelRect.bottom - layout.panelRect.top < 150.0f)
+        {
+            return;
+        }
+
+        m_overlayUi.DrawGlassPanel(layout.panelRect, 12.0f);
+        m_overlayUi.DrawButton(toggleButton);
+
+        D2D1_RECT_F titleRect = D2D1::RectF(
+            layout.panelRect.left + kOverlayUiPadding,
+            layout.panelRect.top + kOverlayUiPadding - 1.0f,
+            layout.panelRect.right - kOverlayUiPadding - 12.0f,
+            layout.panelRect.top + kOverlayUiPadding + 22.0f);
+        m_overlayUi.DrawLabel(L"Users", m_overlayUi.TitleFormat(), titleRect);
+
+        std::wstring countText = m_onlineUsers.empty()
+            ? L"No online users"
+            : std::to_wstring(m_onlineUsers.size()) + L" online";
+        D2D1_RECT_F countRect = D2D1::RectF(
+            layout.panelRect.left + kOverlayUiPadding,
+            layout.panelRect.top + kOverlayUiPadding + 23.0f,
+            layout.panelRect.right - kOverlayUiPadding,
+            layout.panelRect.top + kOverlayUiPadding + 43.0f);
+        m_overlayUi.DrawLabel(countText, m_overlayUi.SmallFormat(), countRect, m_overlayUi.MutedTextBrush());
+        m_overlayUi.DrawSeparator(layout.panelRect.left + kOverlayUiPadding, layout.panelRect.right - kOverlayUiPadding, layout.panelRect.top + 52.0f);
+
+        m_rt->PushAxisAlignedClip(layout.contentRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        if (m_onlineUsers.empty()) {
+            D2D1_RECT_F emptyRect = D2D1::RectF(layout.contentRect.left, layout.contentRect.top + 6.0f, layout.contentRect.right, layout.contentRect.top + 42.0f);
+            m_overlayUi.DrawLabel(L"No online users.", m_overlayUi.BodyFormat(), emptyRect, m_overlayUi.MutedTextBrush());
+        }
+        else {
+            const float contentW = MaxValue(1.0f, layout.contentRect.right - layout.contentRect.left);
+            float y = layout.contentRect.top + 4.0f;
+            for (const OnlineUser& user : m_onlineUsers) {
+                if (y > layout.contentRect.bottom - 10.0f)
+                    break;
+
+                const std::wstring prefix = UserRolePrefixText(user);
+                const std::wstring display = UserDisplayText(user);
+                const float prefixW = prefix.empty()
+                    ? 0.0f
+                    : m_overlayUi.MeasureTextWidth(prefix + L" ", m_overlayUi.BodyFormat(), contentW);
+                const float bodyW = MaxValue(1.0f, contentW - prefixW);
+                const float bodyH = MaxValue(18.0f, m_overlayUi.MeasureTextHeight(display, m_overlayUi.BodyFormat(), bodyW));
+                const std::wstring sub = user.position.empty()
+                    ? user.lastSeen
+                    : user.position + (user.lastSeen.empty() ? L"" : L" - " + user.lastSeen);
+                const float subH = sub.empty()
+                    ? 0.0f
+                    : MaxValue(14.0f, m_overlayUi.MeasureTextHeight(sub, m_overlayUi.SmallFormat(), contentW));
+                const float rowH = bodyH + (subH > 0.0f ? subH + 3.0f : 0.0f) + 10.0f;
+
+                D2D1_RECT_F prefixRect = D2D1::RectF(layout.contentRect.left, y, layout.contentRect.left + prefixW, y + bodyH + 2.0f);
+                D2D1_RECT_F bodyRect = D2D1::RectF(layout.contentRect.left + prefixW, y, layout.contentRect.right, y + bodyH + 2.0f);
+                if (!prefix.empty())
+                    m_overlayUi.DrawLabel(prefix, m_overlayUi.BodyFormat(), prefixRect, UserRoleBrush(user));
+                m_overlayUi.DrawLabel(display, m_overlayUi.BodyFormat(), bodyRect);
+                if (!sub.empty()) {
+                    D2D1_RECT_F subRect = D2D1::RectF(layout.contentRect.left, y + bodyH + 3.0f, layout.contentRect.right, y + bodyH + subH + 5.0f);
+                    m_overlayUi.DrawLabel(sub, m_overlayUi.SmallFormat(), subRect, m_overlayUi.MutedTextBrush());
+                }
+
+                m_overlayUi.DrawSeparator(layout.contentRect.left, layout.contentRect.right, y + rowH - 4.0f);
+                y += rowH;
+            }
+        }
+        m_rt->PopAxisAlignedClip();
     }
 
     std::wstring ChatTimestampText(const ChatMessage& msg) const
@@ -2582,6 +2825,13 @@ private:
         if (layout.progress <= 0.04f || !PointInRect(x, y, layout.panelRect))
             return false;
 
+        if (PointInRect(x, y, layout.clearRect)) {
+            if (m_canClearResponderChat && !m_chatMessages.empty() && m_onChatClear)
+                m_onChatClear();
+            Invalidate();
+            return true;
+        }
+
         if (PointInRect(x, y, layout.sendRect)) {
             SubmitResponderChatDraft();
             m_responderChatInputFocused = true;
@@ -2658,9 +2908,11 @@ private:
         D2D1_RECT_F titleRect = D2D1::RectF(
             layout.panelRect.left + kOverlayUiPadding + 30.0f,
             layout.panelRect.top + kOverlayUiPadding - 2.0f,
-            layout.panelRect.right - kOverlayUiPadding,
+            layout.clearRect.left - 8.0f,
             layout.panelRect.top + kOverlayUiPadding + 22.0f);
         m_overlayUi.DrawLabel(L"Responders Chat", m_overlayUi.TitleFormat(), titleRect);
+        if (m_canClearResponderChat)
+            m_overlayUi.DrawButton(OverlayButton{ 0, L"Clear", layout.clearRect, !m_chatMessages.empty(), false, false });
 
         std::wstring countText = m_chatMessages.empty()
             ? L"No responder messages yet"
@@ -3723,6 +3975,7 @@ private:
             DrawAlertOverlay(overlayView);
             DrawNoteInterface(view);
             DrawNotificationInterface(view);
+            DrawUsersPanel(view);
             DrawResponderChat(view);
 
             HRESULT hr = m_rt->EndDraw();
@@ -4152,6 +4405,7 @@ private:
     std::vector<TrafficAlert> m_alerts;
     std::vector<MapNote> m_notes;
     std::vector<ChatMessage> m_chatMessages;
+    std::vector<OnlineUser> m_onlineUsers;
     std::vector<GeoPolygon> m_notificationPolygons;
     std::vector<GeoPoint> m_draftPolygon;
     std::vector<EarthquakeEvent> m_earthquakes;
@@ -4168,6 +4422,7 @@ private:
     RefreshCallback m_onRefresh;
     NotificationHistoryClearCallback m_onNotificationHistoryClear;
     ChatSendCallback m_onChatSend;
+    ChatClearCallback m_onChatClear;
 
     int m_zoom = kDefaultZoom;
     double m_centerLat = kDefaultCenterLat;
@@ -4217,12 +4472,20 @@ private:
     bool m_draggingNotificationHistoryScrollbar = false;
     bool m_responderChatCollapsed = false;
     bool m_responderChatInputFocused = false;
+    bool m_canClearResponderChat = false;
     float m_responderChatOpenProgress = 1.0f;
     float m_responderChatAnimationStart = 1.0f;
     float m_responderChatAnimationTarget = 1.0f;
     ULONGLONG m_responderChatAnimationStartMs = 0;
     bool m_responderChatAnimating = false;
     std::wstring m_responderChatDraft;
+    bool m_showUsersPanel = false;
+    bool m_usersPanelCollapsed = false;
+    float m_usersPanelOpenProgress = 0.0f;
+    float m_usersPanelAnimationStart = 0.0f;
+    float m_usersPanelAnimationTarget = 0.0f;
+    ULONGLONG m_usersPanelAnimationStartMs = 0;
+    bool m_usersPanelAnimating = false;
     float m_notificationHistoryScroll = 0.0f;
     float m_notificationHistoryScrollbarDragOffset = 0.0f;
     D2D1_RECT_F m_lastActiveNotificationRect{};
@@ -4341,6 +4604,16 @@ void MapView::SetChatSendCallback(ChatSendCallback cb)
     m_impl->SetChatSendCallback(std::move(cb));
 }
 
+void MapView::SetChatClearCallback(ChatClearCallback cb)
+{
+    m_impl->SetChatClearCallback(std::move(cb));
+}
+
+void MapView::SetChatClearEnabled(bool enabled)
+{
+    m_impl->SetChatClearEnabled(enabled);
+}
+
 void MapView::SetAlerts(const std::vector<TrafficAlert>& alerts)
 {
     m_impl->SetAlerts(alerts);
@@ -4354,6 +4627,16 @@ void MapView::SetNotes(const std::vector<MapNote>& notes)
 void MapView::SetChatMessages(const std::vector<ChatMessage>& messages)
 {
     m_impl->SetChatMessages(messages);
+}
+
+void MapView::SetOnlineUsers(const std::vector<OnlineUser>& users)
+{
+    m_impl->SetOnlineUsers(users);
+}
+
+void MapView::SetUsersVisible(bool visible)
+{
+    m_impl->SetUsersVisible(visible);
 }
 
 void MapView::SetNotificationPolygons(const std::vector<GeoPolygon>& polygons)

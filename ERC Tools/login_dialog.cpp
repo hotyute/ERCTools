@@ -255,6 +255,8 @@ static std::wstring LoginErrorMessageForCode(std::wstring code, DWORD status)
         return L"This account is disabled.";
     if (code == L"position_not_allowed")
         return L"This account cannot sign in as the selected position.";
+    if (code == L"pod_mismatch")
+        return L"The server is still enforcing the stored account pod. Restart the updated ERC Tools Server.";
     if (code == L"pod_in_use")
         return L"Selected pod is already in use.";
     if (code == L"database_error")
@@ -269,7 +271,7 @@ static std::wstring LoginErrorMessageForCode(std::wstring code, DWORD status)
         return L"This account is not allowed to complete that action.";
 
     if (status == 401)
-        return L"Login details were not accepted.";
+        return L"Login was rejected by the server. If only the selected pod differs, restart the updated ERC Tools Server.";
     if (status == 403)
         return L"This account is not allowed to complete that action.";
     if (status >= 500)
