@@ -515,22 +515,21 @@ private:
 
 class Database
 {
-    struct SessionMetadata
-    {
-        std::wstring displayName;
-        std::wstring position;
-        std::wstring pod;
-    };
-
 public:
     explicit Database(ServerConfig config) : m_config(std::move(config)) {}
 
-    bool ValidateLogin(const std::wstring& username, const std::wstring& password, const std::wstring& displayName, const std::wstring& position, const std::wstring& pod, UserRecord& userOut, std::wstring& errorOut, std::string& codeOut)
+    bool ValidateLogin(const std::wstring& username, const std::wstring& password, const std::wstring& position, const std::wstring& pod, UserRecord& userOut, std::wstring& errorOut, std::string& codeOut)
     {
         codeOut.clear();
         OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureSessionContextColumns(db, errorOut)) {
+            errorOut = L"Database session schema check failed: " + errorOut;
+            codeOut = "database_error";
+            return false;
+        }
+
         auto rows = db.Query(
-            L"SELECT id, username, display_name, position, pod, password_salt, password_hash, password_iterations, active FROM users WHERE username = ? LIMIT 1",
+            L"SELECT id, username, display_name, position, password_salt, password_hash, password_iterations, active FROM users WHERE username = ? LIMIT 1",
             { username },
             errorOut);
         if (!errorOut.empty()) {
@@ -545,17 +544,17 @@ public:
         }
 
         const auto& row = rows.front();
-        if (row.size() < 9 || row[8] == L"0") {
+        if (row.size() < 8 || row[7] == L"0") {
             errorOut = L"This account is disabled.";
             codeOut = "account_disabled";
             return false;
         }
 
-        std::vector<unsigned char> salt = BytesFromHex(row[5]);
-        int iterations = row[7].empty() ? 150000 : _wtoi(row[7].c_str());
+        std::vector<unsigned char> salt = BytesFromHex(row[4]);
+        int iterations = row[6].empty() ? 150000 : _wtoi(row[6].c_str());
         std::string actualHash;
         if (salt.empty() || !DerivePasswordHash(password, salt, iterations, actualHash) ||
-            !ConstantTimeEquals(actualHash, WideToUtf8(ToLower(row[6]))))
+            !ConstantTimeEquals(actualHash, WideToUtf8(ToLower(row[5]))))
         {
             errorOut = L"Invalid username or password.";
             codeOut = "invalid_credentials";
@@ -570,14 +569,25 @@ public:
             codeOut = "position_not_allowed";
             return false;
         }
-        std::wstring sessionDisplayName = TrimWide(displayName);
         std::wstring sessionPod = TrimWide(pod);
+        bool podInUse = false;
+        if (!CheckPodInUse(db, sessionPod, podInUse, errorOut)) {
+            errorOut = L"Database pod availability check failed: " + errorOut;
+            codeOut = "database_error";
+            return false;
+        }
+        if (podInUse) {
+            errorOut = L"Selected pod is already in use.";
+            codeOut = "pod_in_use";
+            return false;
+        }
+
         userOut = UserRecord{
             row[0],
             row[1],
-            sessionDisplayName.empty() ? row[2] : sessionDisplayName,
+            row[2],
             requestedPosition,
-            sessionPod.empty() ? row[4] : sessionPod
+            sessionPod
         };
         db.Execute(L"UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", { userOut.id }, errorOut);
         errorOut.clear();
@@ -600,17 +610,26 @@ public:
             return false;
         }
 
+        std::lock_guard<std::mutex> sessionLock(m_sessionCreateMutex);
         OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureSessionContextColumns(db, errorOut))
+            return false;
+
+        bool podInUse = false;
+        if (!CheckPodInUse(db, user.pod, podInUse, errorOut))
+            return false;
+        if (podInUse) {
+            errorOut = L"Selected pod is already in use.";
+            return false;
+        }
+
         bool ok = db.Execute(
-            L"INSERT INTO user_sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? MINUTE), CURRENT_TIMESTAMP)",
-            { Utf8ToWide(tokenHash), user.id, std::to_wstring(m_config.sessionMinutes) },
+            L"INSERT INTO user_sessions (token_hash, user_id, session_display_name, session_position, session_pod, expires_at, created_at, last_seen_at) "
+            L"VALUES (?, ?, ?, ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? MINUTE), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            { Utf8ToWide(tokenHash), user.id, user.displayName, user.position, user.pod, std::to_wstring(m_config.sessionMinutes) },
             errorOut);
         if (!ok)
             return false;
-        {
-            std::lock_guard<std::mutex> lock(m_sessionMetaMutex);
-            m_sessionMetadata[tokenHash] = SessionMetadata{ user.displayName, user.position, user.pod };
-        }
         tokenOut = Utf8ToWide(token);
         return true;
     }
@@ -628,8 +647,16 @@ public:
         }
 
         OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureSessionContextColumns(db, errorOut)) {
+            errorOut = L"Database session schema check failed: " + errorOut;
+            return false;
+        }
+
         auto rows = db.Query(
-            L"SELECT u.id, u.username, u.display_name, u.position, u.pod "
+            L"SELECT u.id, u.username, "
+            L"COALESCE(NULLIF(s.session_display_name, ''), u.display_name), "
+            L"COALESCE(NULLIF(s.session_position, ''), u.position), "
+            L"COALESCE(NULLIF(s.session_pod, ''), u.pod) "
             L"FROM user_sessions s JOIN users u ON u.id = s.user_id "
             L"WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP AND u.active = 1 LIMIT 1",
             { Utf8ToWide(tokenHash) },
@@ -645,21 +672,71 @@ public:
 
         const auto& row = rows.front();
         userOut = UserRecord{ row[0], row[1], row[2], row[3], row[4] };
-        {
-            std::lock_guard<std::mutex> lock(m_sessionMetaMutex);
-            auto metaIt = m_sessionMetadata.find(tokenHash);
-            if (metaIt != m_sessionMetadata.end()) {
-                if (!metaIt->second.displayName.empty())
-                    userOut.displayName = metaIt->second.displayName;
-                if (!metaIt->second.position.empty())
-                    userOut.position = metaIt->second.position;
-                if (!metaIt->second.pod.empty())
-                    userOut.pod = metaIt->second.pod;
-            }
-        }
         db.Execute(L"UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?", { Utf8ToWide(tokenHash) }, errorOut);
         errorOut.clear();
         return true;
+    }
+
+    bool DeleteSession(const std::string& bearerToken, std::wstring& errorOut)
+    {
+        if (bearerToken.empty()) {
+            errorOut = L"Missing bearer token.";
+            return false;
+        }
+
+        std::string tokenHash;
+        if (!Sha256Hex(bearerToken, tokenHash)) {
+            errorOut = L"Could not hash bearer token.";
+            return false;
+        }
+
+        OdbcConnection db(m_config.databaseConnectionString);
+        return db.Execute(
+            L"DELETE FROM user_sessions WHERE token_hash = ?",
+            { Utf8ToWide(tokenHash) },
+            errorOut);
+    }
+
+    json OnlineUsers(std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureSessionContextColumns(db, errorOut)) {
+            errorOut = L"Database session schema check failed: " + errorOut;
+            return json::array();
+        }
+
+        auto rows = db.Query(
+            L"SELECT "
+            L"COALESCE(NULLIF(s.session_display_name, ''), u.display_name), "
+            L"u.username, "
+            L"COALESCE(NULLIF(s.session_position, ''), u.position), "
+            L"COALESCE(NULLIF(s.session_pod, ''), u.pod), "
+            L"DATE_FORMAT(COALESCE(s.last_seen_at, s.created_at), '%Y-%m-%d %H:%i:%s') "
+            L"FROM user_sessions s JOIN users u ON u.id = s.user_id "
+            L"WHERE s.expires_at > CURRENT_TIMESTAMP "
+            L"AND COALESCE(s.last_seen_at, s.created_at) >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 2 MINUTE) "
+            L"AND u.active = 1 "
+            L"ORDER BY COALESCE(NULLIF(s.session_pod, ''), u.pod), COALESCE(NULLIF(s.session_display_name, ''), u.display_name)",
+            {},
+            errorOut);
+        if (!errorOut.empty()) {
+            errorOut = L"Database online user lookup failed: " + errorOut;
+            return json::array();
+        }
+
+        json users = json::array();
+        for (const auto& row : rows) {
+            if (row.size() < 5)
+                continue;
+            users.push_back({
+                { "displayName", WideToUtf8(row[0]) },
+                { "username", WideToUtf8(row[1]) },
+                { "position", WideToUtf8(row[2]) },
+                { "pod", WideToUtf8(row[3]) },
+                { "lastSeen", WideToUtf8(row[4]) }
+                });
+        }
+        return users;
     }
 
     json ChatMessages(std::wstring& errorOut)
@@ -761,9 +838,72 @@ public:
     }
 
 private:
+    bool ColumnExists(OdbcConnection& db, const std::wstring& table, const std::wstring& column, bool& existsOut, std::wstring& errorOut)
+    {
+        existsOut = false;
+        auto rows = db.Query(
+            L"SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+            { table, column },
+            errorOut);
+        if (!errorOut.empty())
+            return false;
+        if (!rows.empty() && !rows.front().empty())
+            existsOut = _wtoi(rows.front().front().c_str()) > 0;
+        return true;
+    }
+
+    bool EnsureSessionContextColumns(OdbcConnection& db, std::wstring& errorOut)
+    {
+        struct ColumnDef
+        {
+            const wchar_t* name;
+            const wchar_t* ddl;
+        };
+
+        const ColumnDef columns[] = {
+            { L"session_display_name", L"session_display_name VARCHAR(255) NULL DEFAULT NULL" },
+            { L"session_position", L"session_position VARCHAR(32) NULL DEFAULT NULL" },
+            { L"session_pod", L"session_pod VARCHAR(32) NULL DEFAULT NULL" }
+        };
+
+        for (const ColumnDef& column : columns) {
+            bool exists = false;
+            if (!ColumnExists(db, L"user_sessions", column.name, exists, errorOut))
+                return false;
+            if (exists)
+                continue;
+
+            std::wstring sql = L"ALTER TABLE user_sessions ADD COLUMN ";
+            sql += column.ddl;
+            if (!db.Execute(sql, {}, errorOut))
+                return false;
+        }
+        return true;
+    }
+
+    bool CheckPodInUse(OdbcConnection& db, const std::wstring& pod, bool& inUseOut, std::wstring& errorOut)
+    {
+        inUseOut = false;
+        std::wstring sessionPod = TrimWide(pod);
+        if (sessionPod.empty())
+            return true;
+
+        auto rows = db.Query(
+            L"SELECT COUNT(*) FROM user_sessions "
+            L"WHERE session_pod = ? "
+            L"AND expires_at > CURRENT_TIMESTAMP "
+            L"AND COALESCE(last_seen_at, created_at) >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 2 MINUTE)",
+            { sessionPod },
+            errorOut);
+        if (!errorOut.empty())
+            return false;
+        if (!rows.empty() && !rows.front().empty())
+            inUseOut = _wtoi(rows.front().front().c_str()) > 0;
+        return true;
+    }
+
     ServerConfig m_config;
-    std::mutex m_sessionMetaMutex;
-    std::unordered_map<std::string, SessionMetadata> m_sessionMetadata;
+    std::mutex m_sessionCreateMutex;
 };
 
 static std::string BearerToken(const HttpRequest& req)
@@ -855,12 +995,16 @@ public:
                 return JsonResponse(200, { { "ok", true }, { "service", "erc-tools-server" } });
             if (req.method == "POST" && req.path == "/api/auth/login")
                 return HandleLogin(req);
+            if (req.method == "POST" && req.path == "/api/auth/logout")
+                return HandleLogout(req);
 
             UserRecord user;
             std::wstring authError;
             if (!m_database.Authenticate(BearerToken(req), user, authError))
                 return ErrorResponse(IsDatabaseErrorMessage(authError) ? 500 : 401, authError, IsDatabaseErrorMessage(authError) ? "database_error" : "session_invalid");
 
+            if (req.method == "GET" && req.path == "/api/users/online")
+                return HandleOnlineUsers();
             if (req.method == "GET" && req.path == "/api/chat")
                 return HandleGetChat();
             if (req.method == "POST" && req.path == "/api/chat")
@@ -904,23 +1048,25 @@ private:
 
         std::wstring username = PickWide(body, { "username" });
         std::wstring password = PickWide(body, { "password" });
-        std::wstring displayName = PickWide(body, { "displayName", "display_name", "name" });
         std::wstring position = PickWide(body, { "position" });
         std::wstring pod = PickWide(body, { "pod" });
-        if (username.empty() || password.empty() || position.empty())
-            return ErrorResponse(400, L"Username, password and position are required.", "missing_fields");
+        if (username.empty() || password.empty() || position.empty() || pod.empty())
+            return ErrorResponse(400, L"Username, password, position and pod are required.", "missing_fields");
 
         UserRecord user;
         std::wstring error;
         std::string code;
-        if (!m_database.ValidateLogin(username, password, displayName, position, pod, user, error, code)) {
+        if (!m_database.ValidateLogin(username, password, position, pod, user, error, code)) {
             printf("Error: %ls\n", error.c_str());
             return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 401, error, code.empty() ? nullptr : code.c_str());
         }
 
         std::wstring token;
-        if (!m_database.CreateSession(user, token, error))
+        if (!m_database.CreateSession(user, token, error)) {
+            if (error == L"Selected pod is already in use.")
+                return ErrorResponse(401, error, "pod_in_use");
             return ErrorResponse(500, error, IsDatabaseErrorMessage(error) ? "database_error" : "session_create_failed");
+        }
 
         return JsonResponse(200, {
             { "ok", true },
@@ -933,6 +1079,23 @@ private:
                 { "pod", WideToUtf8(user.pod) }
             } }
             });
+    }
+
+    HttpResponse HandleLogout(const HttpRequest& req)
+    {
+        std::wstring error;
+        if (!m_database.DeleteSession(BearerToken(req), error))
+            return ErrorResponse(error.rfind(L"Missing bearer token", 0) == 0 ? 401 : 500, error, error.rfind(L"Missing bearer token", 0) == 0 ? "missing_token" : "database_error");
+        return JsonResponse(200, { { "ok", true } });
+    }
+
+    HttpResponse HandleOnlineUsers()
+    {
+        std::wstring error;
+        json users = m_database.OnlineUsers(error);
+        if (!error.empty())
+            return ErrorResponse(500, error, "database_error");
+        return JsonResponse(200, { { "ok", true }, { "users", users } });
     }
 
     HttpResponse HandleGetChat()

@@ -49,7 +49,8 @@ The client login calls `POST /api/auth/login`. An HTTP `401 Unauthorized` means 
 
 - No row exists in the `users` table for that username.
 - The password is wrong.
-- The selected Position or Pod does not match the account row.
+- The selected Position is higher than the account's allowed position.
+- The selected Pod already has an active online session.
 - The account is disabled.
 - For non-login endpoints, the bearer token is missing, invalid, or expired.
 

@@ -19,11 +19,15 @@ CREATE TABLE IF NOT EXISTS user_sessions (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     token_hash CHAR(64) NOT NULL UNIQUE,
     user_id BIGINT UNSIGNED NOT NULL,
+    session_display_name VARCHAR(255) NULL DEFAULT NULL,
+    session_position VARCHAR(32) NULL DEFAULT NULL,
+    session_pod VARCHAR(32) NULL DEFAULT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TIMESTAMP NULL DEFAULT NULL,
     expires_at TIMESTAMP NOT NULL,
     INDEX idx_user_sessions_user (user_id),
     INDEX idx_user_sessions_expires (expires_at),
+    INDEX idx_user_sessions_pod_seen (session_pod, last_seen_at),
     CONSTRAINT fk_user_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
