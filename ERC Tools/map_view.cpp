@@ -836,16 +836,16 @@ private:
             return 0;
 
         case WM_KEYDOWN:
-            if (HandleResponderChatKeyDown(wParam))
-                return 0;
             if (HandleNoteEditorKeyDown(wParam))
+                return 0;
+            if (HandleResponderChatKeyDown(wParam))
                 return 0;
             break;
 
         case WM_CHAR:
-            if (HandleResponderChatChar(wParam))
-                return 0;
             if (HandleNoteEditorChar(wParam))
+                return 0;
+            if (HandleResponderChatChar(wParam))
                 return 0;
             break;
 
@@ -1300,6 +1300,7 @@ private:
         m_noteEditorText.clear();
         m_noteEditorCursor = 0;
         m_addNoteMode = false;
+        m_responderChatInputFocused = false;
         SetFocus(m_hwnd);
         Invalidate();
     }
@@ -1316,6 +1317,7 @@ private:
         m_noteEditorText = m_notes[index].text;
         m_noteEditorCursor = m_noteEditorText.size();
         m_addNoteMode = false;
+        m_responderChatInputFocused = false;
         SetFocus(m_hwnd);
         Invalidate();
     }

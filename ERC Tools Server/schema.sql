@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(128) NOT NULL UNIQUE,
     display_name VARCHAR(255) NOT NULL,
     position ENUM('Administrator', 'Supervisor', 'Manager', 'ERC') NOT NULL,
-    pod ENUM('Pod 1', 'Pod 2', 'Pod 3', 'Pod 4', 'Pod 5', 'Pod 6', 'Pod 7', 'Pod 8', 'Pod 9') NOT NULL,
+    pod ENUM('Pod 1', 'Pod 2', 'Pod 3', 'Pod 4', 'Pod 5', 'Pod 6', 'Pod 7', 'Pod 8', 'Pod 9', 'Pod 10') NOT NULL,
     password_salt CHAR(32) NOT NULL,
     password_hash CHAR(64) NOT NULL,
     password_iterations INT NOT NULL DEFAULT 150000,

@@ -3,6 +3,7 @@
 // =================================================================================
 
 #include "login_dialog.h"
+#include "binary_protocol.h"
 #include "http.h"
 #include "util.h"
 
@@ -334,10 +335,23 @@ static void AttemptLogin(LoginContext* ctx)
     std::wstring error;
     ClientSession session;
     DWORD httpStatus = 0;
-    bool httpOk = HttpPostJsonTextStatus(AppendApiPath(ctx->serverBaseUrl, L"/api/auth/login"), body, response, httpStatus, error);
-    bool ok = httpOk && ParseLoginResponse(response, session, error);
-    if (!httpOk || !ok)
-        error = LoginErrorMessageFromResponse(response, httpStatus, error);
+    BinaryLoginResult binaryLogin;
+    bool ok = BinaryLogin(ctx->serverBaseUrl, username, password, position, pod, binaryLogin);
+    if (ok) {
+        session = std::move(binaryLogin.session);
+    }
+    else if (binaryLogin.protocolAvailable) {
+        httpStatus = binaryLogin.status;
+        error = LoginErrorMessageForCode(binaryLogin.code, httpStatus);
+        if (error.empty())
+            error = binaryLogin.error;
+    }
+    else {
+        bool httpOk = HttpPostJsonTextStatus(AppendApiPath(ctx->serverBaseUrl, L"/api/auth/login"), body, response, httpStatus, error);
+        ok = httpOk && ParseLoginResponse(response, session, error);
+        if (!httpOk || !ok)
+            error = LoginErrorMessageFromResponse(response, httpStatus, error);
+    }
 
     EnableWindow(ctx->hwnd, TRUE);
     SetForegroundWindow(ctx->hwnd);
@@ -414,7 +428,7 @@ static void CreateLoginControls(LoginContext* ctx)
 
     CreateLabel(ctx->hwnd, L"Pod:", 24, 210, 130, 22, font);
     ctx->podCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 154, 206, 270, 220, ctx->hwnd, ControlMenuId(IDC_LOGIN_POD), ctx->hInst, nullptr);
-    for (int i = 1; i <= 9; ++i) {
+    for (int i = 1; i <= 10; ++i) {
         std::wstring pod = L"Pod " + std::to_wstring(i);
         AddComboItem(ctx->podCombo, pod.c_str());
     }

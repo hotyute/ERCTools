@@ -19,7 +19,9 @@
 #include <condition_variable>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cwctype>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -79,6 +81,149 @@ struct HttpResponse
     std::string contentType = "application/json; charset=utf-8";
     std::string body;
     std::vector<unsigned char> binary;
+};
+
+static std::wstring Utf8ToWide(const std::string& s);
+static std::string WideToUtf8(const std::wstring& s);
+
+constexpr uint16_t kBinaryProtocolVersion = 1;
+constexpr uint32_t kMaxBinaryPayload = 8u * 1024u * 1024u;
+
+constexpr uint16_t kBinaryLogin = 1;
+constexpr uint16_t kBinaryLogout = 2;
+constexpr uint16_t kBinaryPoll = 3;
+constexpr uint16_t kBinarySendChat = 4;
+constexpr uint16_t kBinaryClearChat = 5;
+constexpr uint16_t kBinaryCreateNote = 6;
+constexpr uint16_t kBinaryUpdateNote = 7;
+constexpr uint16_t kBinaryDeleteNote = 8;
+constexpr uint16_t kBinaryGetSettings = 9;
+constexpr uint16_t kBinarySetSettings = 10;
+
+struct BinaryResponse
+{
+    uint16_t opcode = 0;
+    uint16_t status = 0;
+    std::vector<unsigned char> payload;
+};
+
+static void WriteU16(std::vector<unsigned char>& out, uint16_t value)
+{
+    out.push_back(static_cast<unsigned char>(value & 0xFF));
+    out.push_back(static_cast<unsigned char>((value >> 8) & 0xFF));
+}
+
+static void WriteU32(std::vector<unsigned char>& out, uint32_t value)
+{
+    out.push_back(static_cast<unsigned char>(value & 0xFF));
+    out.push_back(static_cast<unsigned char>((value >> 8) & 0xFF));
+    out.push_back(static_cast<unsigned char>((value >> 16) & 0xFF));
+    out.push_back(static_cast<unsigned char>((value >> 24) & 0xFF));
+}
+
+static uint16_t ReadU16Raw(const unsigned char* p)
+{
+    return static_cast<uint16_t>(p[0] | (static_cast<uint16_t>(p[1]) << 8));
+}
+
+static uint32_t ReadU32Raw(const unsigned char* p)
+{
+    return static_cast<uint32_t>(p[0]) |
+        (static_cast<uint32_t>(p[1]) << 8) |
+        (static_cast<uint32_t>(p[2]) << 16) |
+        (static_cast<uint32_t>(p[3]) << 24);
+}
+
+class BinaryWriter
+{
+public:
+    void U32(uint32_t value) { WriteU32(m_data, value); }
+
+    void F64(double value)
+    {
+        uint64_t raw = 0;
+        static_assert(sizeof(raw) == sizeof(value));
+        std::memcpy(&raw, &value, sizeof(value));
+        for (int i = 0; i < 8; ++i)
+            m_data.push_back(static_cast<unsigned char>((raw >> (i * 8)) & 0xFF));
+    }
+
+    void Text(const std::wstring& value)
+    {
+        std::string utf8 = WideToUtf8(value);
+        if (utf8.size() > kMaxBinaryPayload)
+            utf8.resize(kMaxBinaryPayload);
+        U32(static_cast<uint32_t>(utf8.size()));
+        m_data.insert(m_data.end(), utf8.begin(), utf8.end());
+    }
+
+    void JsonText(const json& value)
+    {
+        std::string text = value.dump();
+        if (text.size() > kMaxBinaryPayload)
+            text.resize(kMaxBinaryPayload);
+        U32(static_cast<uint32_t>(text.size()));
+        m_data.insert(m_data.end(), text.begin(), text.end());
+    }
+
+    const std::vector<unsigned char>& Data() const { return m_data; }
+
+private:
+    std::vector<unsigned char> m_data;
+};
+
+class BinaryReader
+{
+public:
+    explicit BinaryReader(const std::vector<unsigned char>& data) : m_data(data) {}
+
+    bool U32(uint32_t& value)
+    {
+        if (Remaining() < 4)
+            return false;
+        value = ReadU32Raw(m_data.data() + m_pos);
+        m_pos += 4;
+        return true;
+    }
+
+    bool F64(double& value)
+    {
+        if (Remaining() < 8)
+            return false;
+        uint64_t raw = 0;
+        for (int i = 0; i < 8; ++i)
+            raw |= (static_cast<uint64_t>(m_data[m_pos + i]) << (i * 8));
+        std::memcpy(&value, &raw, sizeof(value));
+        m_pos += 8;
+        return true;
+    }
+
+    bool Text(std::wstring& value)
+    {
+        uint32_t len = 0;
+        if (!U32(len) || len > kMaxBinaryPayload || Remaining() < len)
+            return false;
+        value = Utf8ToWide(std::string(reinterpret_cast<const char*>(m_data.data() + m_pos), len));
+        m_pos += len;
+        return true;
+    }
+
+    bool Json(json& value)
+    {
+        uint32_t len = 0;
+        if (!U32(len) || len > kMaxBinaryPayload || Remaining() < len)
+            return false;
+        std::string text(reinterpret_cast<const char*>(m_data.data() + m_pos), len);
+        m_pos += len;
+        value = json::parse(text.empty() ? "{}" : text);
+        return value.is_object();
+    }
+
+private:
+    size_t Remaining() const { return m_pos <= m_data.size() ? m_data.size() - m_pos : 0; }
+
+    const std::vector<unsigned char>& m_data;
+    size_t m_pos = 0;
 };
 
 static std::wstring Utf8ToWide(const std::string& s)
@@ -992,6 +1137,55 @@ class ErcServer
 public:
     explicit ErcServer(ServerConfig config) : m_config(std::move(config)), m_database(m_config) {}
 
+    BinaryResponse HandleBinary(uint16_t opcode, const std::vector<unsigned char>& payload)
+    {
+        try {
+            BinaryReader reader(payload);
+            if (opcode == kBinaryLogin)
+                return HandleBinaryLogin(reader);
+
+            std::wstring token;
+            if (!reader.Text(token))
+                return BinaryError(opcode, 400, "invalid_payload", L"Binary request is missing the session token.");
+
+            if (opcode == kBinaryLogout) {
+                std::wstring error;
+                if (!m_database.DeleteSession(WideToUtf8(token), error))
+                    return BinaryError(opcode, error.rfind(L"Missing bearer token", 0) == 0 ? 401 : 500, IsDatabaseErrorMessage(error) ? "database_error" : "logout_failed", error);
+                return BinaryOk(opcode);
+            }
+
+            UserRecord user;
+            std::wstring authError;
+            if (!m_database.Authenticate(WideToUtf8(token), user, authError))
+                return BinaryError(opcode, IsDatabaseErrorMessage(authError) ? 500 : 401, IsDatabaseErrorMessage(authError) ? "database_error" : "session_invalid", authError);
+
+            switch (opcode) {
+            case kBinaryPoll:
+                return HandleBinaryPoll(opcode);
+            case kBinarySendChat:
+                return HandleBinarySendChat(opcode, reader, user);
+            case kBinaryClearChat:
+                return HandleBinaryClearChat(opcode, user);
+            case kBinaryCreateNote:
+                return HandleBinaryCreateNote(opcode, reader, user);
+            case kBinaryUpdateNote:
+                return HandleBinaryUpdateNote(opcode, reader, user);
+            case kBinaryDeleteNote:
+                return HandleBinaryDeleteNote(opcode, reader, user);
+            case kBinaryGetSettings:
+                return HandleBinaryGetSettings(opcode);
+            case kBinarySetSettings:
+                return HandleBinarySetSettings(opcode, reader, user);
+            default:
+                return BinaryError(opcode, 404, "unknown_opcode", L"Unknown ERC binary opcode.");
+            }
+        }
+        catch (const std::exception& e) {
+            return BinaryError(opcode, 500, "server_error", L"Binary server error: " + Utf8ToWide(e.what()));
+        }
+    }
+
     HttpResponse Handle(const HttpRequest& req)
     {
         try {
@@ -1044,6 +1238,308 @@ public:
     }
 
 private:
+    static BinaryResponse BinaryError(uint16_t opcode, uint16_t status, const char* code, const std::wstring& message)
+    {
+        BinaryWriter writer;
+        writer.Text(code ? Utf8ToWide(code) : L"error");
+        writer.Text(message);
+        return BinaryResponse{ opcode, status, writer.Data() };
+    }
+
+    static BinaryResponse BinaryOk(uint16_t opcode)
+    {
+        return BinaryResponse{ opcode, 0, {} };
+    }
+
+    static BinaryResponse BinaryOk(uint16_t opcode, const BinaryWriter& writer)
+    {
+        return BinaryResponse{ opcode, 0, writer.Data() };
+    }
+
+    static std::wstring JsonTextField(const json& item, std::initializer_list<const char*> keys)
+    {
+        return PickWide(item, keys);
+    }
+
+    static double JsonDoubleField(const json& item, const char* primary, const char* fallback = nullptr)
+    {
+        if (item.is_object()) {
+            auto it = item.find(primary);
+            if (it != item.end() && it->is_number())
+                return it->get<double>();
+            if (fallback) {
+                it = item.find(fallback);
+                if (it != item.end() && it->is_number())
+                    return it->get<double>();
+            }
+        }
+        return 0.0;
+    }
+
+    static void WriteChatJson(BinaryWriter& writer, const json& item)
+    {
+        writer.Text(JsonTextField(item, { "author", "user", "name" }));
+        writer.Text(JsonTextField(item, { "position", "role" }));
+        writer.Text(JsonTextField(item, { "text", "message", "body" }));
+        writer.Text(JsonTextField(item, { "timestamp", "time", "createdAt" }));
+    }
+
+    static void WriteNoteJson(BinaryWriter& writer, const json& item)
+    {
+        writer.Text(JsonTextField(item, { "id", "noteId" }));
+        writer.Text(JsonTextField(item, { "author", "user", "name" }));
+        writer.Text(JsonTextField(item, { "text", "note", "body" }));
+        writer.Text(JsonTextField(item, { "timestamp", "time", "createdAt" }));
+        writer.F64(JsonDoubleField(item, "lat", "latitude"));
+        writer.F64(JsonDoubleField(item, "lon", "longitude"));
+    }
+
+    static void WriteOnlineUserJson(BinaryWriter& writer, const json& item)
+    {
+        writer.Text(JsonTextField(item, { "displayName", "display_name", "name" }));
+        writer.Text(JsonTextField(item, { "username", "user" }));
+        writer.Text(JsonTextField(item, { "position", "role" }));
+        writer.Text(JsonTextField(item, { "pod" }));
+        writer.Text(JsonTextField(item, { "lastSeen", "last_seen", "timestamp" }));
+    }
+
+    BinaryResponse HandleBinaryLogin(BinaryReader& reader)
+    {
+        std::wstring username;
+        std::wstring password;
+        std::wstring position;
+        std::wstring pod;
+        std::wstring clientVersion;
+        std::wstring platform;
+        if (!reader.Text(username) ||
+            !reader.Text(password) ||
+            !reader.Text(position) ||
+            !reader.Text(pod) ||
+            !reader.Text(clientVersion) ||
+            !reader.Text(platform))
+        {
+            return BinaryError(kBinaryLogin, 400, "invalid_payload", L"Binary login payload is incomplete.");
+        }
+
+        if (username.empty() || password.empty() || position.empty() || pod.empty())
+            return BinaryError(kBinaryLogin, 400, "missing_fields", L"Username, password, position and pod are required.");
+
+        UserRecord user;
+        std::wstring error;
+        std::string code;
+        if (!m_database.ValidateLogin(username, password, position, pod, user, error, code))
+            return BinaryError(kBinaryLogin, IsDatabaseErrorMessage(error) ? 500 : 401, code.empty() ? "login_failed" : code.c_str(), error);
+
+        std::wstring token;
+        if (!m_database.CreateSession(user, token, error)) {
+            if (error == L"Selected pod is already in use.")
+                return BinaryError(kBinaryLogin, 401, "pod_in_use", error);
+            return BinaryError(kBinaryLogin, IsDatabaseErrorMessage(error) ? 500 : 500, IsDatabaseErrorMessage(error) ? "database_error" : "session_create_failed", error);
+        }
+
+        BinaryWriter writer;
+        writer.Text(token);
+        writer.Text(user.username);
+        writer.Text(user.displayName);
+        writer.Text(user.position);
+        writer.Text(user.pod);
+        return BinaryOk(kBinaryLogin, writer);
+    }
+
+    BinaryResponse HandleBinaryPoll(uint16_t opcode)
+    {
+        std::wstring error;
+        json chat = m_database.ChatMessages(error);
+        if (!error.empty())
+            return BinaryError(opcode, 500, "database_error", L"Chat poll failed: " + error);
+
+        json notes = m_database.Notes(error);
+        if (!error.empty())
+            return BinaryError(opcode, 500, "database_error", L"Notes poll failed: " + error);
+
+        json users = m_database.OnlineUsers(error);
+        if (!error.empty())
+            return BinaryError(opcode, 500, "database_error", L"Online users poll failed: " + error);
+
+        BinaryWriter writer;
+        writer.U32(chat.is_array() ? static_cast<uint32_t>(chat.size()) : 0);
+        if (chat.is_array()) {
+            for (const auto& item : chat)
+                WriteChatJson(writer, item);
+        }
+
+        writer.U32(notes.is_array() ? static_cast<uint32_t>(notes.size()) : 0);
+        if (notes.is_array()) {
+            for (const auto& item : notes)
+                WriteNoteJson(writer, item);
+        }
+
+        writer.U32(users.is_array() ? static_cast<uint32_t>(users.size()) : 0);
+        if (users.is_array()) {
+            for (const auto& item : users)
+                WriteOnlineUserJson(writer, item);
+        }
+        return BinaryOk(opcode, writer);
+    }
+
+    BinaryResponse HandleBinarySendChat(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring text;
+        if (!reader.Text(text))
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary chat payload is incomplete.");
+        text = TrimWide(text);
+        if (text.empty())
+            return BinaryError(opcode, 400, "missing_text", L"Chat message is empty.");
+
+        std::wstring error;
+        if (!m_database.AddChatMessage(user, text, error))
+            return BinaryError(opcode, 500, "database_error", error);
+        return BinaryOk(opcode);
+    }
+
+    BinaryResponse HandleBinaryClearChat(uint16_t opcode, const UserRecord& user)
+    {
+        if (!CanEditGlobalSettings(user))
+            return BinaryError(opcode, 403, "forbidden", L"Only Administrators and Supervisors can clear responder chat.");
+
+        std::wstring error;
+        if (!m_database.ClearChatMessages(error))
+            return BinaryError(opcode, 500, "database_error", error);
+        return BinaryOk(opcode);
+    }
+
+    BinaryResponse HandleBinaryCreateNote(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring text;
+        double lat = 0.0;
+        double lon = 0.0;
+        if (!reader.Text(text) || !reader.F64(lat) || !reader.F64(lon))
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary note payload is incomplete.");
+
+        json body = {
+            { "text", WideToUtf8(text) },
+            { "lat", lat },
+            { "lon", lon }
+        };
+
+        json note;
+        std::wstring error;
+        if (!m_database.AddNote(user, body, note, error))
+            return BinaryError(opcode, 500, "database_error", error);
+
+        BinaryWriter writer;
+        WriteNoteJson(writer, note);
+        return BinaryOk(opcode, writer);
+    }
+
+    BinaryResponse HandleBinaryUpdateNote(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring id;
+        std::wstring text;
+        double lat = 0.0;
+        double lon = 0.0;
+        if (!reader.Text(id) || !reader.Text(text) || !reader.F64(lat) || !reader.F64(lon))
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary note update payload is incomplete.");
+
+        json body = {
+            { "text", WideToUtf8(text) },
+            { "lat", lat },
+            { "lon", lon }
+        };
+
+        std::wstring error;
+        if (!m_database.UpdateNote(user, id, body, error))
+            return BinaryError(opcode, 500, "database_error", error);
+        return BinaryOk(opcode);
+    }
+
+    BinaryResponse HandleBinaryDeleteNote(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring id;
+        if (!reader.Text(id) || id.empty())
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary note delete payload is incomplete.");
+
+        std::wstring error;
+        if (!m_database.DeleteNote(user, id, error))
+            return BinaryError(opcode, 500, "database_error", error);
+        return BinaryOk(opcode);
+    }
+
+    bool LoadGlobalSettings(json& settingsOut, std::wstring& errorOut) const
+    {
+        std::ifstream in(m_config.globalSettingsPath, std::ios::binary);
+        if (!in) {
+            settingsOut = json::object();
+            return true;
+        }
+
+        try {
+            settingsOut = json::parse(in);
+            if (!settingsOut.is_object())
+                settingsOut = json::object();
+            auto nested = settingsOut.find("settings");
+            if (nested != settingsOut.end() && nested->is_object())
+                settingsOut = *nested;
+            return true;
+        }
+        catch (const std::exception& e) {
+            errorOut = L"Global settings parse failed: " + Utf8ToWide(e.what());
+            return false;
+        }
+    }
+
+    bool SaveGlobalSettings(const json& settings, std::wstring& errorOut) const
+    {
+        try {
+            std::filesystem::path parent = m_config.globalSettingsPath.parent_path();
+            if (!parent.empty())
+                std::filesystem::create_directories(parent);
+            std::ofstream out(m_config.globalSettingsPath, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                errorOut = L"Could not write global settings.";
+                return false;
+            }
+            out << settings.dump(2);
+            return true;
+        }
+        catch (const std::exception& e) {
+            errorOut = L"Could not save global settings: " + Utf8ToWide(e.what());
+            return false;
+        }
+    }
+
+    BinaryResponse HandleBinaryGetSettings(uint16_t opcode)
+    {
+        json settings;
+        std::wstring error;
+        if (!LoadGlobalSettings(settings, error))
+            return BinaryError(opcode, 500, "settings_error", error);
+
+        BinaryWriter writer;
+        writer.JsonText(settings);
+        return BinaryOk(opcode, writer);
+    }
+
+    BinaryResponse HandleBinarySetSettings(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        if (!CanEditGlobalSettings(user))
+            return BinaryError(opcode, 403, "forbidden", L"Only Administrators and Supervisors can update global settings.");
+
+        json settings;
+        try {
+            if (!reader.Json(settings))
+                return BinaryError(opcode, 400, "invalid_payload", L"Binary global settings payload is incomplete.");
+        }
+        catch (const std::exception& e) {
+            return BinaryError(opcode, 400, "invalid_json", L"Invalid global settings JSON: " + Utf8ToWide(e.what()));
+        }
+
+        std::wstring error;
+        if (!SaveGlobalSettings(settings, error))
+            return BinaryError(opcode, 500, "settings_error", error);
+        return BinaryOk(opcode);
+    }
+
     HttpResponse HandleLogin(const HttpRequest& req)
     {
         json body;
@@ -1414,6 +1910,44 @@ static bool ReadRequest(SOCKET s, HttpRequest& req)
     return true;
 }
 
+static bool IsBinaryRequest(SOCKET s)
+{
+    char magic[4]{};
+    int n = recv(s, magic, sizeof(magic), MSG_PEEK);
+    return n == sizeof(magic) && std::memcmp(magic, "ERCB", 4) == 0;
+}
+
+static bool RecvExact(SOCKET s, unsigned char* data, size_t size)
+{
+    while (size > 0) {
+        int chunk = static_cast<int>(std::min<size_t>(size, 64 * 1024));
+        int got = recv(s, reinterpret_cast<char*>(data), chunk, 0);
+        if (got <= 0)
+            return false;
+        data += got;
+        size -= static_cast<size_t>(got);
+    }
+    return true;
+}
+
+static bool ReadBinaryRequest(SOCKET s, uint16_t& opcodeOut, std::vector<unsigned char>& payloadOut)
+{
+    unsigned char header[12]{};
+    if (!RecvExact(s, header, sizeof(header)))
+        return false;
+    if (std::memcmp(header, "ERCB", 4) != 0)
+        return false;
+
+    uint16_t version = ReadU16Raw(header + 4);
+    opcodeOut = ReadU16Raw(header + 6);
+    uint32_t payloadLen = ReadU32Raw(header + 8);
+    if (version != kBinaryProtocolVersion || payloadLen > kMaxBinaryPayload)
+        return false;
+
+    payloadOut.resize(payloadLen);
+    return payloadLen == 0 || RecvExact(s, payloadOut.data(), payloadLen);
+}
+
 static void SendAll(SOCKET s, const std::string& data)
 {
     const char* ptr = data.data();
@@ -1425,6 +1959,36 @@ static void SendAll(SOCKET s, const std::string& data)
         ptr += sent;
         remaining -= sent;
     }
+}
+
+static void SendAll(SOCKET s, const std::vector<unsigned char>& data)
+{
+    const unsigned char* ptr = data.data();
+    size_t remaining = data.size();
+    while (remaining > 0) {
+        int chunk = static_cast<int>(std::min<size_t>(remaining, 64 * 1024));
+        int sent = send(s, reinterpret_cast<const char*>(ptr), chunk, 0);
+        if (sent <= 0)
+            return;
+        ptr += sent;
+        remaining -= static_cast<size_t>(sent);
+    }
+}
+
+static void SendBinaryResponse(SOCKET s, const BinaryResponse& response)
+{
+    std::vector<unsigned char> frame;
+    frame.reserve(14 + response.payload.size());
+    frame.push_back('E');
+    frame.push_back('R');
+    frame.push_back('C');
+    frame.push_back('R');
+    WriteU16(frame, kBinaryProtocolVersion);
+    WriteU16(frame, response.opcode);
+    WriteU16(frame, response.status);
+    WriteU32(frame, static_cast<uint32_t>(response.payload.size()));
+    frame.insert(frame.end(), response.payload.begin(), response.payload.end());
+    SendAll(s, frame);
 }
 
 static void SendResponse(SOCKET s, HttpResponse response)
@@ -1450,11 +2014,21 @@ static void WorkerLoop(BlockingSocketQueue& queue, ErcServer& server)
 {
     SOCKET s = INVALID_SOCKET;
     while (queue.Pop(s)) {
-        HttpRequest request;
-        if (ReadRequest(s, request))
-            SendResponse(s, server.Handle(request));
-        else
-            SendResponse(s, ErrorResponse(400, L"Bad request."));
+        if (IsBinaryRequest(s)) {
+            uint16_t opcode = 0;
+            std::vector<unsigned char> payload;
+            if (ReadBinaryRequest(s, opcode, payload))
+                SendBinaryResponse(s, server.HandleBinary(opcode, payload));
+            else
+                SendBinaryResponse(s, BinaryResponse{ 0, 400, {} });
+        }
+        else {
+            HttpRequest request;
+            if (ReadRequest(s, request))
+                SendResponse(s, server.Handle(request));
+            else
+                SendResponse(s, ErrorResponse(400, L"Bad request."));
+        }
         shutdown(s, SD_BOTH);
         closesocket(s);
     }

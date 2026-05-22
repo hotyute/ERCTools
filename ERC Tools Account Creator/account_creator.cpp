@@ -459,7 +459,7 @@ static std::optional<std::wstring> NormalizePod(const std::wstring& value)
         number = _wtoi(lower.c_str() + 4);
     else
         number = _wtoi(lower.c_str());
-    if (number < 1 || number > 9)
+    if (number < 1 || number > 10)
         return std::nullopt;
     return L"Pod " + std::to_wstring(number);
 }
@@ -480,7 +480,7 @@ static void ShowUsage()
         << L"  --display-name <value>   Name shown in ERC Tools.\n"
         << L"  --password <value>       Initial password. If omitted, you will be prompted.\n"
         << L"  --position <value>       Administrator, Supervisor, Manager, or ERC.\n"
-        << L"  --pod <value>            Pod 1 through Pod 9.\n"
+        << L"  --pod <value>            Pod 1 through Pod 10.\n"
         << L"  --inactive               Create/update as disabled.\n"
         << L"  --update-existing        Update the account if username already exists.\n";
 }
@@ -595,14 +595,14 @@ static bool CompleteInteractiveInput(AccountInput& input)
 
     while (true) {
         std::wstring value = input.pod.empty()
-            ? PromptLine(L"Pod (Pod 1 - Pod 9)")
+            ? PromptLine(L"Pod (Pod 1 - Pod 10)")
             : input.pod;
         auto normalized = NormalizePod(value);
         if (normalized) {
             input.pod = *normalized;
             break;
         }
-        std::wcout << L"Please enter Pod 1 through Pod 9.\n";
+        std::wcout << L"Please enter Pod 1 through Pod 10.\n";
         input.pod.clear();
     }
 
@@ -626,6 +626,14 @@ static bool CreateOrUpdateAccount(const CreatorConfig& config, const AccountInpu
     }
 
     OdbcConnection db(config.databaseConnectionString);
+    if (!db.Execute(
+        L"ALTER TABLE users MODIFY COLUMN pod ENUM('Pod 1', 'Pod 2', 'Pod 3', 'Pod 4', 'Pod 5', 'Pod 6', 'Pod 7', 'Pod 8', 'Pod 9', 'Pod 10') NOT NULL",
+        {},
+        errorOut))
+    {
+        return false;
+    }
+
     auto existing = db.Query(L"SELECT id FROM users WHERE username = ? LIMIT 1", { input.username }, errorOut);
     if (!errorOut.empty() && existing.empty())
         return false;

@@ -21,6 +21,7 @@
   <ItemGroup>
     <ClCompile Include="app.cpp" />
     <ClCompile Include="app_state.cpp" />
+    <ClCompile Include="binary_protocol.cpp" />
     <ClCompile Include="client_update.cpp" />
     <ClCompile Include="http.cpp" />
     <ClCompile Include="login_dialog.cpp" />
@@ -33,6 +34,7 @@
   <ItemGroup>
     <ClInclude Include="app_state.h" />
     <ClInclude Include="auth_session.h" />
+    <ClInclude Include="binary_protocol.h" />
     <ClInclude Include="client_update.h" />
     <ClInclude Include="common.h" />
     <ClInclude Include="http.h" />

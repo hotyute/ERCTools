@@ -5,6 +5,7 @@
 
 #include "main_window.h"
 #include "app_state.h"
+#include "binary_protocol.h"
 #include "client_update.h"
 #include "http.h"
 #include "map_view.h"
@@ -1268,9 +1269,8 @@ static void MergePendingLocalNotes(std::vector<MapNote>& serverNotes, const std:
 
         const bool alreadyPresent = std::any_of(serverNotes.begin(), serverNotes.end(), [&](const MapNote& serverNote) {
             return serverNote.text == note.text &&
-                serverNote.author == note.author &&
-                std::abs(serverNote.latitude - note.latitude) <= 1e-9 &&
-                std::abs(serverNote.longitude - note.longitude) <= 1e-9;
+                std::abs(serverNote.latitude - note.latitude) <= 1e-6 &&
+                std::abs(serverNote.longitude - note.longitude) <= 1e-6;
             });
 
         if (!alreadyPresent)
@@ -2111,6 +2111,10 @@ private:
             return;
 
         m_logoutSent = true;
+        BinaryCallResult binary;
+        if (BinaryLogout(ServerBaseUrl(), m_session, binary) || binary.protocolAvailable)
+            return;
+
         std::string response;
         std::wstring error;
         HttpPostJsonTextWithHeaders(AppendPath(ServerBaseUrl(), L"/api/auth/logout"), "{}", BearerAuthHeader(m_session), response, error);
@@ -2596,8 +2600,22 @@ private:
         SetStatusText(L"Syncing settings from server...");
         HWND hwnd = m_hwnd;
         std::wstring authHeaders = BearerAuthHeader(m_session);
-        ScheduleBackgroundTask([hwnd, server, authHeaders]() {
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session]() {
             auto* result = new GlobalSettingsResult{};
+            BinaryCallResult binary;
+            json binarySettings;
+            if (BinaryGetGlobalSettings(server, session, binarySettings, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->settings = std::move(binarySettings);
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SETTINGS_SYNC_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
             std::string response;
             std::wstring error;
             if (HttpGetTextWithHeaders(AppendPath(server, L"/api/settings/global"), authHeaders, response, error)) {
@@ -3361,9 +3379,34 @@ private:
 
         HWND hwnd = m_hwnd;
         std::wstring authHeaders = BearerAuthHeader(m_session);
-        ScheduleBackgroundTask([hwnd, server, authHeaders]() {
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::Poll;
+
+            BinaryPollResult binary;
+            if (BinaryPollCollaboration(server, session, binary)) {
+                result->chat = std::move(binary.chat);
+                result->notes = std::move(binary.notes);
+                result->users = std::move(binary.users);
+                result->chatOk = true;
+                result->notesOk = true;
+                result->usersOk = true;
+                result->ok = true;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+            if (binary.protocolAvailable) {
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
 
             std::string chatBody;
             std::wstring chatError;
@@ -3509,9 +3552,21 @@ private:
         std::wstring server = ServerBaseUrl();
         HWND hwnd = m_hwnd;
         std::wstring authHeaders = BearerAuthHeader(m_session);
-        ScheduleBackgroundTask([hwnd, server, text, author, authHeaders]() {
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, text, author, authHeaders, session]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::SendChat;
+            BinaryCallResult binary;
+            if (BinarySendChat(server, session, text, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
             std::string response;
             std::wstring error;
             std::string body = "{\"author\":" + JsonEscape(author) + ",\"text\":" + JsonEscape(text) + "}";
@@ -3549,9 +3604,21 @@ private:
 
         HWND hwnd = m_hwnd;
         std::wstring authHeaders = BearerAuthHeader(m_session);
-        ScheduleBackgroundTask([hwnd, server, authHeaders]() {
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::ClearChat;
+            BinaryCallResult binary;
+            if (BinaryClearChat(server, session, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
             std::string response;
             std::wstring error;
             result->ok = HttpDeleteTextWithHeaders(AppendPath(server, L"/api/chat"), authHeaders, response, error);
@@ -3593,13 +3660,45 @@ private:
         HWND hwnd = m_hwnd;
         std::string body = BuildNoteJsonBody(note);
         std::wstring authHeaders = BearerAuthHeader(m_session);
-        ScheduleBackgroundTask([hwnd, server, body, authHeaders]() {
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, body, authHeaders, note, session]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::SendNote;
+            BinaryCallResult binary;
+            MapNote serverNote;
+            if (BinaryCreateNote(server, session, note, serverNote, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->error = binary.error;
+                if (binary.ok) {
+                    result->notes.push_back(std::move(serverNote));
+                    result->notesOk = true;
+                }
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
             std::string response;
             std::wstring error;
             result->ok = HttpPostJsonTextWithHeaders(AppendPath(server, L"/api/notes"), body, authHeaders, response, error);
             result->error = error;
+            if (result->ok) {
+                try {
+                    json root = json::parse(response);
+                    auto noteIt = root.find("note");
+                    if (noteIt != root.end()) {
+                        std::vector<MapNote> parsed = ParseMapNotes(json::array({ *noteIt }));
+                        if (!parsed.empty()) {
+                            result->notes.push_back(std::move(parsed.front()));
+                            result->notesOk = true;
+                        }
+                    }
+                }
+                catch (...) {
+                }
+            }
             if (!g_appQuitting.load() && IsWindow(hwnd))
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
             else
@@ -3640,11 +3739,24 @@ private:
 
         HWND hwnd = m_hwnd;
         std::wstring noteId = note.id;
+        MapNote noteForSend = note;
         std::string body = BuildNoteJsonBody(note);
         std::wstring authHeaders = BearerAuthHeader(m_session);
-        ScheduleBackgroundTask([hwnd, server, noteId, body, authHeaders]() {
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, noteId, noteForSend, body, authHeaders, session]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::UpdateNote;
+            BinaryCallResult binary;
+            if (BinaryUpdateNote(server, session, noteForSend, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
             std::string response;
             std::wstring error;
             std::wstring endpoint = AppendNoteIdPath(server, noteId);
@@ -3686,9 +3798,21 @@ private:
         HWND hwnd = m_hwnd;
         std::wstring noteId = note.id;
         std::wstring authHeaders = BearerAuthHeader(m_session);
-        ScheduleBackgroundTask([hwnd, server, noteId, authHeaders]() {
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, noteId, authHeaders, session]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::DeleteNote;
+            BinaryCallResult binary;
+            if (BinaryDeleteNote(server, session, noteId, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
             std::string response;
             std::wstring error;
             result->ok = HttpDeleteTextWithHeaders(AppendNoteIdPath(server, noteId), authHeaders, response, error);
@@ -3742,7 +3866,7 @@ private:
             return;
 
         if (result->action == ServerAction::Poll && result->ok) {
-            if (result->chatOk && !result->chat.empty()) {
+            if (result->chatOk) {
                 m_chatMessages = std::move(result->chat);
                 RenderChatHistory();
             }
@@ -3777,6 +3901,19 @@ private:
             PollServerAsync();
         }
         else if (result->action == ServerAction::SendNote) {
+            if (result->ok && result->notesOk && !result->notes.empty()) {
+                const MapNote& serverNote = result->notes.front();
+                auto pending = std::find_if(m_notes.begin(), m_notes.end(), [&](const MapNote& note) {
+                    return note.timestamp == L"pending" &&
+                        note.text == serverNote.text &&
+                        std::abs(note.latitude - serverNote.latitude) <= 1e-6 &&
+                        std::abs(note.longitude - serverNote.longitude) <= 1e-6;
+                    });
+                if (pending != m_notes.end()) {
+                    *pending = serverNote;
+                    m_map.SetNotes(m_notes);
+                }
+            }
             SetStatusText(result->ok ? L"Map note shared." : L"Note share failed; kept locally.");
             PollServerAsync();
         }
