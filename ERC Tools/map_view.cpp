@@ -86,6 +86,8 @@ constexpr float kMapWaterB = 0.98f;
 constexpr float kOverlayUiMargin = 12.0f;
 constexpr float kOverlayUiPadding = 14.0f;
 constexpr float kOverlayUiGap = 10.0f;
+constexpr float kOverlayTogglePadding = 8.0f;
+constexpr float kOverlayToggleSize = 28.0f;
 constexpr float kNotificationScrollStep = 56.0f;
 constexpr float kNoteBubbleWidth = 204.0f;
 constexpr float kNoteBubbleHeight = 64.0f;
@@ -115,6 +117,13 @@ class MapView::Impl
         None,
         New,
         Edit
+    };
+
+    enum class OverlayInputFocus
+    {
+        None,
+        NoteEditor,
+        ResponderChat
     };
 
     struct PolygonPointHit
@@ -794,6 +803,7 @@ private:
                 return 0;
             if (HandlePolygonPointPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
+            ClearOverlayInputFocus();
             SetCapture(m_hwnd);
             m_notificationUiMouseDown = false;
             m_mouseDown.x = GET_X_LPARAM(lParam);
@@ -836,17 +846,25 @@ private:
             return 0;
 
         case WM_KEYDOWN:
-            if (HandleNoteEditorKeyDown(wParam))
-                return 0;
-            if (HandleResponderChatKeyDown(wParam))
-                return 0;
+            if (m_overlayInputFocus == OverlayInputFocus::ResponderChat) {
+                if (HandleResponderChatKeyDown(wParam))
+                    return 0;
+            }
+            else if (m_overlayInputFocus == OverlayInputFocus::NoteEditor) {
+                if (HandleNoteEditorKeyDown(wParam))
+                    return 0;
+            }
             break;
 
         case WM_CHAR:
-            if (HandleNoteEditorChar(wParam))
-                return 0;
-            if (HandleResponderChatChar(wParam))
-                return 0;
+            if (m_overlayInputFocus == OverlayInputFocus::ResponderChat) {
+                if (HandleResponderChatChar(wParam))
+                    return 0;
+            }
+            else if (m_overlayInputFocus == OverlayInputFocus::NoteEditor) {
+                if (HandleNoteEditorChar(wParam))
+                    return 0;
+            }
             break;
 
         case WM_APP_TILE_READY:
@@ -1276,6 +1294,18 @@ private:
         return D2D1::RectF(18.0f, 18.0f, 120.0f, 50.0f);
     }
 
+    void SetOverlayInputFocus(OverlayInputFocus focus)
+    {
+        m_overlayInputFocus = focus;
+        m_responderChatInputFocused = focus == OverlayInputFocus::ResponderChat;
+        Invalidate();
+    }
+
+    void ClearOverlayInputFocus()
+    {
+        SetOverlayInputFocus(OverlayInputFocus::None);
+    }
+
     D2D1_RECT_F BuildNoteCloseRect(const D2D1_RECT_F& bubble) const
     {
         return D2D1::RectF(bubble.right - 24.0f, bubble.top + 6.0f, bubble.right - 6.0f, bubble.top + 24.0f);
@@ -1300,7 +1330,7 @@ private:
         m_noteEditorText.clear();
         m_noteEditorCursor = 0;
         m_addNoteMode = false;
-        m_responderChatInputFocused = false;
+        SetOverlayInputFocus(OverlayInputFocus::NoteEditor);
         SetFocus(m_hwnd);
         Invalidate();
     }
@@ -1317,7 +1347,7 @@ private:
         m_noteEditorText = m_notes[index].text;
         m_noteEditorCursor = m_noteEditorText.size();
         m_addNoteMode = false;
-        m_responderChatInputFocused = false;
+        SetOverlayInputFocus(OverlayInputFocus::NoteEditor);
         SetFocus(m_hwnd);
         Invalidate();
     }
@@ -1328,6 +1358,8 @@ private:
         m_noteEditorIndex = static_cast<size_t>(-1);
         m_noteEditorText.clear();
         m_noteEditorCursor = 0;
+        if (m_overlayInputFocus == OverlayInputFocus::NoteEditor)
+            ClearOverlayInputFocus();
         Invalidate();
     }
 
@@ -1544,6 +1576,7 @@ private:
             }
             if (PointInRect(x, y, editor)) {
                 SetFocus(m_hwnd);
+                SetOverlayInputFocus(OverlayInputFocus::NoteEditor);
                 return true;
             }
         }
@@ -2505,10 +2538,10 @@ private:
         const float top = kOverlayUiMargin + 64.0f;
         layout.panelRect = D2D1::RectF(left, top, left + clippedPanelW, top + clippedPanelH);
         layout.toggleRect = D2D1::RectF(
-            layout.panelRect.right - 8.0f,
+            layout.panelRect.right - kOverlayTogglePadding - kOverlayToggleSize,
             layout.panelRect.top + 10.0f,
-            layout.panelRect.right + 22.0f,
-            layout.panelRect.top + 38.0f);
+            layout.panelRect.right - kOverlayTogglePadding,
+            layout.panelRect.top + 10.0f + kOverlayToggleSize);
         layout.contentRect = D2D1::RectF(
             layout.panelRect.left + kOverlayUiPadding,
             layout.panelRect.top + 58.0f,
@@ -2601,13 +2634,19 @@ private:
             return false;
 
         if (PointInRect(x, y, layout.toggleRect)) {
+            ClearOverlayInputFocus();
             m_usersPanelCollapsed = !m_usersPanelCollapsed;
             StartUsersPanelAnimation(m_usersPanelCollapsed ? 0.0f : 1.0f);
             Invalidate();
             return true;
         }
 
-        return layout.progress > 0.04f && PointInRect(x, y, layout.panelRect);
+        if (layout.progress > 0.04f && PointInRect(x, y, layout.panelRect)) {
+            ClearOverlayInputFocus();
+            return true;
+        }
+
+        return false;
     }
 
     void DrawUsersPanel(const ViewState& view)
@@ -2637,7 +2676,7 @@ private:
         D2D1_RECT_F titleRect = D2D1::RectF(
             layout.panelRect.left + kOverlayUiPadding,
             layout.panelRect.top + kOverlayUiPadding - 1.0f,
-            layout.panelRect.right - kOverlayUiPadding - 12.0f,
+            layout.toggleRect.left - kOverlayTogglePadding,
             layout.panelRect.top + kOverlayUiPadding + 22.0f);
         m_overlayUi.DrawLabel(L"Users", m_overlayUi.TitleFormat(), titleRect);
 
@@ -2818,7 +2857,7 @@ private:
         if (PointInRect(x, y, layout.toggleRect)) {
             m_responderChatCollapsed = !m_responderChatCollapsed;
             if (m_responderChatCollapsed)
-                m_responderChatInputFocused = false;
+                ClearOverlayInputFocus();
             StartResponderChatAnimation(m_responderChatCollapsed ? 0.0f : 1.0f);
             Invalidate();
             return true;
@@ -2828,6 +2867,7 @@ private:
             return false;
 
         if (PointInRect(x, y, layout.clearRect)) {
+            ClearOverlayInputFocus();
             if (m_canClearResponderChat && !m_chatMessages.empty() && m_onChatClear)
                 m_onChatClear();
             Invalidate();
@@ -2836,14 +2876,16 @@ private:
 
         if (PointInRect(x, y, layout.sendRect)) {
             SubmitResponderChatDraft();
-            m_responderChatInputFocused = true;
+            SetOverlayInputFocus(OverlayInputFocus::ResponderChat);
             return true;
         }
 
-        if (TryOpenResponderChatLinkAt(x, y, layout))
+        if (TryOpenResponderChatLinkAt(x, y, layout)) {
+            ClearOverlayInputFocus();
             return true;
+        }
 
-        m_responderChatInputFocused = PointInRect(x, y, layout.inputRect);
+        SetOverlayInputFocus(PointInRect(x, y, layout.inputRect) ? OverlayInputFocus::ResponderChat : OverlayInputFocus::None);
         Invalidate();
         return true;
     }
@@ -2864,7 +2906,7 @@ private:
             return true;
         }
         if (key == VK_ESCAPE) {
-            m_responderChatInputFocused = false;
+            ClearOverlayInputFocus();
             Invalidate();
             return true;
         }
@@ -2983,10 +3025,10 @@ private:
                 width - kOverlayUiMargin + offset,
                 kOverlayUiMargin + MaxValue(120.0f, usableH));
             layout.historyToggleRect = D2D1::RectF(
-                layout.historyRect.left + 6.0f,
+                layout.historyRect.left + kOverlayTogglePadding,
                 layout.historyRect.top + 12.0f,
-                layout.historyRect.left + 31.0f,
-                layout.historyRect.top + 39.0f);
+                layout.historyRect.left + kOverlayTogglePadding + kOverlayToggleSize,
+                layout.historyRect.top + 12.0f + kOverlayToggleSize);
             const ResponderChatLayout chatLayout = BuildResponderChatLayout(view);
             if (chatLayout.progress > 0.04f && RectsOverlap(layout.historyRect, chatLayout.panelRect)) {
                 const float clippedBottom = chatLayout.panelRect.top - kOverlayUiGap;
@@ -3144,6 +3186,7 @@ private:
             return false;
 
         if (PointInRect(x, y, layout.historyToggleRect)) {
+            ClearOverlayInputFocus();
             m_notificationHistoryCollapsed = !m_notificationHistoryCollapsed;
             StartNotificationHistoryAnimation(m_notificationHistoryCollapsed ? 0.0f : 1.0f);
             Invalidate();
@@ -3154,6 +3197,7 @@ private:
             return false;
 
         if (PointInRect(x, y, NotificationHistoryClearRect(layout.historyRect))) {
+            ClearOverlayInputFocus();
             m_notificationHistoryScroll = 0.0f;
             if (m_onNotificationHistoryClear)
                 m_onNotificationHistoryClear();
@@ -3172,11 +3216,13 @@ private:
             m_notificationHistoryScrollbarDragOffset = PointInRect(x, y, thumb)
                 ? static_cast<float>(y) - thumb.top
                 : (thumb.bottom - thumb.top) * 0.5f;
+            ClearOverlayInputFocus();
             SetCapture(m_hwnd);
             SetNotificationHistoryScrollFromThumbY(static_cast<float>(y), m_notificationHistoryScrollbarDragOffset);
             return true;
         }
 
+        ClearOverlayInputFocus();
         return false;
     }
 
@@ -3273,7 +3319,7 @@ private:
         m_overlayUi.DrawButton(toggleButton);
 
         D2D1_RECT_F titleRect = D2D1::RectF(
-            rect.left + kOverlayUiPadding + 24.0f,
+            layout.historyToggleRect.right + kOverlayTogglePadding,
             rect.top + kOverlayUiPadding - 1.0f,
             rect.right - kOverlayUiPadding - 78.0f,
             rect.top + kOverlayUiPadding + 22.0f);
@@ -3284,7 +3330,7 @@ private:
             ? L"No notifications yet"
             : std::to_wstring(m_notificationHistory.size()) + L" recent notification(s)";
         D2D1_RECT_F countRect = D2D1::RectF(
-            rect.left + kOverlayUiPadding,
+            layout.historyToggleRect.right + kOverlayTogglePadding,
             rect.top + kOverlayUiPadding + 23.0f,
             rect.right - kOverlayUiPadding,
             rect.top + kOverlayUiPadding + 43.0f);
@@ -3703,11 +3749,11 @@ private:
         textBox.text = m_noteEditorText;
         textBox.placeholder = L"Type note text here...";
         textBox.bounds = D2D1::RectF(rect.left + 12.0f, rect.top + 42.0f, rect.right - 12.0f, rect.bottom - 54.0f);
-        textBox.focused = true;
+        textBox.focused = m_overlayInputFocus == OverlayInputFocus::NoteEditor;
         m_overlayUi.DrawTextBox(textBox);
 
         const bool showCaret = (GetTickCount64() / 550) % 2 == 0;
-        if (showCaret && m_noteEditorText.empty()) {
+        if (textBox.focused && showCaret && m_noteEditorText.empty()) {
             m_rt->DrawLine(
                 D2D1::Point2F(textBox.bounds.left + 10.0f, textBox.bounds.top + 10.0f),
                 D2D1::Point2F(textBox.bounds.left + 10.0f, textBox.bounds.bottom - 10.0f),
@@ -4452,6 +4498,7 @@ private:
     size_t m_noteEditorCursor = 0;
     double m_noteEditorLat = 0.0;
     double m_noteEditorLon = 0.0;
+    OverlayInputFocus m_overlayInputFocus = OverlayInputFocus::None;
     AppNotification m_activeNotification;
     std::vector<AppNotification> m_notificationHistory;
     bool m_hasActiveNotification = false;

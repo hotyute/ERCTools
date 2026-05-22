@@ -1149,9 +1149,13 @@ public:
                 return BinaryError(opcode, 400, "invalid_payload", L"Binary request is missing the session token.");
 
             if (opcode == kBinaryLogout) {
+                std::wstring reason;
+                reader.Text(reason);
                 std::wstring error;
                 if (!m_database.DeleteSession(WideToUtf8(token), error))
                     return BinaryError(opcode, error.rfind(L"Missing bearer token", 0) == 0 ? 401 : 500, IsDatabaseErrorMessage(error) ? "database_error" : "logout_failed", error);
+                if (!reason.empty())
+                    std::wcout << L"Client session ended: " << reason << L"\n";
                 return BinaryOk(opcode);
             }
 
@@ -1587,9 +1591,21 @@ private:
 
     HttpResponse HandleLogout(const HttpRequest& req)
     {
+        std::wstring reason;
+        if (!req.body.empty()) {
+            try {
+                json body = json::parse(req.body);
+                reason = PickWide(body, { "reason" });
+            }
+            catch (...) {
+            }
+        }
+
         std::wstring error;
         if (!m_database.DeleteSession(BearerToken(req), error))
             return ErrorResponse(error.rfind(L"Missing bearer token", 0) == 0 ? 401 : 500, error, error.rfind(L"Missing bearer token", 0) == 0 ? "missing_token" : "database_error");
+        if (!reason.empty())
+            std::wcout << L"Client session ended: " << reason << L"\n";
         return JsonResponse(200, { { "ok", true } });
     }
 

@@ -1525,8 +1525,13 @@ private:
             OnGlobalSettingsSyncReady(reinterpret_cast<GlobalSettingsResult*>(lParam));
             return 0;
 
+        case WM_CLOSE:
+            LogoutOnlineSession(L"client_closed");
+            DestroyWindow(m_hwnd);
+            return 0;
+
         case WM_DESTROY:
-            LogoutOnlineSession();
+            LogoutOnlineSession(L"client_destroyed");
             g_appQuitting.store(true);
             SaveSettings();
             RemoveNotificationIcon();
@@ -1872,13 +1877,13 @@ private:
             break;
 
         case IDM_FILE_LOGOUT:
-            LogoutOnlineSession();
+            LogoutOnlineSession(L"user_logout");
             m_logoutRequested = true;
             DestroyWindow(m_hwnd);
             break;
 
         case IDM_FILE_EXIT:
-            LogoutOnlineSession();
+            LogoutOnlineSession(L"client_closed");
             DestroyWindow(m_hwnd);
             break;
 
@@ -2105,19 +2110,20 @@ private:
         return role == L"administrator" || role == L"admin" || role == L"supervisor" || role == L"sup";
     }
 
-    void LogoutOnlineSession()
+    void LogoutOnlineSession(const std::wstring& reason = L"client_closed")
     {
         if (m_logoutSent || !IsOnlineMode())
             return;
 
         m_logoutSent = true;
         BinaryCallResult binary;
-        if (BinaryLogout(ServerBaseUrl(), m_session, binary) || binary.protocolAvailable)
+        if (BinaryLogout(ServerBaseUrl(), m_session, reason, binary) || binary.protocolAvailable)
             return;
 
         std::string response;
         std::wstring error;
-        HttpPostJsonTextWithHeaders(AppendPath(ServerBaseUrl(), L"/api/auth/logout"), "{}", BearerAuthHeader(m_session), response, error);
+        std::string body = "{\"reason\":" + JsonEscape(reason) + "}";
+        HttpPostJsonTextWithHeaders(AppendPath(ServerBaseUrl(), L"/api/auth/logout"), body, BearerAuthHeader(m_session), response, error);
     }
 
     std::wstring MapNoteAuthor() const
@@ -7769,24 +7775,34 @@ private:
 
         bool pressed = (dis->itemState & ODS_SELECTED) != 0;
         bool hot = (dis->itemState & ODS_HOTLIGHT) != 0;
-        HBRUSH bg = CreateSolidBrush(pressed ? RGB(21, 92, 171) : (hot ? RGB(32, 124, 229) : RGB(0, 103, 192)));
-        FillRect(dis->hDC, &dis->rcItem, bg);
-        DeleteObject(bg);
+        bool disabled = (dis->itemState & ODS_DISABLED) != 0;
 
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(88, 166, 255));
+        HBRUSH parentBg = CreateSolidBrush(kUiBackground);
+        FillRect(dis->hDC, &dis->rcItem, parentBg);
+        DeleteObject(parentBg);
+
+        RECT buttonRect = dis->rcItem;
+        InflateRect(&buttonRect, -1, -1);
+
+        COLORREF fillColor = disabled
+            ? RGB(174, 187, 202)
+            : (pressed ? RGB(21, 92, 171) : (hot ? RGB(32, 124, 229) : RGB(0, 103, 192)));
+        HBRUSH fill = CreateSolidBrush(fillColor);
+        HPEN pen = CreatePen(PS_SOLID, 1, disabled ? RGB(151, 164, 180) : RGB(88, 166, 255));
         HGDIOBJ oldPen = SelectObject(dis->hDC, pen);
-        HGDIOBJ oldBrush = SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
-        RoundRect(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom, 9, 9);
+        HGDIOBJ oldBrush = SelectObject(dis->hDC, fill);
+        RoundRect(dis->hDC, buttonRect.left, buttonRect.top, buttonRect.right, buttonRect.bottom, 10, 10);
         SelectObject(dis->hDC, oldBrush);
         SelectObject(dis->hDC, oldPen);
         DeleteObject(pen);
+        DeleteObject(fill);
 
         wchar_t text[128]{};
         GetWindowTextW(dis->hwndItem, text, _countof(text));
         SetBkMode(dis->hDC, TRANSPARENT);
-        SetTextColor(dis->hDC, RGB(255, 255, 255));
+        SetTextColor(dis->hDC, disabled ? RGB(238, 242, 247) : RGB(255, 255, 255));
         HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(dis->hDC, m_font));
-        RECT textRc = dis->rcItem;
+        RECT textRc = buttonRect;
         DrawTextW(dis->hDC, text, -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         SelectObject(dis->hDC, oldFont);
         return TRUE;

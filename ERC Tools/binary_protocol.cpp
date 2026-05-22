@@ -464,10 +464,11 @@ bool BinaryLogin(
     return true;
 }
 
-bool BinaryLogout(const std::wstring& serverBaseUrl, const ClientSession& session, BinaryCallResult& resultOut)
+bool BinaryLogout(const std::wstring& serverBaseUrl, const ClientSession& session, const std::wstring& reason, BinaryCallResult& resultOut)
 {
     BinaryWriter request;
     WriteSessionToken(request, session);
+    request.Text(reason);
     std::vector<BYTE> payload;
     return FinishCall(kOpLogout, request, resultOut, payload, serverBaseUrl);
 }

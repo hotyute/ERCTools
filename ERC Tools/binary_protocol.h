@@ -42,7 +42,7 @@ bool BinaryLogin(
     const std::wstring& pod,
     BinaryLoginResult& resultOut);
 
-bool BinaryLogout(const std::wstring& serverBaseUrl, const ClientSession& session, BinaryCallResult& resultOut);
+bool BinaryLogout(const std::wstring& serverBaseUrl, const ClientSession& session, const std::wstring& reason, BinaryCallResult& resultOut);
 bool BinaryPollCollaboration(const std::wstring& serverBaseUrl, const ClientSession& session, BinaryPollResult& resultOut);
 bool BinarySendChat(const std::wstring& serverBaseUrl, const ClientSession& session, const std::wstring& text, BinaryCallResult& resultOut);
 bool BinaryClearChat(const std::wstring& serverBaseUrl, const ClientSession& session, BinaryCallResult& resultOut);
