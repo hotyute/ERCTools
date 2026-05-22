@@ -99,6 +99,7 @@ constexpr uint16_t kBinaryUpdateNote = 7;
 constexpr uint16_t kBinaryDeleteNote = 8;
 constexpr uint16_t kBinaryGetSettings = 9;
 constexpr uint16_t kBinarySetSettings = 10;
+constexpr uint16_t kBinaryCreateAccount = 11;
 
 struct BinaryResponse
 {
@@ -740,6 +741,81 @@ public:
         return true;
     }
 
+    bool CreateOrUpdateUser(
+        const std::wstring& username,
+        const std::wstring& displayName,
+        const std::wstring& password,
+        const std::wstring& position,
+        bool active,
+        std::wstring& errorOut,
+        std::string& codeOut)
+    {
+        codeOut.clear();
+        std::wstring cleanUsername = TrimWide(username);
+        std::wstring cleanPassword = password;
+        std::wstring cleanDisplayName = TrimWide(displayName);
+        std::wstring cleanPosition = CanonicalPosition(position);
+        if (cleanDisplayName.empty())
+            cleanDisplayName = cleanUsername;
+
+        if (cleanUsername.empty() || cleanPassword.empty() || cleanDisplayName.empty() || PositionRank(cleanPosition) <= 0) {
+            errorOut = L"Username, display name, password and position are required.";
+            codeOut = "missing_fields";
+            return false;
+        }
+
+        std::vector<unsigned char> salt(16);
+        if (!RandomBytes(salt)) {
+            errorOut = L"Could not create password salt.";
+            codeOut = "hash_failed";
+            return false;
+        }
+
+        constexpr int iterations = 150000;
+        std::string hashHex;
+        if (!DerivePasswordHash(cleanPassword, salt, iterations, hashHex)) {
+            errorOut = L"Could not hash password.";
+            codeOut = "hash_failed";
+            return false;
+        }
+
+        OdbcConnection db(m_config.databaseConnectionString);
+        auto existing = db.Query(L"SELECT id FROM users WHERE username = ? LIMIT 1", { cleanUsername }, errorOut);
+        if (!errorOut.empty()) {
+            errorOut = L"Database account lookup failed: " + errorOut;
+            codeOut = "database_error";
+            return false;
+        }
+
+        std::wstring activeText = active ? L"1" : L"0";
+        std::wstring saltHex = Utf8ToWide(HexFromBytes(salt));
+        std::wstring hashWide = Utf8ToWide(hashHex);
+        std::wstring iterationsText = std::to_wstring(iterations);
+        if (!existing.empty()) {
+            bool ok = db.Execute(
+                L"UPDATE users SET display_name = ?, position = ?, password_salt = ?, password_hash = ?, password_iterations = ?, active = ? WHERE username = ?",
+                { cleanDisplayName, cleanPosition, saltHex, hashWide, iterationsText, activeText, cleanUsername },
+                errorOut);
+            if (!ok) {
+                errorOut = L"Database account update failed: " + errorOut;
+                codeOut = "database_error";
+                return false;
+            }
+            return true;
+        }
+
+        bool ok = db.Execute(
+            L"INSERT INTO users (username, display_name, position, pod, password_salt, password_hash, password_iterations, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            { cleanUsername, cleanDisplayName, cleanPosition, L"Pod 1", saltHex, hashWide, iterationsText, activeText },
+            errorOut);
+        if (!ok) {
+            errorOut = L"Database account creation failed: " + errorOut;
+            codeOut = "database_error";
+            return false;
+        }
+        return true;
+    }
+
     bool CreateSession(const UserRecord& user, std::wstring& tokenOut, std::wstring& errorOut)
     {
         std::vector<unsigned char> tokenBytes(32);
@@ -1181,6 +1257,8 @@ public:
                 return HandleBinaryGetSettings(opcode);
             case kBinarySetSettings:
                 return HandleBinarySetSettings(opcode, reader, user);
+            case kBinaryCreateAccount:
+                return HandleBinaryCreateAccount(opcode, reader, user);
             default:
                 return BinaryError(opcode, 404, "unknown_opcode", L"Unknown ERC binary opcode.");
             }
@@ -1209,6 +1287,8 @@ public:
 
             if (req.method == "GET" && req.path == "/api/users/online")
                 return HandleOnlineUsers();
+            if (req.method == "POST" && req.path == "/api/users")
+                return HandleCreateAccount(req, user);
             if (req.method == "GET" && req.path == "/api/chat")
                 return HandleGetChat();
             if (req.method == "POST" && req.path == "/api/chat")
@@ -1409,6 +1489,36 @@ private:
         std::wstring error;
         if (!m_database.ClearChatMessages(error))
             return BinaryError(opcode, 500, "database_error", error);
+        return BinaryOk(opcode);
+    }
+
+    BinaryResponse HandleBinaryCreateAccount(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring username;
+        std::wstring displayName;
+        std::wstring password;
+        std::wstring position;
+        uint32_t active = 1;
+        if (!reader.Text(username) ||
+            !reader.Text(displayName) ||
+            !reader.Text(password) ||
+            !reader.Text(position) ||
+            !reader.U32(active))
+        {
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary account creation payload is incomplete.");
+        }
+
+        if (!CanEditGlobalSettings(user))
+            return BinaryError(opcode, 403, "forbidden", L"Only Administrators and Supervisors can create accounts.");
+
+        if (PositionRank(position) > PositionRank(user.position))
+            return BinaryError(opcode, 403, "position_not_allowed", L"You cannot create an account above your current position.");
+
+        std::wstring error;
+        std::string code;
+        if (!m_database.CreateOrUpdateUser(username, displayName, password, position, active != 0, error, code))
+            return BinaryError(opcode, IsDatabaseErrorMessage(error) ? 500 : 400, code.empty() ? "account_create_failed" : code.c_str(), error);
+
         return BinaryOk(opcode);
     }
 
@@ -1616,6 +1726,39 @@ private:
         if (!error.empty())
             return ErrorResponse(500, error, "database_error");
         return JsonResponse(200, { { "ok", true }, { "users", users } });
+    }
+
+    HttpResponse HandleCreateAccount(const HttpRequest& req, const UserRecord& user)
+    {
+        if (!CanEditGlobalSettings(user))
+            return ErrorResponse(403, L"Only Administrators and Supervisors can create accounts.", "forbidden");
+
+        json body;
+        try {
+            body = json::parse(req.body.empty() ? "{}" : req.body);
+        }
+        catch (const std::exception& e) {
+            return ErrorResponse(400, L"Invalid account JSON: " + Utf8ToWide(e.what()), "invalid_json");
+        }
+
+        std::wstring username = PickWide(body, { "username" });
+        std::wstring displayName = PickWide(body, { "displayName", "display_name", "name" });
+        std::wstring password = PickWide(body, { "password" });
+        std::wstring position = PickWide(body, { "position", "role" });
+        bool active = true;
+        auto activeIt = body.find("active");
+        if (activeIt != body.end() && activeIt->is_boolean())
+            active = activeIt->get<bool>();
+
+        if (PositionRank(position) > PositionRank(user.position))
+            return ErrorResponse(403, L"You cannot create an account above your current position.", "position_not_allowed");
+
+        std::wstring error;
+        std::string code;
+        if (!m_database.CreateOrUpdateUser(username, displayName, password, position, active, error, code))
+            return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 400, error, code.empty() ? "account_create_failed" : code.c_str());
+
+        return JsonResponse(200, { { "ok", true } });
     }
 
     HttpResponse HandleGetChat()

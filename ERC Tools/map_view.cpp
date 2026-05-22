@@ -1697,6 +1697,20 @@ private:
 
     void OnMouseMove(int x, int y, UINT buttons)
     {
+        if (m_draggingUsersPanel && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            POINT pt{ x, y };
+            const int dx = pt.x - m_lastMouse.x;
+            const int dy = pt.y - m_lastMouse.y;
+            if (dx != 0 || dy != 0) {
+                m_usersPanelOffsetX += static_cast<float>(dx);
+                m_usersPanelOffsetY += static_cast<float>(dy);
+                ClampUsersPanelOffsets(BuildViewState());
+                m_lastMouse = pt;
+                Invalidate();
+            }
+            return;
+        }
+
         if (m_draggingNotificationHistoryScrollbar && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
             SetNotificationHistoryScrollFromThumbY(static_cast<float>(y), m_notificationHistoryScrollbarDragOffset);
             return;
@@ -1773,6 +1787,16 @@ private:
     {
         if (GetCapture() == m_hwnd)
             ReleaseCapture();
+
+        if (m_draggingUsersPanel) {
+            m_draggingUsersPanel = false;
+            m_notificationUiMouseDown = false;
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            Invalidate();
+            return;
+        }
 
         if (m_draggingNotificationHistoryScrollbar) {
             m_draggingNotificationHistoryScrollbar = false;
@@ -2471,6 +2495,7 @@ private:
     {
         D2D1_RECT_F panelRect{};
         D2D1_RECT_F toggleRect{};
+        D2D1_RECT_F dragRect{};
         D2D1_RECT_F contentRect{};
         float progress = 0.0f;
         bool hasPanel = false;
@@ -2534,14 +2559,27 @@ private:
 
         layout.progress = ClampValue(m_usersPanelOpenProgress, 0.0f, 1.0f);
         const float offset = (1.0f - layout.progress) * MaxValue(0.0f, clippedPanelW - tabW);
-        const float left = kOverlayUiMargin - offset;
-        const float top = kOverlayUiMargin + 64.0f;
+        const float openLeft = ClampValue(
+            kOverlayUiMargin + m_usersPanelOffsetX,
+            kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - clippedPanelW));
+        const float openTop = ClampValue(
+            kOverlayUiMargin + 64.0f + m_usersPanelOffsetY,
+            kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, height - kOverlayUiMargin - clippedPanelH));
+        const float left = openLeft - offset;
+        const float top = openTop;
         layout.panelRect = D2D1::RectF(left, top, left + clippedPanelW, top + clippedPanelH);
         layout.toggleRect = D2D1::RectF(
             layout.panelRect.right - kOverlayTogglePadding - kOverlayToggleSize,
             layout.panelRect.top + 10.0f,
             layout.panelRect.right - kOverlayTogglePadding,
             layout.panelRect.top + 10.0f + kOverlayToggleSize);
+        layout.dragRect = D2D1::RectF(
+            layout.panelRect.left + kOverlayUiPadding,
+            layout.panelRect.top,
+            layout.toggleRect.left - kOverlayTogglePadding,
+            layout.panelRect.top + 54.0f);
         layout.contentRect = D2D1::RectF(
             layout.panelRect.left + kOverlayUiPadding,
             layout.panelRect.top + 58.0f,
@@ -2549,6 +2587,27 @@ private:
             layout.panelRect.bottom - kOverlayUiPadding);
         layout.hasPanel = true;
         return layout;
+    }
+
+    void ClampUsersPanelOffsets(const ViewState& view)
+    {
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float panelW = ClampValue(width * 0.20f, 230.0f, 300.0f);
+        const float panelH = ClampValue(height * 0.36f, 220.0f, 360.0f);
+        const float clippedPanelW = MinValue(panelW, MaxValue(190.0f, width - kOverlayUiMargin * 2.0f));
+        const float clippedPanelH = MinValue(panelH, MaxValue(170.0f, height - kOverlayUiMargin * 2.0f - 120.0f));
+        const float baseTop = kOverlayUiMargin + 64.0f;
+        const float openLeft = ClampValue(
+            kOverlayUiMargin + m_usersPanelOffsetX,
+            kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - clippedPanelW));
+        const float openTop = ClampValue(
+            baseTop + m_usersPanelOffsetY,
+            kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, height - kOverlayUiMargin - clippedPanelH));
+        m_usersPanelOffsetX = openLeft - kOverlayUiMargin;
+        m_usersPanelOffsetY = openTop - baseTop;
     }
 
     static std::wstring ChatPositionKey(std::wstring position)
@@ -2638,6 +2697,15 @@ private:
             m_usersPanelCollapsed = !m_usersPanelCollapsed;
             StartUsersPanelAnimation(m_usersPanelCollapsed ? 0.0f : 1.0f);
             Invalidate();
+            return true;
+        }
+
+        if (layout.progress > 0.04f && PointInRect(x, y, layout.dragRect)) {
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            m_draggingUsersPanel = true;
+            m_notificationUiMouseDown = true;
+            m_lastMouse = POINT{ x, y };
             return true;
         }
 
@@ -4535,6 +4603,9 @@ private:
     float m_usersPanelAnimationTarget = 0.0f;
     ULONGLONG m_usersPanelAnimationStartMs = 0;
     bool m_usersPanelAnimating = false;
+    bool m_draggingUsersPanel = false;
+    float m_usersPanelOffsetX = 0.0f;
+    float m_usersPanelOffsetY = 0.0f;
     float m_notificationHistoryScroll = 0.0f;
     float m_notificationHistoryScrollbarDragOffset = 0.0f;
     D2D1_RECT_F m_lastActiveNotificationRect{};

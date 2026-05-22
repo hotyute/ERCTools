@@ -34,6 +34,7 @@ constexpr uint16_t kOpUpdateNote = 7;
 constexpr uint16_t kOpDeleteNote = 8;
 constexpr uint16_t kOpGetSettings = 9;
 constexpr uint16_t kOpSetSettings = 10;
+constexpr uint16_t kOpCreateAccount = 11;
 
 static void WriteU16(std::vector<BYTE>& out, uint16_t value)
 {
@@ -632,4 +633,25 @@ bool BinarySetGlobalSettings(const std::wstring& serverBaseUrl, const ClientSess
     request.JsonText(settings);
     std::vector<BYTE> payload;
     return FinishCall(kOpSetSettings, request, resultOut, payload, serverBaseUrl);
+}
+
+bool BinaryCreateAccount(
+    const std::wstring& serverBaseUrl,
+    const ClientSession& session,
+    const std::wstring& username,
+    const std::wstring& displayName,
+    const std::wstring& password,
+    const std::wstring& position,
+    bool active,
+    BinaryCallResult& resultOut)
+{
+    BinaryWriter request;
+    WriteSessionToken(request, session);
+    request.Text(username);
+    request.Text(displayName);
+    request.Text(password);
+    request.Text(position);
+    request.U32(active ? 1u : 0u);
+    std::vector<BYTE> payload;
+    return FinishCall(kOpCreateAccount, request, resultOut, payload, serverBaseUrl);
 }

@@ -51,3 +51,12 @@ bool BinaryUpdateNote(const std::wstring& serverBaseUrl, const ClientSession& se
 bool BinaryDeleteNote(const std::wstring& serverBaseUrl, const ClientSession& session, const std::wstring& noteId, BinaryCallResult& resultOut);
 bool BinaryGetGlobalSettings(const std::wstring& serverBaseUrl, const ClientSession& session, json& settingsOut, BinaryCallResult& resultOut);
 bool BinarySetGlobalSettings(const std::wstring& serverBaseUrl, const ClientSession& session, const json& settings, BinaryCallResult& resultOut);
+bool BinaryCreateAccount(
+    const std::wstring& serverBaseUrl,
+    const ClientSession& session,
+    const std::wstring& username,
+    const std::wstring& displayName,
+    const std::wstring& password,
+    const std::wstring& position,
+    bool active,
+    BinaryCallResult& resultOut);

@@ -51,6 +51,7 @@ constexpr int IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND = 2022;
 constexpr int IDM_FILE_LOGOUT = 2023;
 constexpr int IDM_ROADS_INCIDENTS_LIST = 2024;
 constexpr int IDM_FILE_USERS = 2025;
+constexpr int IDM_FILE_ACCOUNT_CREATOR = 2026;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -145,6 +146,8 @@ constexpr int IDC_TEMPLATES_WIZARD_NEXT = 2607;
 constexpr int IDC_TEMPLATES_WIZARD_COPY = 2608;
 constexpr int IDC_TEMPLATES_WIZARD_CLOSE = 2609;
 constexpr int IDC_TEMPLATES_WIZARD_COPY_LOCATION = 2610;
+constexpr int IDC_TEMPLATES_WIZARD_TITLE_PREVIEW = 2611;
+constexpr int IDC_TEMPLATES_WIZARD_COPY_TITLE = 2612;
 constexpr int IDC_TEMPLATES_EDITOR_LIST = 2621;
 constexpr int IDC_TEMPLATES_EDITOR_NAME = 2622;
 constexpr int IDC_TEMPLATES_EDITOR_BODY = 2623;
@@ -152,6 +155,15 @@ constexpr int IDC_TEMPLATES_EDITOR_NEW = 2624;
 constexpr int IDC_TEMPLATES_EDITOR_SAVE = 2625;
 constexpr int IDC_TEMPLATES_EDITOR_DELETE = 2626;
 constexpr int IDC_TEMPLATES_EDITOR_CLOSE = 2627;
+constexpr int IDC_TEMPLATES_EDITOR_TITLE = 2628;
+constexpr int IDC_ACCOUNT_CREATOR_USERNAME = 2641;
+constexpr int IDC_ACCOUNT_CREATOR_DISPLAY_NAME = 2642;
+constexpr int IDC_ACCOUNT_CREATOR_PASSWORD = 2643;
+constexpr int IDC_ACCOUNT_CREATOR_POSITION = 2644;
+constexpr int IDC_ACCOUNT_CREATOR_ACTIVE = 2645;
+constexpr int IDC_ACCOUNT_CREATOR_CREATE = 2646;
+constexpr int IDC_ACCOUNT_CREATOR_CLOSE = 2647;
+constexpr int IDC_ACCOUNT_CREATOR_STATUS = 2648;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
 constexpr const wchar_t* kIncidentNotificationsClassName = L"TrafficEnglandIncidentNotificationsWindow";
@@ -164,6 +176,7 @@ constexpr const wchar_t* kWeatherSystemsListClassName = L"TrafficEnglandWeatherS
 constexpr const wchar_t* kWeatherSystemNotificationsClassName = L"TrafficEnglandWeatherSystemNotificationsWindow";
 constexpr const wchar_t* kTemplatesWizardClassName = L"TrafficEnglandTemplatesWizardWindow";
 constexpr const wchar_t* kTemplatesEditorClassName = L"TrafficEnglandTemplatesEditorWindow";
+constexpr const wchar_t* kAccountCreatorClassName = L"ERCToolsAccountCreatorWindow";
 constexpr UINT WM_APP_NOTIFY_ICON = WM_APP + 20;
 constexpr UINT WM_APP_UPDATE_READY = WM_APP + 21;
 constexpr UINT WM_APP_SETTINGS_SYNC_READY = WM_APP + 22;
@@ -221,7 +234,8 @@ enum class ServerAction
     SendNote,
     UpdateNote,
     DeleteNote,
-    ClearChat
+    ClearChat,
+    CreateAccount
 };
 
 struct ServerResult
@@ -247,6 +261,7 @@ struct GlobalSettingsResult
 struct ReportTemplate
 {
     std::wstring name;
+    std::wstring title;
     std::wstring body;
 };
 
@@ -1876,6 +1891,10 @@ private:
             ToggleUsersOverlay();
             break;
 
+        case IDM_FILE_ACCOUNT_CREATOR:
+            ShowAccountCreatorWindow();
+            break;
+
         case IDM_FILE_LOGOUT:
             LogoutOnlineSession(L"user_logout");
             m_logoutRequested = true;
@@ -2110,6 +2129,25 @@ private:
         return role == L"administrator" || role == L"admin" || role == L"supervisor" || role == L"sup";
     }
 
+    int CurrentPositionRank() const
+    {
+        std::wstring role = ToLower(Trim(m_session.position));
+        if (role == L"administrator" || role == L"admin")
+            return 4;
+        if (role == L"supervisor" || role == L"sup")
+            return 3;
+        if (role == L"manager" || role == L"mgr")
+            return 2;
+        if (role == L"erc")
+            return 1;
+        return 0;
+    }
+
+    bool CanManageAccounts() const
+    {
+        return CurrentPositionRank() >= 3;
+    }
+
     void LogoutOnlineSession(const std::wstring& reason = L"client_closed")
     {
         if (m_logoutSent || !IsOnlineMode())
@@ -2240,10 +2278,13 @@ private:
                     auto nameIt = item.find("name");
                     if (nameIt != item.end())
                         reportTemplate.name = JsonValueToText(*nameIt);
+                    auto titleIt = item.find("title");
+                    if (titleIt != item.end())
+                        reportTemplate.title = JsonValueToText(*titleIt);
                     auto bodyIt = item.find("body");
                     if (bodyIt != item.end())
                         reportTemplate.body = JsonValueToText(*bodyIt);
-                    if (!reportTemplate.name.empty() || !reportTemplate.body.empty())
+                    if (!reportTemplate.name.empty() || !reportTemplate.title.empty() || !reportTemplate.body.empty())
                         m_reportTemplates.push_back(std::move(reportTemplate));
                 }
             }
@@ -2258,10 +2299,13 @@ private:
                     auto nameIt = item.find("name");
                     if (nameIt != item.end())
                         reportTemplate.name = JsonValueToText(*nameIt);
+                    auto titleIt = item.find("title");
+                    if (titleIt != item.end())
+                        reportTemplate.title = JsonValueToText(*titleIt);
                     auto bodyIt = item.find("body");
                     if (bodyIt != item.end())
                         reportTemplate.body = JsonValueToText(*bodyIt);
-                    if (!reportTemplate.name.empty() || !reportTemplate.body.empty())
+                    if (!reportTemplate.name.empty() || !reportTemplate.title.empty() || !reportTemplate.body.empty())
                         m_earthquakeReportTemplates.push_back(std::move(reportTemplate));
                 }
             }
@@ -2276,10 +2320,13 @@ private:
                     auto nameIt = item.find("name");
                     if (nameIt != item.end())
                         reportTemplate.name = JsonValueToText(*nameIt);
+                    auto titleIt = item.find("title");
+                    if (titleIt != item.end())
+                        reportTemplate.title = JsonValueToText(*titleIt);
                     auto bodyIt = item.find("body");
                     if (bodyIt != item.end())
                         reportTemplate.body = JsonValueToText(*bodyIt);
-                    if (!reportTemplate.name.empty() || !reportTemplate.body.empty())
+                    if (!reportTemplate.name.empty() || !reportTemplate.title.empty() || !reportTemplate.body.empty())
                         m_weatherSystemReportTemplates.push_back(std::move(reportTemplate));
                 }
             }
@@ -2329,6 +2376,7 @@ private:
 
         ReportTemplate reportTemplate;
         reportTemplate.name = L"National Highways incident";
+        reportTemplate.title = L"UK - ENGLAND - $TITLE_SHORT - $ROAD $DIRECTION %JUNCTION_RANGE.";
         reportTemplate.body = L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION %JUNCTIONS_WITH_DATA with %LANECLOSURES closed. Expect delays and congestion, avoid the area if possible, find alternate routes, monitor local traffic and media for updates. Allow extra time for your journey.";
         m_reportTemplates.push_back(std::move(reportTemplate));
         m_reportTemplatesConfigured = true;
@@ -2341,6 +2389,7 @@ private:
 
         ReportTemplate reportTemplate;
         reportTemplate.name = L"Earthquake report";
+        reportTemplate.title = L"EARTHQUAKE - M$MAGNITUDE - $PLACE.";
         reportTemplate.body = L"$DATE: EARTHQUAKE REPORTS: An earthquake of magnitude $MAGNITUDE was recorded near $PLACE at $TIME. Coordinates: %LATITUDE, %LONGITUDE. Depth: %DEPTH km.";
         m_earthquakeReportTemplates.push_back(std::move(reportTemplate));
         m_earthquakeReportTemplatesConfigured = true;
@@ -2353,6 +2402,7 @@ private:
 
         ReportTemplate reportTemplate;
         reportTemplate.name = L"Weather system report";
+        reportTemplate.title = L"WEATHER SYSTEM - $SYSTEM - $CATEGORY - $BASIN.";
         reportTemplate.body = L"$DATE: WEATHER SYSTEM REPORTS: $SYSTEM is active in the $BASIN basin as a $CATEGORY with winds of $WIND. Current position: %LATITUDE, %LONGITUDE. 24-hour projection: %FORECAST_LATITUDE, %FORECAST_LONGITUDE with $FORECAST_WIND winds.";
         m_weatherSystemReportTemplates.push_back(std::move(reportTemplate));
         m_weatherSystemReportTemplatesConfigured = true;
@@ -2394,6 +2444,15 @@ private:
         return L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION %JUNCTIONS_WITH_DATA with %LANECLOSURES closed. Allow extra time for your journey.";
     }
 
+    std::wstring DefaultTemplateTitleForContext(TemplateContext context) const
+    {
+        if (context == TemplateContext::Earthquakes)
+            return L"EARTHQUAKE - M$MAGNITUDE - $PLACE.";
+        if (context == TemplateContext::WeatherSystems)
+            return L"WEATHER SYSTEM - $SYSTEM - $CATEGORY - $BASIN.";
+        return L"UK - ENGLAND - $TITLE_SHORT - $ROAD $DIRECTION %JUNCTION_RANGE.";
+    }
+
     void EnsureDefaultTemplatesForContext(TemplateContext context)
     {
         if (context == TemplateContext::Earthquakes)
@@ -2411,6 +2470,16 @@ private:
                 reportTemplate.body,
                 L"between %JUNCTION1 (%JUNCTIONDATA1) and %JUNCTION2 (%JUNCTIONDATA2)",
                 L"%JUNCTIONS_WITH_DATA");
+            if (Trim(reportTemplate.title).empty())
+                reportTemplate.title = DefaultTemplateTitleForContext(TemplateContext::Roads);
+        }
+        for (ReportTemplate& reportTemplate : m_earthquakeReportTemplates) {
+            if (Trim(reportTemplate.title).empty())
+                reportTemplate.title = DefaultTemplateTitleForContext(TemplateContext::Earthquakes);
+        }
+        for (ReportTemplate& reportTemplate : m_weatherSystemReportTemplates) {
+            if (Trim(reportTemplate.title).empty())
+                reportTemplate.title = DefaultTemplateTitleForContext(TemplateContext::WeatherSystems);
         }
     }
 
@@ -2470,6 +2539,7 @@ private:
             for (const ReportTemplate& reportTemplate : m_reportTemplates) {
                 json item = json::object();
                 item["name"] = WideToUtf8(reportTemplate.name);
+                item["title"] = WideToUtf8(reportTemplate.title);
                 item["body"] = WideToUtf8(reportTemplate.body);
                 settings["roadReportTemplates"].push_back(std::move(item));
             }
@@ -2477,6 +2547,7 @@ private:
             for (const ReportTemplate& reportTemplate : m_earthquakeReportTemplates) {
                 json item = json::object();
                 item["name"] = WideToUtf8(reportTemplate.name);
+                item["title"] = WideToUtf8(reportTemplate.title);
                 item["body"] = WideToUtf8(reportTemplate.body);
                 settings["earthquakeReportTemplates"].push_back(std::move(item));
             }
@@ -2484,6 +2555,7 @@ private:
             for (const ReportTemplate& reportTemplate : m_weatherSystemReportTemplates) {
                 json item = json::object();
                 item["name"] = WideToUtf8(reportTemplate.name);
+                item["title"] = WideToUtf8(reportTemplate.title);
                 item["body"] = WideToUtf8(reportTemplate.body);
                 settings["weatherSystemReportTemplates"].push_back(std::move(item));
             }
@@ -3931,6 +4003,19 @@ private:
             SetStatusText(result->ok ? L"Map note deleted." : L"Note delete kept locally.");
             PollServerAsync();
         }
+        else if (result->action == ServerAction::CreateAccount) {
+            EnableWindow(m_accountCreatorCreateBtn, TRUE);
+            if (result->ok) {
+                SetWindowTextSafe(m_accountCreatorPasswordEdit, L"");
+                SetWindowTextSafe(m_accountCreatorStatusLabel, L"Account created or updated.");
+                SetStatusText(L"Account created or updated.");
+            }
+            else {
+                std::wstring error = result->error.empty() ? L"Account creation failed." : L"Account creation failed: " + result->error;
+                SetWindowTextSafe(m_accountCreatorStatusLabel, error);
+                SetStatusText(error);
+            }
+        }
         delete result;
     }
 
@@ -4023,6 +4108,7 @@ private:
         HMENU viewMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_SETTINGS, L"Settings...");
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_USERS, L"Users");
+        AppendMenuW(fileMenu, MF_STRING, IDM_FILE_ACCOUNT_CREATOR, L"Account Creator...");
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_LOGOUT, L"Logout");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
@@ -5774,6 +5860,16 @@ private:
         return L"";
     }
 
+    static std::wstring ShortTrafficTitle(const std::wstring& title)
+    {
+        std::wstring key = ToLower(CompactTemplateWhitespace(title));
+        if (key.find(L"road traffic collision") != std::wstring::npos)
+            return L"RTC";
+        if (key.find(L"road traffic incident") != std::wstring::npos)
+            return L"RTI";
+        return title;
+    }
+
     std::vector<std::pair<std::wstring, std::wstring>> BuildTemplateVariables(const TrafficAlert& alert) const
     {
         std::vector<std::pair<std::wstring, std::wstring>> variables;
@@ -5783,7 +5879,9 @@ private:
         std::vector<JunctionTemplateData> junctions = ExtractJunctionsFromLocation(location);
 
         SetTemplateVariable(variables, L"$DATE", CurrentDateText());
-        SetTemplateVariable(variables, L"$TITLE", alert.title.empty() ? AlertReasonForNotification(alert) : alert.title);
+        std::wstring title = alert.title.empty() ? AlertReasonForNotification(alert) : alert.title;
+        SetTemplateVariable(variables, L"$TITLE", title);
+        SetTemplateVariable(variables, L"$TITLE_SHORT", ShortTrafficTitle(title));
         SetTemplateVariable(variables, L"$ROAD", road);
         SetTemplateVariable(variables, L"$DIRECTION", direction);
         SetTemplateVariable(variables, L"%LOCATION", location);
@@ -5812,14 +5910,22 @@ private:
         }
         SetTemplateVariable(variables, L"%JUNCTIONCOUNT", std::to_wstring(junctions.size()));
         SetTemplateVariable(variables, L"%JUNCTIONS", JoinTemplateItemsAsPhrase(junctionNames));
+        std::wstring junctionRangeText = JoinTemplateItemsAsPhrase(junctionNames);
         std::wstring junctionsWithDataText = JoinTemplateItemsAsPhrase(junctionsWithData);
         if (!junctionsWithDataText.empty()) {
             std::wstring lowerLocation = ToLower(location);
-            if (lowerLocation.find(L"between") != std::wstring::npos)
+            if (lowerLocation.find(L"between") != std::wstring::npos) {
                 junctionsWithDataText = L"between " + junctionsWithDataText;
-            else if (lowerLocation.find(L" at ") != std::wstring::npos || StartsWithNoCase(lowerLocation, L"at "))
+                if (!junctionRangeText.empty())
+                    junctionRangeText = L"between " + junctionRangeText;
+            }
+            else if (lowerLocation.find(L" at ") != std::wstring::npos || StartsWithNoCase(lowerLocation, L"at ")) {
                 junctionsWithDataText = L"at " + junctionsWithDataText;
+                if (!junctionRangeText.empty())
+                    junctionRangeText = L"at " + junctionRangeText;
+            }
         }
+        SetTemplateVariable(variables, L"%JUNCTION_RANGE", junctionRangeText);
         SetTemplateVariable(variables, L"%JUNCTIONS_WITH_DATA", junctionsWithDataText);
 
         std::wstring laneClosures;
@@ -6038,16 +6144,40 @@ private:
         return output;
     }
 
-    std::wstring RenderReportTemplate(const ReportTemplate& reportTemplate) const
+    static std::wstring ToUpperText(std::wstring text)
     {
-        std::wstring output = reportTemplate.body;
+        std::transform(text.begin(), text.end(), text.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(towupper(ch));
+            });
+        return text;
+    }
+
+    std::wstring RenderTemplateText(std::wstring output, bool fixArticles, bool upperCase) const
+    {
         std::vector<std::pair<std::wstring, std::wstring>> variables = m_templateWizardVariables;
         std::sort(variables.begin(), variables.end(), [](const auto& a, const auto& b) {
             return a.first.size() > b.first.size();
             });
         for (const auto& item : variables)
             ReplaceAllText(output, item.first, item.second);
-        return FixIndefiniteArticles(output);
+        if (upperCase)
+            output = CompactTemplateWhitespace(output);
+        if (fixArticles)
+            output = FixIndefiniteArticles(output);
+        return upperCase ? ToUpperText(output) : output;
+    }
+
+    std::wstring RenderReportTemplateTitle(const ReportTemplate& reportTemplate) const
+    {
+        std::wstring titleTemplate = Trim(reportTemplate.title).empty()
+            ? DefaultTemplateTitleForContext(m_templateWizardContext)
+            : reportTemplate.title;
+        return RenderTemplateText(titleTemplate, false, true);
+    }
+
+    std::wstring RenderReportTemplate(const ReportTemplate& reportTemplate) const
+    {
+        return RenderTemplateText(reportTemplate.body, true, false);
     }
 
     bool CopyTextToClipboard(const std::wstring& text, HWND owner)
@@ -6216,7 +6346,7 @@ private:
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                720,
+                820,
                 460,
                 m_hwnd,
                 nullptr,
@@ -6237,17 +6367,21 @@ private:
     void CreateTemplatesWizardControls(HWND parent)
     {
         CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_TITLE, L"Templates Wizard", 18, 18, m_headerFont);
-        m_templateWizardDesc = CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_DESC, L"", 18, 54, nullptr, 580);
-        m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 92, 584, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
-        m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 18, 92, 584, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
-        m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 92, 584, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
-        m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 188, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
-        m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 298, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
-        m_templateWizardCopyBtn = CreateWindowExW(0, L"BUTTON", L"Copy", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 408, 344, 72, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY), m_hInst, nullptr);
-        m_templateWizardCopyLocationBtn = CreateWindowExW(0, L"BUTTON", L"Copy Coords", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 488, 344, 118, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_LOCATION), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 614, 344, 68, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_CLOSE), m_hInst, nullptr);
+        m_templateWizardDesc = CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_DESC, L"", 18, 54, nullptr, 700);
+        m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 92, 684, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
+        m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 18, 92, 684, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
+        m_templateWizardTitlePreviewLabel = CreateAutoLabel(parent, 0, L"Title", 18, 92);
+        m_templateWizardTitlePreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY, 18, 118, 684, 26, parent, ControlId(IDC_TEMPLATES_WIZARD_TITLE_PREVIEW), m_hInst, nullptr);
+        m_templateWizardBodyPreviewLabel = CreateAutoLabel(parent, 0, L"Template", 18, 158);
+        m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 184, 684, 128, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
+        m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 122, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
+        m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 232, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
+        m_templateWizardCopyTitleBtn = CreateWindowExW(0, L"BUTTON", L"Copy Title", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 342, 344, 104, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_TITLE), m_hInst, nullptr);
+        m_templateWizardCopyBtn = CreateWindowExW(0, L"BUTTON", L"Copy Template", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 454, 344, 124, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY), m_hInst, nullptr);
+        m_templateWizardCopyLocationBtn = CreateWindowExW(0, L"BUTTON", L"Copy Coords", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 586, 344, 118, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_LOCATION), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 712, 344, 68, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_CLOSE), m_hInst, nullptr);
 
-        for (HWND h : { m_templateWizardDesc, m_templateWizardList, m_templateWizardVariablesEdit, m_templateWizardPreviewEdit, m_templateWizardPrevBtn, m_templateWizardNextBtn, m_templateWizardCopyBtn, m_templateWizardCopyLocationBtn, close }) {
+        for (HWND h : { m_templateWizardDesc, m_templateWizardList, m_templateWizardVariablesEdit, m_templateWizardTitlePreviewLabel, m_templateWizardTitlePreviewEdit, m_templateWizardBodyPreviewLabel, m_templateWizardPreviewEdit, m_templateWizardPrevBtn, m_templateWizardNextBtn, m_templateWizardCopyTitleBtn, m_templateWizardCopyBtn, m_templateWizardCopyLocationBtn, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -6281,7 +6415,11 @@ private:
         const bool reviewStep = m_templateWizardStep == 2;
         ShowWindow(m_templateWizardList, chooseStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardVariablesEdit, variableStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardTitlePreviewLabel, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardTitlePreviewEdit, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardBodyPreviewLabel, reviewStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardPreviewEdit, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardCopyTitleBtn, reviewStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardCopyBtn, reviewStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardCopyLocationBtn, reviewStep ? SW_SHOW : SW_HIDE);
         EnableWindow(m_templateWizardPrevBtn, m_templateWizardStep > 0);
@@ -6298,10 +6436,11 @@ private:
         else if (variableStep)
             SetWindowTextSafe(m_templateWizardDesc, L"Review and edit the variables only. Leave the template text itself unchanged here.");
         else {
-            SetWindowTextSafe(m_templateWizardDesc, L"Review the completed message, then copy it to the clipboard.");
+            SetWindowTextSafe(m_templateWizardDesc, L"Review the completed title and template, then copy whichever section you need.");
             const auto& templates = TemplatesForContext(m_templateWizardContext);
             if (!templates.empty()) {
                 m_templateWizardTemplateIndex = MinValue<size_t>(m_templateWizardTemplateIndex, templates.size() - 1);
+                SetWindowTextSafe(m_templateWizardTitlePreviewEdit, RenderReportTemplateTitle(templates[m_templateWizardTemplateIndex]));
                 SetWindowTextSafe(m_templateWizardPreviewEdit, RenderReportTemplate(templates[m_templateWizardTemplateIndex]));
             }
         }
@@ -6351,6 +6490,14 @@ private:
                 SetStatusText(L"Template message copied to clipboard.");
             else
                 SetStatusText(L"Could not copy template message to clipboard.");
+            return;
+        }
+        if (id == IDC_TEMPLATES_WIZARD_COPY_TITLE && code == BN_CLICKED) {
+            std::wstring text = GetWindowTextString(m_templateWizardTitlePreviewEdit);
+            if (CopyTextToClipboard(text, m_templatesWizardWnd))
+                SetStatusText(L"Template title copied to clipboard.");
+            else
+                SetStatusText(L"Could not copy template title to clipboard.");
             return;
         }
         if (id == IDC_TEMPLATES_WIZARD_COPY_LOCATION && code == BN_CLICKED) {
@@ -6471,14 +6618,16 @@ private:
         m_templateEditorList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 64, 214, 340, parent, ControlId(IDC_TEMPLATES_EDITOR_LIST), m_hInst, nullptr);
         CreateAutoLabel(parent, 0, L"Name", 252, 64);
         m_templateEditorNameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 252, 90, 450, 26, parent, ControlId(IDC_TEMPLATES_EDITOR_NAME), m_hInst, nullptr);
-        CreateAutoLabel(parent, 0, L"Template", 252, 132);
-        m_templateEditorBodyEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 252, 158, 450, 246, parent, ControlId(IDC_TEMPLATES_EDITOR_BODY), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Title", 252, 124);
+        m_templateEditorTitleEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 252, 150, 450, 26, parent, ControlId(IDC_TEMPLATES_EDITOR_TITLE), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Template", 252, 192);
+        m_templateEditorBodyEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 252, 218, 450, 186, parent, ControlId(IDC_TEMPLATES_EDITOR_BODY), m_hInst, nullptr);
         HWND newBtn = CreateWindowExW(0, L"BUTTON", L"New", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_NEW), m_hInst, nullptr);
         HWND saveBtn = CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 252, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_SAVE), m_hInst, nullptr);
         HWND deleteBtn = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 348, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_DELETE), m_hInst, nullptr);
         HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 614, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_CLOSE), m_hInst, nullptr);
 
-        for (HWND h : { m_templateEditorList, m_templateEditorNameEdit, m_templateEditorBodyEdit, newBtn, saveBtn, deleteBtn, closeBtn }) {
+        for (HWND h : { m_templateEditorList, m_templateEditorNameEdit, m_templateEditorTitleEdit, m_templateEditorBodyEdit, newBtn, saveBtn, deleteBtn, closeBtn }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -6515,6 +6664,7 @@ private:
         }
         else {
             SetWindowTextSafe(m_templateEditorNameEdit, L"");
+            SetWindowTextSafe(m_templateEditorTitleEdit, L"");
             SetWindowTextSafe(m_templateEditorBodyEdit, L"");
         }
     }
@@ -6526,6 +6676,7 @@ private:
             return;
         const ReportTemplate& reportTemplate = TemplatesForContext(m_templateEditorContext)[static_cast<size_t>(selected)];
         SetWindowTextSafe(m_templateEditorNameEdit, reportTemplate.name);
+        SetWindowTextSafe(m_templateEditorTitleEdit, reportTemplate.title);
         SetWindowTextSafe(m_templateEditorBodyEdit, reportTemplate.body);
     }
 
@@ -6546,6 +6697,7 @@ private:
             auto& templates = TemplatesForContext(m_templateEditorContext);
             ReportTemplate reportTemplate;
             reportTemplate.name = L"Template " + std::to_wstring(templates.size() + 1);
+            reportTemplate.title = DefaultTemplateTitleForContext(m_templateEditorContext);
             reportTemplate.body = DefaultTemplateBodyForContext(m_templateEditorContext);
             templates.push_back(std::move(reportTemplate));
             TemplatesConfiguredForContext(m_templateEditorContext) = true;
@@ -6560,9 +6712,12 @@ private:
                 return;
             ReportTemplate& reportTemplate = TemplatesForContext(m_templateEditorContext)[static_cast<size_t>(selected)];
             reportTemplate.name = Trim(GetWindowTextString(m_templateEditorNameEdit));
+            reportTemplate.title = Trim(GetWindowTextString(m_templateEditorTitleEdit));
             reportTemplate.body = GetWindowTextString(m_templateEditorBodyEdit);
             if (reportTemplate.name.empty())
                 reportTemplate.name = L"Template " + std::to_wstring(selected + 1);
+            if (reportTemplate.title.empty())
+                reportTemplate.title = DefaultTemplateTitleForContext(m_templateEditorContext);
             SaveSettings();
             SyncTemplatesEditorList();
             SendMessageW(m_templateEditorList, LB_SETCURSEL, static_cast<WPARAM>(selected), 0);
@@ -6579,6 +6734,216 @@ private:
             SyncTemplatesEditorList();
             SetStatusText(L"Template removed.");
         }
+    }
+
+    static LRESULT CALLBACK AccountCreatorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleAccountCreatorMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleAccountCreatorMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateAccountCreatorControls(hwnd);
+            return 0;
+
+        case WM_COMMAND:
+            OnAccountCreatorCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+
+        case WM_DRAWITEM:
+            if (OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam)))
+                return TRUE;
+            break;
+
+        case WM_CTLCOLORSTATIC:
+            SetBkColor(reinterpret_cast<HDC>(wParam), kUiBackground);
+            SetTextColor(reinterpret_cast<HDC>(wParam), kUiText);
+            return reinterpret_cast<LRESULT>(ModernWindowBrush());
+
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    static void AddComboString(HWND combo, const wchar_t* text)
+    {
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text));
+    }
+
+    void ShowAccountCreatorWindow()
+    {
+        if (!IsOnlineMode()) {
+            MessageBoxW(m_hwnd, L"Account Creator is only available while signed in online.", L"Account Creator", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        if (!CanManageAccounts()) {
+            MessageBoxW(m_hwnd, L"Only Administrators and Supervisors can create accounts.", L"Account Creator", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = AccountCreatorWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kAccountCreatorClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_accountCreatorWnd || !IsWindow(m_accountCreatorWnd)) {
+            m_accountCreatorWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kAccountCreatorClassName,
+                L"Account Creator",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                500,
+                390,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        ShowWindow(m_accountCreatorWnd, SW_SHOW);
+        SetForegroundWindow(m_accountCreatorWnd);
+    }
+
+    void CreateAccountCreatorControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Account Creator", 18, 18, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Username", 18, 66);
+        m_accountCreatorUsernameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 156, 62, 300, 26, parent, ControlId(IDC_ACCOUNT_CREATOR_USERNAME), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Display Name", 18, 106);
+        m_accountCreatorDisplayNameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 156, 102, 300, 26, parent, ControlId(IDC_ACCOUNT_CREATOR_DISPLAY_NAME), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Password", 18, 146);
+        m_accountCreatorPasswordEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD, 156, 142, 300, 26, parent, ControlId(IDC_ACCOUNT_CREATOR_PASSWORD), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Position", 18, 186);
+        m_accountCreatorPositionCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 156, 182, 300, 160, parent, ControlId(IDC_ACCOUNT_CREATOR_POSITION), m_hInst, nullptr);
+
+        const int rank = CurrentPositionRank();
+        if (rank >= 4)
+            AddComboString(m_accountCreatorPositionCombo, L"Administrator");
+        if (rank >= 3)
+            AddComboString(m_accountCreatorPositionCombo, L"Supervisor");
+        AddComboString(m_accountCreatorPositionCombo, L"Manager");
+        AddComboString(m_accountCreatorPositionCombo, L"ERC");
+        SendMessageW(m_accountCreatorPositionCombo, CB_SETCURSEL, 0, 0);
+
+        m_accountCreatorActiveCheck = CreateWindowExW(0, L"BUTTON", L"Account active", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 156, 222, 180, 24, parent, ControlId(IDC_ACCOUNT_CREATOR_ACTIVE), m_hInst, nullptr);
+        SendMessageW(m_accountCreatorActiveCheck, BM_SETCHECK, BST_CHECKED, 0);
+
+        m_accountCreatorStatusLabel = CreateAutoLabel(parent, IDC_ACCOUNT_CREATOR_STATUS, L"", 18, 266, nullptr, 438);
+        m_accountCreatorCreateBtn = CreateWindowExW(0, L"BUTTON", L"Create / Update", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 156, 306, 138, 32, parent, ControlId(IDC_ACCOUNT_CREATOR_CREATE), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 368, 306, 88, 32, parent, ControlId(IDC_ACCOUNT_CREATOR_CLOSE), m_hInst, nullptr);
+
+        for (HWND h : { m_accountCreatorUsernameEdit, m_accountCreatorDisplayNameEdit, m_accountCreatorPasswordEdit, m_accountCreatorPositionCombo, m_accountCreatorActiveCheck, m_accountCreatorStatusLabel, m_accountCreatorCreateBtn, closeBtn }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+
+        AutoFitWindowToChildren(parent);
+    }
+
+    void OnAccountCreatorCommand(int id, int code)
+    {
+        if (id == IDC_ACCOUNT_CREATOR_CLOSE && code == BN_CLICKED) {
+            ShowWindow(m_accountCreatorWnd, SW_HIDE);
+            return;
+        }
+        if (id != IDC_ACCOUNT_CREATOR_CREATE || code != BN_CLICKED)
+            return;
+
+        std::wstring username = Trim(GetWindowTextString(m_accountCreatorUsernameEdit));
+        std::wstring displayName = Trim(GetWindowTextString(m_accountCreatorDisplayNameEdit));
+        std::wstring password = GetWindowTextString(m_accountCreatorPasswordEdit);
+        std::wstring position = GetWindowTextString(m_accountCreatorPositionCombo);
+        bool active = SendMessageW(m_accountCreatorActiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        if (username.empty() || password.empty() || position.empty()) {
+            SetWindowTextSafe(m_accountCreatorStatusLabel, L"Username, password and position are required.");
+            return;
+        }
+        if (displayName.empty())
+            displayName = username;
+
+        CreateAccountAsync(username, displayName, password, position, active);
+    }
+
+    void CreateAccountAsync(
+        const std::wstring& username,
+        const std::wstring& displayName,
+        const std::wstring& password,
+        const std::wstring& position,
+        bool active)
+    {
+        if (!IsOnlineMode()) {
+            SetWindowTextSafe(m_accountCreatorStatusLabel, L"Account creation requires online mode.");
+            return;
+        }
+        if (!CanManageAccounts()) {
+            SetWindowTextSafe(m_accountCreatorStatusLabel, L"Only Administrators and Supervisors can create accounts.");
+            return;
+        }
+
+        EnableWindow(m_accountCreatorCreateBtn, FALSE);
+        SetWindowTextSafe(m_accountCreatorStatusLabel, L"Creating account...");
+        std::wstring server = ServerBaseUrl();
+        if (server.empty()) {
+            EnableWindow(m_accountCreatorCreateBtn, TRUE);
+            SetWindowTextSafe(m_accountCreatorStatusLabel, L"No collaboration server is configured.");
+            return;
+        }
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ClientSession session = m_session;
+        HWND hwnd = m_hwnd;
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session, username, displayName, password, position, active]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::CreateAccount;
+
+            BinaryCallResult binary;
+            if (BinaryCreateAccount(server, session, username, displayName, password, position, active, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
+            std::string response;
+            std::wstring error;
+            std::string body = "{";
+            body += "\"username\":" + JsonEscape(username);
+            body += ",\"displayName\":" + JsonEscape(displayName);
+            body += ",\"password\":" + JsonEscape(password);
+            body += ",\"position\":" + JsonEscape(position);
+            body += ",\"active\":";
+            body += active ? "true" : "false";
+            body += "}";
+            result->ok = HttpPostJsonTextWithHeaders(AppendPath(server, L"/api/users"), body, authHeaders, response, error);
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            });
     }
 
     bool TryParsePercentThreshold(const std::wstring& text, double& valueOut) const
@@ -8075,6 +8440,7 @@ private:
     HWND m_earthquakeNotificationsWnd = nullptr;
     HWND m_templatesWizardWnd = nullptr;
     HWND m_templatesEditorWnd = nullptr;
+    HWND m_accountCreatorWnd = nullptr;
     HWND m_settingsFilterCombo = nullptr;
     HWND m_settingsOrderCombo = nullptr;
     HWND m_settingsRefreshOffRadio = nullptr;
@@ -8120,14 +8486,26 @@ private:
     HWND m_templateWizardDesc = nullptr;
     HWND m_templateWizardList = nullptr;
     HWND m_templateWizardVariablesEdit = nullptr;
+    HWND m_templateWizardTitlePreviewLabel = nullptr;
+    HWND m_templateWizardTitlePreviewEdit = nullptr;
+    HWND m_templateWizardBodyPreviewLabel = nullptr;
     HWND m_templateWizardPreviewEdit = nullptr;
     HWND m_templateWizardPrevBtn = nullptr;
     HWND m_templateWizardNextBtn = nullptr;
+    HWND m_templateWizardCopyTitleBtn = nullptr;
     HWND m_templateWizardCopyBtn = nullptr;
     HWND m_templateWizardCopyLocationBtn = nullptr;
     HWND m_templateEditorList = nullptr;
     HWND m_templateEditorNameEdit = nullptr;
+    HWND m_templateEditorTitleEdit = nullptr;
     HWND m_templateEditorBodyEdit = nullptr;
+    HWND m_accountCreatorUsernameEdit = nullptr;
+    HWND m_accountCreatorDisplayNameEdit = nullptr;
+    HWND m_accountCreatorPasswordEdit = nullptr;
+    HWND m_accountCreatorPositionCombo = nullptr;
+    HWND m_accountCreatorActiveCheck = nullptr;
+    HWND m_accountCreatorStatusLabel = nullptr;
+    HWND m_accountCreatorCreateBtn = nullptr;
 
     MapView m_map;
     ClientSession m_session;
