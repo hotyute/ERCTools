@@ -3151,16 +3151,86 @@ private:
             panelRect.top + kOverlayUiPadding + 25.0f);
     }
 
+    static std::vector<std::wstring> NotificationBodyLines(const std::wstring& body)
+    {
+        std::vector<std::wstring> lines;
+        std::wstring current;
+        for (wchar_t ch : body) {
+            if (ch == L'\r')
+                continue;
+            if (ch == L'\n') {
+                lines.push_back(current);
+                current.clear();
+                continue;
+            }
+            current.push_back(ch);
+        }
+        if (!current.empty() || lines.empty())
+            lines.push_back(current);
+        return lines;
+    }
+
+    float NotificationTimestampHeight(const AppNotification& notification, float width) const
+    {
+        return notification.timestamp.empty()
+            ? 0.0f
+            : MaxValue(14.0f, m_overlayUi.MeasureTextHeight(notification.timestamp, m_overlayUi.SmallFormat(), width));
+    }
+
+    float NotificationTitleHeight(const AppNotification& notification, float width) const
+    {
+        return MaxValue(18.0f, m_overlayUi.MeasureTextHeight(notification.title, m_overlayUi.TitleFormat(), width));
+    }
+
+    float NotificationBodyLineHeight(const std::wstring& line, float width) const
+    {
+        return MaxValue(18.0f, m_overlayUi.MeasureTextHeight(line.empty() ? L" " : line, m_overlayUi.BodyFormat(), width));
+    }
+
+    float NotificationBodyHeight(const AppNotification& notification, float width) const
+    {
+        if (notification.body.empty())
+            return 0.0f;
+
+        float height = 0.0f;
+        const std::vector<std::wstring> lines = NotificationBodyLines(notification.body);
+        for (const std::wstring& line : lines)
+            height += NotificationBodyLineHeight(line, width) + 2.0f;
+        return MaxValue(18.0f, height);
+    }
+
+    float NotificationBodyTop(const AppNotification& notification, float itemTop, float width) const
+    {
+        float y = itemTop + 6.0f;
+        const float timeH = NotificationTimestampHeight(notification, width);
+        if (timeH > 0.0f)
+            y += timeH + 3.0f;
+        y += NotificationTitleHeight(notification, width) + 3.0f;
+        return y;
+    }
+
+    int NotificationBodyLineIndexAtY(const AppNotification& notification, float itemTop, float width, float y) const
+    {
+        if (notification.body.empty())
+            return -1;
+
+        float lineTop = NotificationBodyTop(notification, itemTop, width);
+        const std::vector<std::wstring> lines = NotificationBodyLines(notification.body);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const float lineH = NotificationBodyLineHeight(lines[i], width) + 2.0f;
+            if (y >= lineTop && y <= lineTop + lineH)
+                return static_cast<int>(i);
+            lineTop += lineH;
+        }
+        return -1;
+    }
+
     float NotificationItemHeight(const AppNotification& notification, float width) const
     {
         width = MaxValue(1.0f, width);
-        const float timeH = notification.timestamp.empty()
-            ? 0.0f
-            : MaxValue(14.0f, m_overlayUi.MeasureTextHeight(notification.timestamp, m_overlayUi.SmallFormat(), width));
-        const float titleH = MaxValue(18.0f, m_overlayUi.MeasureTextHeight(notification.title, m_overlayUi.TitleFormat(), width));
-        const float bodyH = notification.body.empty()
-            ? 0.0f
-            : MaxValue(18.0f, m_overlayUi.MeasureTextHeight(notification.body, m_overlayUi.BodyFormat(), width));
+        const float timeH = NotificationTimestampHeight(notification, width);
+        const float titleH = NotificationTitleHeight(notification, width);
+        const float bodyH = NotificationBodyHeight(notification, width);
 
         float height = 14.0f + titleH + 14.0f;
         if (timeH > 0.0f)
@@ -3303,40 +3373,64 @@ private:
         return false;
     }
 
-    int NotificationHistoryIndexAtPoint(int x, int y) const
+    bool NotificationHistoryNotificationAtPoint(int x, int y, AppNotification& notificationOut) const
     {
         if (!m_showNotificationHistory || !m_onNotificationHistoryActivate)
-            return -1;
+            return false;
 
         const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
         if (!layout.hasHistory || layout.historyProgress <= 0.04f || !PointInRect(x, y, layout.historyRect))
-            return -1;
+            return false;
         if (PointInRect(x, y, layout.historyToggleRect) || PointInRect(x, y, NotificationHistoryClearRect(layout.historyRect)))
-            return -1;
+            return false;
 
         const D2D1_RECT_F contentRect = NotificationHistoryContentRect(layout.historyRect);
         if (!PointInRect(x, y, contentRect))
-            return -1;
+            return false;
 
         const float contentW = MaxValue(1.0f, contentRect.right - contentRect.left);
         float itemTop = contentRect.top - m_notificationHistoryScroll;
         for (size_t i = 0; i < m_notificationHistory.size(); ++i) {
-            const float itemH = NotificationItemHeight(m_notificationHistory[i], contentW);
-            if (static_cast<float>(y) >= itemTop && static_cast<float>(y) <= itemTop + itemH)
-                return static_cast<int>(i);
+            const AppNotification& notification = m_notificationHistory[i];
+            const float itemH = NotificationItemHeight(notification, contentW);
+            if (static_cast<float>(y) >= itemTop && static_cast<float>(y) <= itemTop + itemH) {
+                notificationOut = notification;
+                const int lineIndex = NotificationBodyLineIndexAtY(notification, itemTop, contentW, static_cast<float>(y));
+                if (lineIndex >= 0 && static_cast<size_t>(lineIndex) < notification.links.size()) {
+                    const AppNotificationLink& link = notification.links[static_cast<size_t>(lineIndex)];
+                    if (!link.sourceType.empty() && !link.sourceId.empty()) {
+                        notificationOut.sourceType = link.sourceType;
+                        notificationOut.sourceId = link.sourceId;
+                        notificationOut.body = link.text;
+                        notificationOut.links.clear();
+                    }
+                }
+                else if (notification.links.size() == 1 &&
+                    notification.sourceType.empty() &&
+                    notification.sourceId.empty() &&
+                    !notification.links.front().sourceType.empty() &&
+                    !notification.links.front().sourceId.empty())
+                {
+                    notificationOut.sourceType = notification.links.front().sourceType;
+                    notificationOut.sourceId = notification.links.front().sourceId;
+                    notificationOut.body = notification.links.front().text;
+                    notificationOut.links.clear();
+                }
+                return true;
+            }
             itemTop += itemH;
         }
-        return -1;
+        return false;
     }
 
     bool TryActivateNotificationHistoryItem(int x, int y)
     {
-        const int index = NotificationHistoryIndexAtPoint(x, y);
-        if (index < 0)
+        AppNotification notification;
+        if (!NotificationHistoryNotificationAtPoint(x, y, notification))
             return false;
 
-        if (static_cast<size_t>(index) < m_notificationHistory.size() && m_onNotificationHistoryActivate)
-            m_onNotificationHistoryActivate(m_notificationHistory[static_cast<size_t>(index)]);
+        if (m_onNotificationHistoryActivate)
+            m_onNotificationHistoryActivate(notification);
         return true;
     }
 
@@ -3470,20 +3564,25 @@ private:
                 if (y + itemH >= contentRect.top && y <= contentRect.bottom) {
                     float itemY = y + 6.0f;
                     if (!notification.timestamp.empty()) {
-                        D2D1_RECT_F timeRect = D2D1::RectF(contentRect.left, itemY, contentRect.right, itemY + 15.0f);
+                        const float timeH = NotificationTimestampHeight(notification, contentW);
+                        D2D1_RECT_F timeRect = D2D1::RectF(contentRect.left, itemY, contentRect.right, itemY + timeH + 1.0f);
                         m_overlayUi.DrawLabel(notification.timestamp, m_overlayUi.SmallFormat(), timeRect, m_overlayUi.MutedTextBrush());
-                        itemY += 17.0f;
+                        itemY += timeH + 3.0f;
                     }
 
-                    const float titleH = MaxValue(18.0f, m_overlayUi.MeasureTextHeight(notification.title, m_overlayUi.TitleFormat(), contentW));
+                    const float titleH = NotificationTitleHeight(notification, contentW);
                     D2D1_RECT_F itemTitleRect = D2D1::RectF(contentRect.left, itemY, contentRect.right, itemY + titleH + 2.0f);
                     m_overlayUi.DrawLabel(notification.title, m_overlayUi.TitleFormat(), itemTitleRect);
                     itemY += titleH + 3.0f;
 
                     if (!notification.body.empty()) {
-                        const float bodyH = MaxValue(18.0f, m_overlayUi.MeasureTextHeight(notification.body, m_overlayUi.BodyFormat(), contentW));
-                        D2D1_RECT_F bodyRect = D2D1::RectF(contentRect.left, itemY, contentRect.right, itemY + bodyH + 2.0f);
-                        m_overlayUi.DrawLabel(notification.body, m_overlayUi.BodyFormat(), bodyRect, m_overlayUi.TextBrush());
+                        const std::vector<std::wstring> lines = NotificationBodyLines(notification.body);
+                        for (const std::wstring& line : lines) {
+                            const float lineH = NotificationBodyLineHeight(line, contentW);
+                            D2D1_RECT_F bodyRect = D2D1::RectF(contentRect.left, itemY, contentRect.right, itemY + lineH + 2.0f);
+                            m_overlayUi.DrawLabel(line, m_overlayUi.BodyFormat(), bodyRect, m_overlayUi.TextBrush());
+                            itemY += lineH + 2.0f;
+                        }
                     }
 
                     m_overlayUi.DrawSeparator(contentRect.left, contentRect.right, y + itemH - 5.0f);

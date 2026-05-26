@@ -608,6 +608,18 @@ static bool IsTextButtonStyle(DWORD style)
     }
 }
 
+static bool IsPushButtonStyle(DWORD style)
+{
+    switch (style & BS_TYPEMASK) {
+    case BS_PUSHBUTTON:
+    case BS_DEFPUSHBUTTON:
+    case BS_OWNERDRAW:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool IsTextStaticStyle(DWORD style)
 {
     switch (style & SS_TYPEMASK) {
@@ -686,6 +698,96 @@ static void AutoSizeTextControls(HWND hwnd)
     EnumChildWindows(hwnd, AutoSizeTextChildEnumProc, reinterpret_cast<LPARAM>(hwnd));
 }
 
+struct AutoLayoutButtonInfo
+{
+    HWND hwnd = nullptr;
+    RECT rect{};
+};
+
+struct AutoLayoutButtonCollectState
+{
+    HWND parent = nullptr;
+    std::vector<AutoLayoutButtonInfo> buttons;
+};
+
+static BOOL CALLBACK AutoLayoutButtonEnumProc(HWND child, LPARAM param)
+{
+    auto* state = reinterpret_cast<AutoLayoutButtonCollectState*>(param);
+    if (!state || GetParent(child) != state->parent)
+        return TRUE;
+    if ((GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE) == 0)
+        return TRUE;
+    if (!IsClassName(child, L"BUTTON"))
+        return TRUE;
+
+    DWORD style = static_cast<DWORD>(GetWindowLongPtrW(child, GWL_STYLE));
+    if (!IsPushButtonStyle(style))
+        return TRUE;
+
+    RECT rect{};
+    if (!GetWindowRect(child, &rect))
+        return TRUE;
+    MapWindowPoints(HWND_DESKTOP, state->parent, reinterpret_cast<POINT*>(&rect), 2);
+    state->buttons.push_back({ child, rect });
+    return TRUE;
+}
+
+static void AutoLayoutButtonRows(HWND hwnd)
+{
+    if (!hwnd)
+        return;
+
+    AutoLayoutButtonCollectState state;
+    state.parent = hwnd;
+    EnumChildWindows(hwnd, AutoLayoutButtonEnumProc, reinterpret_cast<LPARAM>(&state));
+    if (state.buttons.empty())
+        return;
+
+    std::sort(state.buttons.begin(), state.buttons.end(), [](const AutoLayoutButtonInfo& a, const AutoLayoutButtonInfo& b) {
+        if (std::abs(a.rect.top - b.rect.top) > 8)
+            return a.rect.top < b.rect.top;
+        return a.rect.left < b.rect.left;
+        });
+
+    std::vector<std::vector<AutoLayoutButtonInfo>> rows;
+    for (const AutoLayoutButtonInfo& button : state.buttons) {
+        if (rows.empty() || std::abs(rows.back().front().rect.top - button.rect.top) > 8)
+            rows.push_back({});
+        rows.back().push_back(button);
+    }
+
+    const int gap = 8;
+    const int leftPadding = 18;
+    const int rightLimit = MaxAutoLayoutClientWidth(hwnd) - 28;
+    for (std::vector<AutoLayoutButtonInfo>& row : rows) {
+        if (row.empty())
+            continue;
+
+        std::sort(row.begin(), row.end(), [](const AutoLayoutButtonInfo& a, const AutoLayoutButtonInfo& b) {
+            return a.rect.left < b.rect.left;
+            });
+
+        int rowLeft = row.front().rect.left;
+        int rowTop = row.front().rect.top;
+        int x = rowLeft;
+        int y = rowTop;
+        int rowHeight = 0;
+        for (const AutoLayoutButtonInfo& button : row) {
+            const int width = MaxInt(1, button.rect.right - button.rect.left);
+            const int height = MaxInt(1, button.rect.bottom - button.rect.top);
+            if (row.size() > 1 && x > rowLeft && x + width > rightLimit) {
+                x = MaxInt(leftPadding, rowLeft);
+                y += rowHeight + gap;
+                rowHeight = 0;
+            }
+
+            SetWindowPos(button.hwnd, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+            x += width + gap;
+            rowHeight = MaxInt(rowHeight, height);
+        }
+    }
+}
+
 static BOOL CALLBACK AutoFitChildEnumProc(HWND child, LPARAM param)
 {
     RECT childRect{};
@@ -710,6 +812,7 @@ static void AutoFitWindowToChildren(HWND hwnd, int padding = 28)
         return;
 
     AutoSizeTextControls(hwnd);
+    AutoLayoutButtonRows(hwnd);
 
     RECT childBounds{ 0, 0, 0, 0 };
     EnumChildWindows(hwnd, AutoFitChildEnumProc, reinterpret_cast<LPARAM>(&childBounds));
@@ -2155,8 +2258,8 @@ private:
                 int selected = static_cast<int>(SendMessageW(m_incidentsListView, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED));
                 if (selected >= 0 && selected < static_cast<int>(m_incidentsListKeys.size())) {
                     const auto it = m_notifiedIncidentStates.find(m_incidentsListKeys[static_cast<size_t>(selected)]);
-                    if (it != m_notifiedIncidentStates.end() && !it->second.alert.id.empty())
-                        SelectAlertById(it->second.alert.id, true);
+                    if (it != m_notifiedIncidentStates.end())
+                        ShowAlertDetailsById(m_incidentsListKeys[static_cast<size_t>(selected)], true);
                 }
             }
         }
@@ -3242,7 +3345,27 @@ private:
 
     std::wstring IncidentNotificationStableKey(const TrafficAlert& alert) const
     {
-        if (!alert.id.empty())
+        auto generatedId = [](const std::wstring& id) {
+            std::wstring value = ToLower(Trim(id));
+            const std::wstring alertPrefix = L"alert-";
+            const std::wstring htmlPrefix = L"html-";
+            size_t prefixLen = 0;
+            if (value.rfind(alertPrefix, 0) == 0)
+                prefixLen = alertPrefix.size();
+            else if (value.rfind(htmlPrefix, 0) == 0)
+                prefixLen = htmlPrefix.size();
+            else
+                return false;
+            if (prefixLen >= value.size())
+                return false;
+            for (size_t i = prefixLen; i < value.size(); ++i) {
+                if (!iswdigit(value[i]))
+                    return false;
+            }
+            return true;
+            };
+
+        if (!alert.id.empty() && !generatedId(alert.id))
             return alert.id;
 
         std::wstring key = alert.road.empty() ? alert.region : alert.road;
@@ -3303,11 +3426,13 @@ private:
         std::wstring body;
         std::wstring sourceType;
         std::wstring sourceId;
+        std::vector<AppNotificationLink> links;
         if (items.size() == 1) {
             title = singleTitleSuffix;
             body = items.front().line;
             sourceType = items.front().sourceType;
             sourceId = items.front().sourceId;
+            links.push_back({ items.front().line, items.front().sourceType, items.front().sourceId });
         }
         else {
             title = std::to_wstring(items.size()) + L" " + pluralTitle;
@@ -3316,12 +3441,13 @@ private:
                 if (!body.empty())
                     body += L"\r\n";
                 body += items[i].line;
+                links.push_back({ items[i].line, items[i].sourceType, items[i].sourceId });
             }
             if (items.size() > displayCount)
                 body += L"\r\n...";
         }
 
-        PublishNotification(title, body, sourceType, sourceId);
+        PublishNotification(title, body, sourceType, sourceId, links);
     }
 
     void NotifyForMatchingIncidents(const std::vector<TrafficAlert>& alerts)
@@ -3338,7 +3464,7 @@ private:
             if (!AlertMatchesIncidentNotification(alert)) {
                 auto existing = m_notifiedIncidentStates.find(stableKey);
                 if (m_haveIncidentNotificationSnapshot && existing != m_notifiedIncidentStates.end()) {
-                    removedLines.push_back({ existing->second.line, L"incident", existing->second.alert.id });
+                    removedLines.push_back({ existing->second.line, L"incident", stableKey });
                     m_notifiedIncidentStates.erase(existing);
                 }
                 continue;
@@ -3348,12 +3474,12 @@ private:
             std::wstring line = IncidentNotificationLine(alert);
             auto existing = m_notifiedIncidentStates.find(stableKey);
             if (existing == m_notifiedIncidentStates.end()) {
-                newLines.push_back({ line, L"incident", alert.id });
+                newLines.push_back({ line, L"incident", stableKey });
                 m_notifiedIncidentStates[stableKey] = IncidentNotificationState{ signature, line, alert };
             }
             else if (existing->second.signature != signature) {
                 if (!m_incidentIgnoreUpdates)
-                    updateLines.push_back({ line, L"incident", alert.id });
+                    updateLines.push_back({ line, L"incident", stableKey });
                 existing->second.signature = std::move(signature);
                 existing->second.line = std::move(line);
                 existing->second.alert = alert;
@@ -3366,7 +3492,7 @@ private:
         if (m_haveIncidentNotificationSnapshot) {
             for (auto it = m_notifiedIncidentStates.begin(); it != m_notifiedIncidentStates.end();) {
                 if (currentIncidentKeys.find(it->first) == currentIncidentKeys.end()) {
-                    removedLines.push_back({ it->second.line, L"incident", it->second.alert.id });
+                    removedLines.push_back({ it->second.line, L"incident", it->first });
                     it = m_notifiedIncidentStates.erase(it);
                 }
                 else {
@@ -3434,7 +3560,12 @@ private:
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
-    void ShowInAppIncidentNotification(const std::wstring& title, const std::wstring& body, const std::wstring& sourceType = L"", const std::wstring& sourceId = L"")
+    void ShowInAppIncidentNotification(
+        const std::wstring& title,
+        const std::wstring& body,
+        const std::wstring& sourceType = L"",
+        const std::wstring& sourceId = L"",
+        const std::vector<AppNotificationLink>& links = {})
     {
         AppNotification notification;
         notification.title = title;
@@ -3442,6 +3573,7 @@ private:
         notification.timestamp = TimeTToText(std::time(nullptr));
         notification.sourceType = sourceType;
         notification.sourceId = sourceId;
+        notification.links = links;
         m_map.SetActiveNotification(notification);
         KillTimer(m_hwnd, kInAppNotificationTimerId);
         SetTimer(m_hwnd, kInAppNotificationTimerId, 10 * 1000, nullptr);
@@ -3459,7 +3591,12 @@ private:
         SetStatusText(L"Notification history cleared.");
     }
 
-    void AddNotificationHistory(const std::wstring& title, const std::wstring& body, const std::wstring& sourceType = L"", const std::wstring& sourceId = L"")
+    void AddNotificationHistory(
+        const std::wstring& title,
+        const std::wstring& body,
+        const std::wstring& sourceType = L"",
+        const std::wstring& sourceId = L"",
+        const std::vector<AppNotificationLink>& links = {})
     {
         AppNotification entry;
         entry.title = title;
@@ -3467,17 +3604,23 @@ private:
         entry.timestamp = TimeTToText(std::time(nullptr));
         entry.sourceType = sourceType;
         entry.sourceId = sourceId;
+        entry.links = links;
         m_notificationHistory.insert(m_notificationHistory.begin(), std::move(entry));
         if (m_notificationHistory.size() > 100)
             m_notificationHistory.resize(100);
         RenderNotificationHistory();
     }
 
-    void PublishNotification(const std::wstring& title, const std::wstring& body, const std::wstring& sourceType = L"", const std::wstring& sourceId = L"")
+    void PublishNotification(
+        const std::wstring& title,
+        const std::wstring& body,
+        const std::wstring& sourceType = L"",
+        const std::wstring& sourceId = L"",
+        const std::vector<AppNotificationLink>& links = {})
     {
-        AddNotificationHistory(title, body, sourceType, sourceId);
+        AddNotificationHistory(title, body, sourceType, sourceId, links);
         ShowWindowsIncidentNotification(title, body);
-        ShowInAppIncidentNotification(title, body, sourceType, sourceId);
+        ShowInAppIncidentNotification(title, body, sourceType, sourceId, links);
     }
 
     void DownloadMissingLaneImagesAsync(const std::vector<TrafficAlert>& alerts)
@@ -3624,7 +3767,7 @@ private:
     int FindAlertIndexById(const std::wstring& id) const
     {
         for (size_t i = 0; i < m_filteredAlerts.size(); ++i) {
-            if (m_filteredAlerts[i].id == id)
+            if (m_filteredAlerts[i].id == id || IncidentNotificationStableKey(m_filteredAlerts[i]) == id)
                 return static_cast<int>(i);
         }
 
@@ -3634,7 +3777,7 @@ private:
     const TrafficAlert* FindAnyAlertById(const std::wstring& id) const
     {
         for (const TrafficAlert& alert : m_allAlerts) {
-            if (alert.id == id)
+            if (alert.id == id || IncidentNotificationStableKey(alert) == id)
                 return &alert;
         }
         return nullptr;
@@ -3646,14 +3789,14 @@ private:
         if (idx < 0)
             return;
 
-        m_selectedId = id;
-
         const TrafficAlert& a = m_filteredAlerts[static_cast<size_t>(idx)];
+        m_selectedId = a.id;
+
         SetWindowTextSafe(m_detailsEdit, BuildAlertDetails(a));
-        m_map.SetSelectedId(id);
+        m_map.SetSelectedId(a.id);
 
         if (centerMap)
-            m_map.CenterOnAlert(id);
+            m_map.CenterOnAlert(a.id);
 
         m_programmaticSelection = true;
 
@@ -3683,7 +3826,7 @@ private:
             return;
         }
 
-        m_selectedId = id;
+        m_selectedId = alert->id;
         SetWindowTextSafe(m_detailsEdit, BuildAlertDetails(*alert));
         m_map.SetSelectedId(L"");
 
@@ -4992,6 +5135,7 @@ private:
 
         ApplyModernEditChrome(m_incidentsListSearchEdit);
         RefreshIncidentsListRows();
+        AutoFitWindowToChildren(parent);
     }
 
     std::wstring IncidentsListSeverityFilter() const
@@ -6706,8 +6850,9 @@ private:
         ShowWindow(m_templateWizardCopyTitleBtn, reviewStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardCopyBtn, reviewStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardCopyLocationBtn, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardNextBtn, reviewStep ? SW_HIDE : SW_SHOW);
         EnableWindow(m_templateWizardPrevBtn, m_templateWizardStep > 0);
-        SetWindowTextSafe(m_templateWizardNextBtn, reviewStep ? L"Finish" : L"Next");
+        SetWindowTextSafe(m_templateWizardNextBtn, L"Next");
 
         if (chooseStep) {
             const wchar_t* description = L"Choose the report template to use for the selected incident.";
@@ -6728,6 +6873,8 @@ private:
                 SetWindowTextSafe(m_templateWizardPreviewEdit, RenderReportTemplate(templates[m_templateWizardTemplateIndex]));
             }
         }
+
+        AutoFitWindowToChildren(m_templatesWizardWnd);
     }
 
     void OnTemplatesWizardCommand(int id, int code)
@@ -8452,7 +8599,22 @@ private:
         SetTextColor(dis->hDC, disabled ? RGB(238, 242, 247) : RGB(255, 255, 255));
         HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(dis->hDC, m_font));
         RECT textRc = buttonRect;
-        DrawTextW(dis->hDC, text, -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        InflateRect(&textRc, -8, -2);
+        SIZE preferred = MeasureControlText(dis->hwndItem);
+        const bool needsWrap = preferred.cx > (textRc.right - textRc.left) || preferred.cy + 8 > (buttonRect.bottom - buttonRect.top);
+        if (needsWrap) {
+            RECT calcRc = textRc;
+            DrawTextW(dis->hDC, text, -1, &calcRc, DT_CENTER | DT_WORDBREAK | DT_CALCRECT);
+            int textH = calcRc.bottom - calcRc.top;
+            if (textH > 0 && textH < (textRc.bottom - textRc.top)) {
+                int offset = ((textRc.bottom - textRc.top) - textH) / 2;
+                textRc.top += offset;
+            }
+            DrawTextW(dis->hDC, text, -1, &textRc, DT_CENTER | DT_WORDBREAK);
+        }
+        else {
+            DrawTextW(dis->hDC, text, -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
         SelectObject(dis->hDC, oldFont);
         return TRUE;
     }

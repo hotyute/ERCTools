@@ -78,6 +78,13 @@ struct WeatherSystemEvent
     bool hasForecastLocation = false;
 };
 
+struct AppNotificationLink
+{
+    std::wstring text;
+    std::wstring sourceType;
+    std::wstring sourceId;
+};
+
 struct AppNotification
 {
     std::wstring title;
@@ -85,6 +92,7 @@ struct AppNotification
     std::wstring timestamp;
     std::wstring sourceType;
     std::wstring sourceId;
+    std::vector<AppNotificationLink> links;
 };
 
 struct ChatMessage
