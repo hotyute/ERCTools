@@ -140,7 +140,7 @@ static std::wstring ExtractLabeledAlertField(const std::wstring& description, co
 
     // Be tolerant of descriptions whose <br> separators were already collapsed to spaces.
     static const wchar_t* kKnownLabels =
-        L"Location|Reason|Status|Time To Clear|Return To Normal|Lanes Closed";
+        L"From Location|To Location|Location|Reason|Status|Time To Clear|Return To Normal|Lanes Closed|Delay";
     std::wstring inlinePattern = LR"((?:^|\s))";
     inlinePattern += label;
     inlinePattern += LR"(\s*:\s*(.*?)(?=\s+(?:)";
@@ -473,6 +473,8 @@ static bool LooksLikeTrafficEnglandDescription(const std::wstring& text)
     std::wstring normalized = NormalizeAlertDescription(text);
     return !ExtractLabeledAlertField(normalized, L"Reason").empty() ||
         !ExtractLabeledAlertField(normalized, L"Location").empty() ||
+        !ExtractLabeledAlertField(normalized, L"From Location").empty() ||
+        !ExtractLabeledAlertField(normalized, L"To Location").empty() ||
         !ExtractLabeledAlertField(normalized, L"Status").empty();
 }
 
@@ -521,6 +523,12 @@ static std::wstring BuildTrafficEnglandDescriptionFromFields(const json& props, 
         };
 
     std::wstring description;
+    AppendDescriptionLine(description, BuildLabeledLine(L"From Location", pick({
+        "fromLocation", "from location", "from", "origin", "startLocation", "start location"
+        })));
+    AppendDescriptionLine(description, BuildLabeledLine(L"To Location", pick({
+        "toLocation", "to location", "to", "destination", "endLocation", "end location"
+        })));
     AppendDescriptionLine(description, BuildLabeledLine(L"Location", pick({
         "location", "eventLocation", "event location", "locationDescription", "location description",
         "where", "whereIsIt", "where is it"
@@ -723,6 +731,8 @@ static bool BuildHtmlAlertFromCells(const std::vector<std::wstring>& cells, size
         return false;
 
     std::wstring road = descriptionIndex > 0 ? Trim(cells[0]) : ExtractLabeledAlertField(description, L"Location");
+    if (road.empty())
+        road = ExtractLabeledAlertField(description, L"From Location");
     std::wstring type = descriptionIndex > 1 ? Trim(cells[1]) : L"";
     std::wstring severity = descriptionIndex > 2 ? Trim(cells[2]) : L"";
 

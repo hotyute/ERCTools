@@ -1007,30 +1007,157 @@ static std::wstring ExtractLabeledNotificationField(const std::wstring& descript
     if (std::regex_search(description, m, lineRe) && m.size() > 1)
         return Trim(m[1].str());
 
+    static const wchar_t* kKnownLabels =
+        L"From Location|To Location|Location|Reason|Status|Time To Clear|Return To Normal|Lanes Closed|Delay";
+    std::wstring inlinePattern = LR"((?:^|\s))";
+    inlinePattern += label;
+    inlinePattern += LR"(\s*:\s*(.*?)(?=\s+(?:)";
+    inlinePattern += kKnownLabels;
+    inlinePattern += LR"()\s*:|$))";
+
+    std::wregex inlineRe(inlinePattern, std::regex_constants::icase);
+    if (std::regex_search(description, m, inlineRe) && m.size() > 1)
+        return Trim(m[1].str());
+
     return L"";
+}
+
+static std::wstring CompactDurationText(std::wstring value)
+{
+    for (wchar_t& ch : value) {
+        if (ch == L'-' || ch == L',' || ch == L';')
+            ch = L' ';
+    }
+
+    std::wstring compact;
+    compact.reserve(value.size());
+    bool lastSpace = false;
+    for (wchar_t ch : value) {
+        if (iswspace(ch)) {
+            if (!lastSpace)
+                compact.push_back(L' ');
+            lastSpace = true;
+        }
+        else {
+            compact.push_back(ch);
+            lastSpace = false;
+        }
+    }
+    return Trim(compact);
+}
+
+static bool TryParseDurationNumberToken(std::wstring token, double& valueOut)
+{
+    token = ToLower(Trim(token));
+    if (token.empty())
+        return false;
+
+    wchar_t* end = nullptr;
+    double parsed = std::wcstod(token.c_str(), &end);
+    if (end != token.c_str() && Trim(end ? end : L"").empty() && std::isfinite(parsed) && parsed >= 0.0) {
+        valueOut = parsed;
+        return true;
+    }
+
+    if (token == L"a" || token == L"an")
+        token = L"one";
+
+    static const std::unordered_map<std::wstring, double> words = {
+        { L"zero", 0.0 }, { L"one", 1.0 }, { L"two", 2.0 }, { L"three", 3.0 },
+        { L"four", 4.0 }, { L"five", 5.0 }, { L"six", 6.0 }, { L"seven", 7.0 },
+        { L"eight", 8.0 }, { L"nine", 9.0 }, { L"ten", 10.0 }, { L"eleven", 11.0 },
+        { L"twelve", 12.0 }
+    };
+    auto it = words.find(token);
+    if (it == words.end())
+        return false;
+    valueOut = it->second;
+    return true;
+}
+
+static bool DurationUnitIsHour(const std::wstring& unit)
+{
+    return unit == L"h" || unit == L"hr" || unit == L"hrs" || unit == L"hour" || unit == L"hours";
+}
+
+static bool DurationUnitIsMinute(const std::wstring& unit)
+{
+    return unit == L"m" || unit == L"min" || unit == L"mins" || unit == L"minute" || unit == L"minutes";
 }
 
 static bool TryParseDurationMinutes(const std::wstring& text, double& minutesOut)
 {
-    std::wstring value = ToLower(Trim(text));
+    std::wstring value = CompactDurationText(ToLower(Trim(text)));
     if (value.empty())
         return false;
 
+    double total = 0.0;
+    bool matched = false;
     std::wsmatch m;
-    std::wregex re(LR"((\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m)\b)", std::regex_constants::icase);
-    if (!std::regex_search(value, m, re) || m.size() < 3)
+
+    std::wregex hourHalfRe(
+        LR"(\b(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:and\s+)?(?:a\s+)?half\s+hours?\b)",
+        std::regex_constants::icase);
+    if (std::regex_search(value, m, hourHalfRe) && m.size() > 1) {
+        double amount = 0.0;
+        if (TryParseDurationNumberToken(m[1].str(), amount)) {
+            total += (amount + 0.5) * 60.0;
+            matched = true;
+            value = std::regex_replace(value, hourHalfRe, L" ");
+        }
+    }
+
+    std::wregex numericHourAndHalfRe(
+        LR"(\b(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+hours?\s+(?:and\s+)?(?:a\s+)?half\b)",
+        std::regex_constants::icase);
+    if (std::regex_search(value, m, numericHourAndHalfRe) && m.size() > 1) {
+        double amount = 0.0;
+        if (TryParseDurationNumberToken(m[1].str(), amount)) {
+            total += (amount + 0.5) * 60.0;
+            matched = true;
+            value = std::regex_replace(value, numericHourAndHalfRe, L" ");
+        }
+    }
+
+    std::wregex hourAndHalfRe(
+        LR"(\bhours?\s+(?:and\s+)?(?:a\s+)?half\b)",
+        std::regex_constants::icase);
+    if (std::regex_search(value, hourAndHalfRe)) {
+        total += 90.0;
+        matched = true;
+        value = std::regex_replace(value, hourAndHalfRe, L" ");
+    }
+
+    std::wregex halfHourRe(LR"(\bhalf\s+(?:an?\s+)?hours?\b|\bhalf\s+hour\b)", std::regex_constants::icase);
+    if (std::regex_search(value, halfHourRe)) {
+        total += 30.0;
+        matched = true;
+        value = std::regex_replace(value, halfHourRe, L" ");
+    }
+
+    std::wregex segmentRe(
+        LR"(\b(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(hours?|hrs?|hr|h|minutes?|mins?|min|m)\b)",
+        std::regex_constants::icase);
+    for (std::wsregex_iterator it(value.begin(), value.end(), segmentRe), endIt; it != endIt; ++it) {
+        if (it->size() < 3)
+            continue;
+        double amount = 0.0;
+        if (!TryParseDurationNumberToken((*it)[1].str(), amount))
+            continue;
+        std::wstring unit = ToLower((*it)[2].str());
+        if (DurationUnitIsHour(unit))
+            total += amount * 60.0;
+        else if (DurationUnitIsMinute(unit))
+            total += amount;
+        else
+            continue;
+        matched = true;
+    }
+
+    if (!matched || !std::isfinite(total) || total < 0.0)
         return false;
 
-    wchar_t* end = nullptr;
-    double amount = std::wcstod(m[1].str().c_str(), &end);
-    if (end == m[1].str().c_str() || !std::isfinite(amount) || amount < 0.0)
-        return false;
-
-    std::wstring unit = ToLower(m[2].str());
-    if (unit == L"h" || unit == L"hr" || unit == L"hrs" || unit == L"hour" || unit == L"hours")
-        amount *= 60.0;
-
-    minutesOut = amount;
+    minutesOut = total;
     return true;
 }
 
@@ -1056,7 +1183,7 @@ static bool TryExtractAlertDelayMinutes(const TrafficAlert& alert, double& minut
         return true;
 
     std::wsmatch m;
-    std::wregex re(LR"(\bDelay\s*:\s*(.*?)(?=\s+(?:Location|Reason|Status|Time To Clear|Return To Normal|Lanes Closed)\s*:|$))", std::regex_constants::icase);
+    std::wregex re(LR"(\bDelay\s*:\s*(.*?)(?=\s+(?:From Location|To Location|Location|Reason|Status|Time To Clear|Return To Normal|Lanes Closed)\s*:|$))", std::regex_constants::icase);
     if (std::regex_search(alert.description, m, re) && m.size() > 1)
         return TryParseDurationMinutes(m[1].str(), minutesOut);
 
@@ -3221,9 +3348,19 @@ private:
 
     std::wstring AlertLocationForNotification(const TrafficAlert& alert) const
     {
+        std::wstring fromLocation = ExtractLabeledNotificationField(alert.description, L"From Location");
+        std::wstring toLocation = ExtractLabeledNotificationField(alert.description, L"To Location");
+        if (!fromLocation.empty() && !toLocation.empty())
+            return L"from " + fromLocation + L" to " + toLocation;
+        if (!fromLocation.empty())
+            return fromLocation;
+        if (!toLocation.empty())
+            return toLocation;
+
         std::wstring location = ExtractLabeledNotificationField(alert.description, L"Location");
         if (!location.empty())
             return location;
+
         return alert.region;
     }
 

@@ -434,7 +434,7 @@ static void CreateLoginControls(LoginContext* ctx)
     }
     SendMessageW(ctx->podCombo, CB_SETCURSEL, 0, 0);
 
-    ctx->rememberCheck = CreateWindowExW(0, L"BUTTON", L"Remember username and password", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 154, 246, 270, 24, ctx->hwnd, ControlMenuId(IDC_LOGIN_REMEMBER), ctx->hInst, nullptr);
+    ctx->rememberCheck = CreateWindowExW(0, L"BUTTON", L"Remember Details", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 154, 246, 270, 24, ctx->hwnd, ControlMenuId(IDC_LOGIN_REMEMBER), ctx->hInst, nullptr);
     ctx->statusLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 24, 278, 400, 42, ctx->hwnd, ControlMenuId(IDC_LOGIN_STATUS), ctx->hInst, nullptr);
 
     RememberedLogin remembered = LoadRememberedLogin();

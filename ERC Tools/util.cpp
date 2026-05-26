@@ -440,7 +440,7 @@ static std::wstring FormatAlertDescriptionForDetails(std::wstring description)
     description = std::regex_replace(description, std::wregex(L"\r\n|\r|\n"), L"\r\n");
 
     static const wchar_t* kLabels =
-        L"Location|Reason|Status|Time To Clear|Return To Normal|Lanes Closed|Delay";
+        L"From Location|To Location|Location|Reason|Status|Time To Clear|Return To Normal|Lanes Closed|Delay";
     std::wstring pattern = LR"(\s+(?=()";
     pattern += kLabels;
     pattern += LR"()\s*:))";
