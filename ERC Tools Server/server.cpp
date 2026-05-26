@@ -49,6 +49,7 @@ struct ServerConfig
     int port = 8081;
     int workerThreads = 0;
     int sessionMinutes = 12 * 60;
+    int onlineTimeoutSeconds = 30;
     std::wstring databaseConnectionString =
         L"DRIVER={Maria Unicode};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=root;PWD=!Derickandjr1010;OPTION=3;";
     std::filesystem::path updateRoot = L"updates";
@@ -673,6 +674,11 @@ public:
             codeOut = "database_error";
             return false;
         }
+        if (!PurgeStaleSessions(db, errorOut)) {
+            errorOut = L"Database stale session cleanup failed: " + errorOut;
+            codeOut = "database_error";
+            return false;
+        }
 
         auto rows = db.Query(
             L"SELECT id, username, display_name, position, password_salt, password_hash, password_iterations, active FROM users WHERE username = ? LIMIT 1",
@@ -835,6 +841,8 @@ public:
         OdbcConnection db(m_config.databaseConnectionString);
         if (!EnsureSessionContextColumns(db, errorOut))
             return false;
+        if (!PurgeStaleSessions(db, errorOut))
+            return false;
 
         bool podInUse = false;
         if (!CheckPodInUse(db, user.pod, podInUse, errorOut))
@@ -870,6 +878,10 @@ public:
         OdbcConnection db(m_config.databaseConnectionString);
         if (!EnsureSessionContextColumns(db, errorOut)) {
             errorOut = L"Database session schema check failed: " + errorOut;
+            return false;
+        }
+        if (!PurgeStaleSessions(db, errorOut)) {
+            errorOut = L"Database stale session cleanup failed: " + errorOut;
             return false;
         }
 
@@ -925,8 +937,12 @@ public:
             errorOut = L"Database session schema check failed: " + errorOut;
             return json::array();
         }
+        if (!PurgeStaleSessions(db, errorOut)) {
+            errorOut = L"Database stale session cleanup failed: " + errorOut;
+            return json::array();
+        }
 
-        auto rows = db.Query(
+        const std::wstring sql = std::wstring(
             L"SELECT "
             L"COALESCE(NULLIF(s.session_display_name, ''), u.display_name), "
             L"u.username, "
@@ -935,9 +951,13 @@ public:
             L"DATE_FORMAT(COALESCE(s.last_seen_at, s.created_at), '%Y-%m-%d %H:%i:%s') "
             L"FROM user_sessions s JOIN users u ON u.id = s.user_id "
             L"WHERE s.expires_at > CURRENT_TIMESTAMP "
-            L"AND COALESCE(s.last_seen_at, s.created_at) >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 2 MINUTE) "
+            L"AND COALESCE(s.last_seen_at, s.created_at) >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL ") +
+            OnlineTimeoutSecondsText() +
+            std::wstring(L" SECOND) "
             L"AND u.active = 1 "
-            L"ORDER BY COALESCE(NULLIF(s.session_pod, ''), u.pod), COALESCE(NULLIF(s.session_display_name, ''), u.display_name)",
+            L"ORDER BY COALESCE(NULLIF(s.session_pod, ''), u.pod), COALESCE(NULLIF(s.session_display_name, ''), u.display_name)");
+        auto rows = db.Query(
+            sql,
             {},
             errorOut);
         if (!errorOut.empty()) {
@@ -1115,11 +1135,15 @@ private:
         if (sessionPod.empty())
             return true;
 
-        auto rows = db.Query(
+        const std::wstring sql = std::wstring(
             L"SELECT COUNT(*) FROM user_sessions "
             L"WHERE session_pod = ? "
             L"AND expires_at > CURRENT_TIMESTAMP "
-            L"AND COALESCE(last_seen_at, created_at) >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 2 MINUTE)",
+            L"AND COALESCE(last_seen_at, created_at) >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL ") +
+            OnlineTimeoutSecondsText() +
+            L" SECOND)";
+        auto rows = db.Query(
+            sql,
             { sessionPod },
             errorOut);
         if (!errorOut.empty())
@@ -1127,6 +1151,26 @@ private:
         if (!rows.empty() && !rows.front().empty())
             inUseOut = _wtoi(rows.front().front().c_str()) > 0;
         return true;
+    }
+
+    int OnlineTimeoutSeconds() const
+    {
+        return std::clamp(m_config.onlineTimeoutSeconds, 15, 3600);
+    }
+
+    std::wstring OnlineTimeoutSecondsText() const
+    {
+        return std::to_wstring(OnlineTimeoutSeconds());
+    }
+
+    bool PurgeStaleSessions(OdbcConnection& db, std::wstring& errorOut)
+    {
+        const std::wstring sql =
+            std::wstring(L"DELETE FROM user_sessions "
+                L"WHERE expires_at <= CURRENT_TIMESTAMP "
+                L"OR COALESCE(last_seen_at, created_at) < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL ") +
+            OnlineTimeoutSecondsText() + L" SECOND)";
+        return db.Execute(sql, {}, errorOut);
     }
 
     ServerConfig m_config;
@@ -2001,6 +2045,8 @@ static bool LoadConfig(const std::filesystem::path& path, ServerConfig& config)
         config.workerThreads = root["workerThreads"].get<int>();
     if (root.contains("sessionMinutes"))
         config.sessionMinutes = root["sessionMinutes"].get<int>();
+    if (root.contains("onlineTimeoutSeconds"))
+        config.onlineTimeoutSeconds = std::clamp(root["onlineTimeoutSeconds"].get<int>(), 15, 3600);
     if (root.contains("databaseConnectionString"))
         config.databaseConnectionString = Utf8ToWide(root["databaseConnectionString"].get<std::string>());
     if (root.contains("updateRoot"))

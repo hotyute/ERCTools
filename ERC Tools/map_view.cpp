@@ -144,6 +144,7 @@ public:
     using PolygonClearCallback = std::function<void(size_t polygonIndex)>;
     using RefreshCallback = std::function<void()>;
     using NotificationHistoryClearCallback = std::function<void()>;
+    using NotificationHistoryActivateCallback = std::function<void(const AppNotification&)>;
     using ChatSendCallback = std::function<void(const std::wstring& text)>;
     using ChatClearCallback = std::function<void()>;
 
@@ -219,6 +220,11 @@ public:
     void SetNotificationHistoryClearCallback(NotificationHistoryClearCallback cb)
     {
         m_onNotificationHistoryClear = std::move(cb);
+    }
+
+    void SetNotificationHistoryActivateCallback(NotificationHistoryActivateCallback cb)
+    {
+        m_onNotificationHistoryActivate = std::move(cb);
     }
 
     void SetChatSendCallback(ChatSendCallback cb)
@@ -1853,6 +1859,9 @@ private:
 
     void OnDoubleClick(int x, int y)
     {
+        if (TryActivateNotificationHistoryItem(x, y))
+            return;
+
         if (HitUsersPanelInterface(x, y) || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y))
             return;
 
@@ -3294,6 +3303,43 @@ private:
         return false;
     }
 
+    int NotificationHistoryIndexAtPoint(int x, int y) const
+    {
+        if (!m_showNotificationHistory || !m_onNotificationHistoryActivate)
+            return -1;
+
+        const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
+        if (!layout.hasHistory || layout.historyProgress <= 0.04f || !PointInRect(x, y, layout.historyRect))
+            return -1;
+        if (PointInRect(x, y, layout.historyToggleRect) || PointInRect(x, y, NotificationHistoryClearRect(layout.historyRect)))
+            return -1;
+
+        const D2D1_RECT_F contentRect = NotificationHistoryContentRect(layout.historyRect);
+        if (!PointInRect(x, y, contentRect))
+            return -1;
+
+        const float contentW = MaxValue(1.0f, contentRect.right - contentRect.left);
+        float itemTop = contentRect.top - m_notificationHistoryScroll;
+        for (size_t i = 0; i < m_notificationHistory.size(); ++i) {
+            const float itemH = NotificationItemHeight(m_notificationHistory[i], contentW);
+            if (static_cast<float>(y) >= itemTop && static_cast<float>(y) <= itemTop + itemH)
+                return static_cast<int>(i);
+            itemTop += itemH;
+        }
+        return -1;
+    }
+
+    bool TryActivateNotificationHistoryItem(int x, int y)
+    {
+        const int index = NotificationHistoryIndexAtPoint(x, y);
+        if (index < 0)
+            return false;
+
+        if (static_cast<size_t>(index) < m_notificationHistory.size() && m_onNotificationHistoryActivate)
+            m_onNotificationHistoryActivate(m_notificationHistory[static_cast<size_t>(index)]);
+        return true;
+    }
+
     bool TryScrollNotificationHistoryAt(int x, int y, short delta)
     {
         if (!m_showNotificationHistory)
@@ -4537,6 +4583,7 @@ private:
     PolygonClearCallback m_onPolygonClear;
     RefreshCallback m_onRefresh;
     NotificationHistoryClearCallback m_onNotificationHistoryClear;
+    NotificationHistoryActivateCallback m_onNotificationHistoryActivate;
     ChatSendCallback m_onChatSend;
     ChatClearCallback m_onChatClear;
 
@@ -4717,6 +4764,11 @@ void MapView::SetRefreshCallback(RefreshCallback cb)
 void MapView::SetNotificationHistoryClearCallback(NotificationHistoryClearCallback cb)
 {
     m_impl->SetNotificationHistoryClearCallback(std::move(cb));
+}
+
+void MapView::SetNotificationHistoryActivateCallback(NotificationHistoryActivateCallback cb)
+{
+    m_impl->SetNotificationHistoryActivateCallback(std::move(cb));
 }
 
 void MapView::SetChatSendCallback(ChatSendCallback cb)

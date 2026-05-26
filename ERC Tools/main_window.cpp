@@ -72,6 +72,7 @@ constexpr int IDC_SETTINGS_SYNC_LABEL = 2117;
 constexpr int IDC_SETTINGS_SYNC_LOCAL_RADIO = 2118;
 constexpr int IDC_SETTINGS_SYNC_SERVER_RADIO = 2119;
 constexpr int IDC_SETTINGS_WORLD_BOUNDARY_BTN = 2120;
+constexpr int IDC_SETTINGS_PUSH_REMOTE_BTN = 2121;
 constexpr int IDC_INCIDENT_FILTERS_TITLE_LABEL = 2201;
 constexpr int IDC_INCIDENT_FILTERS_DESC_LABEL = 2202;
 constexpr int IDC_INCIDENT_FILTERS_SEVERITY_LABEL = 2203;
@@ -254,6 +255,7 @@ struct ServerResult
 struct GlobalSettingsResult
 {
     bool ok = false;
+    bool push = false;
     std::wstring error;
     json settings;
 };
@@ -278,6 +280,13 @@ struct IncidentNotificationState
     std::wstring signature;
     std::wstring line;
     TrafficAlert alert;
+};
+
+struct NotificationBatchItem
+{
+    std::wstring line;
+    std::wstring sourceType;
+    std::wstring sourceId;
 };
 
 struct EarthquakeNotificationState
@@ -566,6 +575,117 @@ static void MoveLabelToText(HWND hwnd, int x, int y, int maximumWidth = 0)
     MoveWindow(hwnd, x, y, width, AutoLabelHeight(hwnd, 22, width), TRUE);
 }
 
+static bool IsClassName(HWND hwnd, const wchar_t* expected)
+{
+    wchar_t className[64]{};
+    if (!GetClassNameW(hwnd, className, static_cast<int>(_countof(className))))
+        return false;
+    return _wcsicmp(className, expected) == 0;
+}
+
+static int MaxAutoLayoutClientWidth(HWND hwnd)
+{
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{ sizeof(mi) };
+    if (GetMonitorInfoW(monitor, &mi))
+        return MaxInt(320, (mi.rcWork.right - mi.rcWork.left) - 96);
+    return 900;
+}
+
+static bool IsTextButtonStyle(DWORD style)
+{
+    switch (style & BS_TYPEMASK) {
+    case BS_PUSHBUTTON:
+    case BS_DEFPUSHBUTTON:
+    case BS_CHECKBOX:
+    case BS_AUTOCHECKBOX:
+    case BS_RADIOBUTTON:
+    case BS_AUTORADIOBUTTON:
+    case BS_OWNERDRAW:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool IsTextStaticStyle(DWORD style)
+{
+    switch (style & SS_TYPEMASK) {
+    case SS_LEFT:
+    case SS_CENTER:
+    case SS_RIGHT:
+    case SS_SIMPLE:
+    case SS_LEFTNOWORDWRAP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static BOOL CALLBACK AutoSizeTextChildEnumProc(HWND child, LPARAM param)
+{
+    if ((GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE) == 0)
+        return TRUE;
+
+    int textLength = GetWindowTextLengthW(child);
+    if (textLength <= 0)
+        return TRUE;
+
+    HWND dialog = reinterpret_cast<HWND>(param);
+    HWND parent = GetParent(child);
+    if (!dialog || !parent)
+        return TRUE;
+
+    RECT screenRect{};
+    if (!GetWindowRect(child, &screenRect))
+        return TRUE;
+
+    POINT topLeft{ screenRect.left, screenRect.top };
+    ScreenToClient(dialog, &topLeft);
+
+    RECT parentRect = screenRect;
+    MapWindowPoints(HWND_DESKTOP, parent, reinterpret_cast<POINT*>(&parentRect), 2);
+    const int currentW = parentRect.right - parentRect.left;
+    const int currentH = parentRect.bottom - parentRect.top;
+
+    const int maxRight = MaxAutoLayoutClientWidth(dialog) - 28;
+    const int maxWidth = MaxInt(80, maxRight - topLeft.x);
+
+    DWORD style = static_cast<DWORD>(GetWindowLongPtrW(child, GWL_STYLE));
+    if (IsClassName(child, L"BUTTON") && IsTextButtonStyle(style)) {
+        const bool checkLike = (style & BS_TYPEMASK) == BS_CHECKBOX ||
+            (style & BS_TYPEMASK) == BS_AUTOCHECKBOX ||
+            (style & BS_TYPEMASK) == BS_RADIOBUTTON ||
+            (style & BS_TYPEMASK) == BS_AUTORADIOBUTTON;
+        const int horizontalPadding = checkLike ? 36 : 34;
+        const int desiredW = PreferredControlWidth(child, horizontalPadding, currentW, maxWidth);
+        const int desiredH = PreferredControlHeight(child, 10, currentH, desiredW);
+        if (desiredW != currentW || desiredH != currentH) {
+            SetWindowPos(child, nullptr, 0, 0, desiredW, desiredH,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return TRUE;
+    }
+
+    if (IsClassName(child, L"STATIC") && IsTextStaticStyle(style)) {
+        const int desiredW = PreferredControlWidth(child, 6, currentW, maxWidth);
+        const int desiredH = PreferredControlHeight(child, 8, currentH, desiredW);
+        if (desiredW != currentW || desiredH != currentH) {
+            SetWindowPos(child, nullptr, 0, 0, desiredW, desiredH,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    return TRUE;
+}
+
+static void AutoSizeTextControls(HWND hwnd)
+{
+    if (!hwnd)
+        return;
+    EnumChildWindows(hwnd, AutoSizeTextChildEnumProc, reinterpret_cast<LPARAM>(hwnd));
+}
+
 static BOOL CALLBACK AutoFitChildEnumProc(HWND child, LPARAM param)
 {
     RECT childRect{};
@@ -588,6 +708,8 @@ static void AutoFitWindowToChildren(HWND hwnd, int padding = 28)
 {
     if (!hwnd)
         return;
+
+    AutoSizeTextControls(hwnd);
 
     RECT childBounds{ 0, 0, 0, 0 };
     EnumChildWindows(hwnd, AutoFitChildEnumProc, reinterpret_cast<LPARAM>(&childBounds));
@@ -1545,6 +1667,15 @@ private:
             DestroyWindow(m_hwnd);
             return 0;
 
+        case WM_QUERYENDSESSION:
+            LogoutOnlineSession(L"windows_shutdown");
+            return TRUE;
+
+        case WM_ENDSESSION:
+            if (wParam)
+                LogoutOnlineSession(L"windows_session_ended");
+            return 0;
+
         case WM_DESTROY:
             LogoutOnlineSession(L"client_destroyed");
             g_appQuitting.store(true);
@@ -1749,6 +1880,9 @@ private:
             });
         m_map.SetNotificationHistoryClearCallback([this]() {
             ClearNotificationHistory();
+            });
+        m_map.SetNotificationHistoryActivateCallback([this](const AppNotification& notification) {
+            ActivateNotificationHistoryEntry(notification);
             });
         m_map.SetChatSendCallback([this](const std::wstring& text) {
             SendChatTextAsync(text);
@@ -2631,6 +2765,35 @@ private:
         }
     }
 
+    bool ReadLocalSettingsForRemotePush(json& settingsOut, std::wstring& errorOut)
+    {
+        SaveSettings();
+
+        try {
+            std::ifstream in(GetSettingsPath(), std::ios::binary);
+            if (!in) {
+                errorOut = L"Could not open the local settings file.";
+                return false;
+            }
+
+            json root = json::parse(in);
+            if (root.is_object()) {
+                auto settingsIt = root.find("settings");
+                if (settingsIt != root.end() && settingsIt->is_object()) {
+                    settingsOut = *settingsIt;
+                    return true;
+                }
+            }
+
+            errorOut = L"Local settings file does not contain a settings object.";
+            return false;
+        }
+        catch (const std::exception& e) {
+            errorOut = L"Could not read local settings: " + Utf8ToWide(e.what());
+            return false;
+        }
+    }
+
     void ApplySettingsToRuntime()
     {
         m_alertsEndpoint = NormalizeUrl(m_alertsEndpoint);
@@ -2665,17 +2828,17 @@ private:
     void SyncGlobalSettingsFromServerAsync()
     {
         if (!IsOnlineMode()) {
-            SetStatusText(L"Sync Settings needs an online session.");
+            SetStatusText(L"Remote Settings needs an online session.");
             return;
         }
 
         std::wstring server = ServerBaseUrl();
         if (server.empty()) {
-            SetStatusText(L"Set the collaboration server before syncing settings.");
+            SetStatusText(L"Set the collaboration server before pulling remote settings.");
             return;
         }
 
-        SetStatusText(L"Syncing settings from server...");
+        SetStatusText(L"Pulling remote settings...");
         HWND hwnd = m_hwnd;
         std::wstring authHeaders = BearerAuthHeader(m_session);
         ClientSession session = m_session;
@@ -2727,11 +2890,77 @@ private:
             });
     }
 
+    void PushGlobalSettingsToServerAsync()
+    {
+        if (!IsOnlineMode()) {
+            SetStatusText(L"Remote Settings needs an online session.");
+            return;
+        }
+        if (!CanManageAccounts()) {
+            SetStatusText(L"Only Administrators and Supervisors can push remote settings.");
+            return;
+        }
+
+        std::wstring server = ServerBaseUrl();
+        if (server.empty()) {
+            SetStatusText(L"Set the collaboration server before pushing remote settings.");
+            return;
+        }
+
+        json settings;
+        std::wstring readError;
+        if (!ReadLocalSettingsForRemotePush(settings, readError)) {
+            SetStatusText(readError);
+            return;
+        }
+
+        SetStatusText(L"Pushing settings remotely...");
+        EnableWindow(m_settingsPushRemoteBtn, FALSE);
+        HWND hwnd = m_hwnd;
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session, settings = std::move(settings)]() {
+            auto* result = new GlobalSettingsResult{};
+            result->push = true;
+
+            BinaryCallResult binary;
+            if (BinarySetGlobalSettings(server, session, settings, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->settings = settings;
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SETTINGS_SYNC_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
+            std::string response;
+            std::wstring error;
+            json body = json::object({ { "settings", settings } });
+            result->ok = HttpPostJsonTextWithHeaders(AppendPath(server, L"/api/settings/global"), body.dump(), authHeaders, response, error);
+            result->settings = settings;
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SETTINGS_SYNC_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            });
+    }
+
     void OnGlobalSettingsSyncReady(GlobalSettingsResult* result)
     {
         std::unique_ptr<GlobalSettingsResult> holder(result);
         if (!result)
             return;
+
+        if (result->push) {
+            EnableWindow(m_settingsPushRemoteBtn, IsOnlineMode() && CanManageAccounts());
+            SetStatusText(result->ok
+                ? L"Settings pushed remotely."
+                : (result->error.empty() ? L"Remote settings push failed." : L"Remote settings push failed: " + result->error));
+            return;
+        }
 
         if (!result->ok) {
             SetStatusText(result->error.empty() ? L"Settings sync failed." : result->error);
@@ -2747,7 +2976,7 @@ private:
         LoadSettings();
         ApplySettingsToRuntime();
         SaveSettings();
-        SetStatusText(L"Settings synced from server.");
+        SetStatusText(L"Remote settings applied.");
     }
 
     void ApplyRefreshTimer()
@@ -3063,40 +3292,44 @@ private:
     }
 
     void PublishIncidentNotificationBatch(
-        const std::vector<std::wstring>& lines,
+        const std::vector<NotificationBatchItem>& items,
         const std::wstring& singleTitleSuffix,
         const std::wstring& pluralTitle)
     {
-        if (lines.empty())
+        if (items.empty())
             return;
 
         std::wstring title;
         std::wstring body;
-        if (lines.size() == 1) {
+        std::wstring sourceType;
+        std::wstring sourceId;
+        if (items.size() == 1) {
             title = singleTitleSuffix;
-            body = lines.front();
+            body = items.front().line;
+            sourceType = items.front().sourceType;
+            sourceId = items.front().sourceId;
         }
         else {
-            title = std::to_wstring(lines.size()) + L" " + pluralTitle;
-            const size_t displayCount = MinValue<size_t>(lines.size(), 3);
+            title = std::to_wstring(items.size()) + L" " + pluralTitle;
+            const size_t displayCount = MinValue<size_t>(items.size(), 3);
             for (size_t i = 0; i < displayCount; ++i) {
                 if (!body.empty())
                     body += L"\r\n";
-                body += lines[i];
+                body += items[i].line;
             }
-            if (lines.size() > displayCount)
+            if (items.size() > displayCount)
                 body += L"\r\n...";
         }
 
-        PublishNotification(title, body);
+        PublishNotification(title, body, sourceType, sourceId);
     }
 
     void NotifyForMatchingIncidents(const std::vector<TrafficAlert>& alerts)
     {
         std::unordered_set<std::wstring> currentIncidentKeys;
-        std::vector<std::wstring> newLines;
-        std::vector<std::wstring> updateLines;
-        std::vector<std::wstring> removedLines;
+        std::vector<NotificationBatchItem> newLines;
+        std::vector<NotificationBatchItem> updateLines;
+        std::vector<NotificationBatchItem> removedLines;
 
         for (const TrafficAlert& alert : alerts) {
             std::wstring stableKey = IncidentNotificationStableKey(alert);
@@ -3105,7 +3338,7 @@ private:
             if (!AlertMatchesIncidentNotification(alert)) {
                 auto existing = m_notifiedIncidentStates.find(stableKey);
                 if (m_haveIncidentNotificationSnapshot && existing != m_notifiedIncidentStates.end()) {
-                    removedLines.push_back(existing->second.line);
+                    removedLines.push_back({ existing->second.line, L"incident", existing->second.alert.id });
                     m_notifiedIncidentStates.erase(existing);
                 }
                 continue;
@@ -3115,12 +3348,12 @@ private:
             std::wstring line = IncidentNotificationLine(alert);
             auto existing = m_notifiedIncidentStates.find(stableKey);
             if (existing == m_notifiedIncidentStates.end()) {
-                newLines.push_back(line);
+                newLines.push_back({ line, L"incident", alert.id });
                 m_notifiedIncidentStates[stableKey] = IncidentNotificationState{ signature, line, alert };
             }
             else if (existing->second.signature != signature) {
                 if (!m_incidentIgnoreUpdates)
-                    updateLines.push_back(line);
+                    updateLines.push_back({ line, L"incident", alert.id });
                 existing->second.signature = std::move(signature);
                 existing->second.line = std::move(line);
                 existing->second.alert = alert;
@@ -3133,7 +3366,7 @@ private:
         if (m_haveIncidentNotificationSnapshot) {
             for (auto it = m_notifiedIncidentStates.begin(); it != m_notifiedIncidentStates.end();) {
                 if (currentIncidentKeys.find(it->first) == currentIncidentKeys.end()) {
-                    removedLines.push_back(it->second.line);
+                    removedLines.push_back({ it->second.line, L"incident", it->second.alert.id });
                     it = m_notifiedIncidentStates.erase(it);
                 }
                 else {
@@ -3201,12 +3434,14 @@ private:
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
-    void ShowInAppIncidentNotification(const std::wstring& title, const std::wstring& body)
+    void ShowInAppIncidentNotification(const std::wstring& title, const std::wstring& body, const std::wstring& sourceType = L"", const std::wstring& sourceId = L"")
     {
         AppNotification notification;
         notification.title = title;
         notification.body = body;
         notification.timestamp = TimeTToText(std::time(nullptr));
+        notification.sourceType = sourceType;
+        notification.sourceId = sourceId;
         m_map.SetActiveNotification(notification);
         KillTimer(m_hwnd, kInAppNotificationTimerId);
         SetTimer(m_hwnd, kInAppNotificationTimerId, 10 * 1000, nullptr);
@@ -3224,23 +3459,25 @@ private:
         SetStatusText(L"Notification history cleared.");
     }
 
-    void AddNotificationHistory(const std::wstring& title, const std::wstring& body)
+    void AddNotificationHistory(const std::wstring& title, const std::wstring& body, const std::wstring& sourceType = L"", const std::wstring& sourceId = L"")
     {
         AppNotification entry;
         entry.title = title;
         entry.body = body;
         entry.timestamp = TimeTToText(std::time(nullptr));
+        entry.sourceType = sourceType;
+        entry.sourceId = sourceId;
         m_notificationHistory.insert(m_notificationHistory.begin(), std::move(entry));
         if (m_notificationHistory.size() > 100)
             m_notificationHistory.resize(100);
         RenderNotificationHistory();
     }
 
-    void PublishNotification(const std::wstring& title, const std::wstring& body)
+    void PublishNotification(const std::wstring& title, const std::wstring& body, const std::wstring& sourceType = L"", const std::wstring& sourceId = L"")
     {
-        AddNotificationHistory(title, body);
+        AddNotificationHistory(title, body, sourceType, sourceId);
         ShowWindowsIncidentNotification(title, body);
-        ShowInAppIncidentNotification(title, body);
+        ShowInAppIncidentNotification(title, body, sourceType, sourceId);
     }
 
     void DownloadMissingLaneImagesAsync(const std::vector<TrafficAlert>& alerts)
@@ -3394,6 +3631,15 @@ private:
         return -1;
     }
 
+    const TrafficAlert* FindAnyAlertById(const std::wstring& id) const
+    {
+        for (const TrafficAlert& alert : m_allAlerts) {
+            if (alert.id == id)
+                return &alert;
+        }
+        return nullptr;
+    }
+
     void SelectAlertById(const std::wstring& id, bool centerMap)
     {
         int idx = FindAlertIndexById(id);
@@ -3421,6 +3667,44 @@ private:
         SendMessageW(m_listView, LVM_ENSUREVISIBLE, idx, TRUE);
 
         m_programmaticSelection = false;
+    }
+
+    void ShowAlertDetailsById(const std::wstring& id, bool centerMap)
+    {
+        int filteredIndex = FindAlertIndexById(id);
+        if (filteredIndex >= 0) {
+            SelectAlertById(id, centerMap);
+            return;
+        }
+
+        const TrafficAlert* alert = FindAnyAlertById(id);
+        if (!alert) {
+            SetStatusText(L"Notification source incident is no longer available.");
+            return;
+        }
+
+        m_selectedId = id;
+        SetWindowTextSafe(m_detailsEdit, BuildAlertDetails(*alert));
+        m_map.SetSelectedId(L"");
+
+        if (m_listView) {
+            LVITEMW state{};
+            state.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+            state.state = 0;
+            SendMessageW(m_listView, LVM_SETITEMSTATE, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(&state));
+        }
+
+        SetStatusText(L"Showing notification incident details.");
+    }
+
+    void ActivateNotificationHistoryEntry(const AppNotification& notification)
+    {
+        if (ToLower(Trim(notification.sourceType)) != L"incident" || notification.sourceId.empty()) {
+            SetStatusText(L"This notification is not linked to a current incident.");
+            return;
+        }
+
+        ShowAlertDetailsById(notification.sourceId, true);
     }
 
 
@@ -8245,18 +8529,19 @@ private:
         CreateAutoLabel(parent, IDC_SETTINGS_WORLD_LABEL, L"Map display", 18, 252);
         m_settingsWorldOffRadio = CreateWindowExW(0, L"BUTTON", L"UK depiction", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 278, 130, 24, parent, ControlId(IDC_SETTINGS_WORLD_OFF_RADIO), m_hInst, nullptr);
         m_settingsWorldOnRadio = CreateWindowExW(0, L"BUTTON", L"Display rest of world", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 278, 190, 24, parent, ControlId(IDC_SETTINGS_WORLD_ON_RADIO), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_SYNC_LABEL, L"Settings source", 18, 316);
+        CreateAutoLabel(parent, IDC_SETTINGS_SYNC_LABEL, L"Remote Settings", 18, 316);
         m_settingsSyncLocalRadio = CreateWindowExW(0, L"BUTTON", L"Local settings", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 342, 130, 24, parent, ControlId(IDC_SETTINGS_SYNC_LOCAL_RADIO), m_hInst, nullptr);
-        m_settingsSyncServerRadio = CreateWindowExW(0, L"BUTTON", L"Sync Settings", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 342, 150, 24, parent, ControlId(IDC_SETTINGS_SYNC_SERVER_RADIO), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 380);
-        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 406, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 444);
-        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 470, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
-        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 516, 260, 32, parent, ControlId(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
-        m_settingsWorldBoundaryBtn = CreateWindowExW(0, L"BUTTON", L"Download / refresh World Boundaries", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 556, 310, 32, parent, ControlId(IDC_SETTINGS_WORLD_BOUNDARY_BTN), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 596, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+        m_settingsSyncServerRadio = CreateWindowExW(0, L"BUTTON", L"Remote Settings", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 342, 160, 24, parent, ControlId(IDC_SETTINGS_SYNC_SERVER_RADIO), m_hInst, nullptr);
+        m_settingsPushRemoteBtn = CreateWindowExW(0, L"BUTTON", L"Push Settings Remotely", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 376, 220, 32, parent, ControlId(IDC_SETTINGS_PUSH_REMOTE_BTN), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 428);
+        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 454, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 492);
+        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 518, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
+        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 564, 260, 32, parent, ControlId(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
+        m_settingsWorldBoundaryBtn = CreateWindowExW(0, L"BUTTON", L"Download / refresh World Boundaries", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 604, 310, 32, parent, ControlId(IDC_SETTINGS_WORLD_BOUNDARY_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 644, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsWorldOffRadio, m_settingsWorldOnRadio, m_settingsSyncLocalRadio, m_settingsSyncServerRadio, m_settingsFilterCombo, m_settingsOrderCombo, boundary, m_settingsWorldBoundaryBtn, close }) {
+        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsWorldOffRadio, m_settingsWorldOnRadio, m_settingsSyncLocalRadio, m_settingsSyncServerRadio, m_settingsPushRemoteBtn, m_settingsFilterCombo, m_settingsOrderCombo, boundary, m_settingsWorldBoundaryBtn, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -8309,6 +8594,11 @@ private:
         if (m_settingsSyncServerRadio) {
             SendMessageW(m_settingsSyncServerRadio, BM_SETCHECK, m_syncSettingsFromServer ? BST_CHECKED : BST_UNCHECKED, 0);
             EnableWindow(m_settingsSyncServerRadio, IsOnlineMode());
+        }
+        if (m_settingsPushRemoteBtn) {
+            const bool canPush = IsOnlineMode() && CanManageAccounts();
+            ShowWindow(m_settingsPushRemoteBtn, canPush ? SW_SHOW : SW_HIDE);
+            EnableWindow(m_settingsPushRemoteBtn, canPush);
         }
         if (m_settingsFilterCombo)
             SendMessageW(m_settingsFilterCombo, CB_SETCURSEL, m_alertFilterUnplannedOnly ? 0 : 1, 0);
@@ -8391,6 +8681,9 @@ private:
             SaveSettings();
             SyncGlobalSettingsFromServerAsync();
         }
+        else if (id == IDC_SETTINGS_PUSH_REMOTE_BTN && code == BN_CLICKED) {
+            PushGlobalSettingsToServerAsync();
+        }
         else if (id == IDC_SETTINGS_ALERT_FILTER && code == CBN_SELCHANGE) {
             m_alertFilterUnplannedOnly = SendMessageW(m_settingsFilterCombo, CB_GETCURSEL, 0, 0) == 0;
             SaveSettings();
@@ -8450,6 +8743,7 @@ private:
     HWND m_settingsWorldOnRadio = nullptr;
     HWND m_settingsSyncLocalRadio = nullptr;
     HWND m_settingsSyncServerRadio = nullptr;
+    HWND m_settingsPushRemoteBtn = nullptr;
     HWND m_settingsWorldBoundaryBtn = nullptr;
     HWND m_incidentSevereCheck = nullptr;
     HWND m_incidentModerateCheck = nullptr;

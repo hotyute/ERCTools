@@ -83,6 +83,8 @@ struct AppNotification
     std::wstring title;
     std::wstring body;
     std::wstring timestamp;
+    std::wstring sourceType;
+    std::wstring sourceId;
 };
 
 struct ChatMessage

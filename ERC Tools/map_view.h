@@ -20,6 +20,7 @@ public:
     using PolygonClearCallback = std::function<void(size_t polygonIndex)>;
     using RefreshCallback = std::function<void()>;
     using NotificationHistoryClearCallback = std::function<void()>;
+    using NotificationHistoryActivateCallback = std::function<void(const AppNotification&)>;
     using ChatSendCallback = std::function<void(const std::wstring& text)>;
     using ChatClearCallback = std::function<void()>;
 
@@ -43,6 +44,7 @@ public:
     void SetPolygonClearCallback(PolygonClearCallback cb);
     void SetRefreshCallback(RefreshCallback cb);
     void SetNotificationHistoryClearCallback(NotificationHistoryClearCallback cb);
+    void SetNotificationHistoryActivateCallback(NotificationHistoryActivateCallback cb);
     void SetChatSendCallback(ChatSendCallback cb);
     void SetChatClearCallback(ChatClearCallback cb);
     void SetChatClearEnabled(bool enabled);

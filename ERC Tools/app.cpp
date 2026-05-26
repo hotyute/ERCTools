@@ -42,10 +42,41 @@ bool InitGraphicsFactories()
     return true;
 }
 
+static BOOL WINAPI ConsoleShutdownHandler(DWORD signal)
+{
+    switch (signal) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        break;
+    default:
+        return FALSE;
+    }
+
+    g_appQuitting.store(true);
+
+    HWND hwnd = FindWindowW(kMainClassName, nullptr);
+    if (!hwnd)
+        return FALSE;
+
+    DWORD_PTR result = 0;
+    SendMessageTimeoutW(
+        hwnd,
+        WM_CLOSE,
+        0,
+        0,
+        SMTO_ABORTIFHUNG | SMTO_BLOCK,
+        4000,
+        &result);
+    return TRUE;
+}
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
 {
     OpenConsole();
+    SetConsoleCtrlHandler(ConsoleShutdownHandler, TRUE);
     ConsoleLog(L"Starting ERC Tools...");
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -77,6 +108,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
     g_dwriteFactory.Reset();
     g_wicFactory.Reset();
     g_d2dFactory.Reset();
+    SetConsoleCtrlHandler(ConsoleShutdownHandler, FALSE);
     CoUninitialize();
     return rc;
 }
