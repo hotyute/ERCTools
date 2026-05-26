@@ -61,6 +61,12 @@ public:
     void SetEarthquakeOverlayVisible(bool visible);
     void SetWeatherSystems(const std::vector<WeatherSystemEvent>& systems);
     void SetWeatherSystemOverlayVisible(bool visible);
+    void SetWeatherWarnings(const std::vector<WeatherWarningEvent>& warnings);
+    void SetWeatherWarningOverlayVisible(bool visible);
+    void SetFloods(const std::vector<FloodEvent>& floods);
+    void SetFloodOverlayVisible(bool visible);
+    void SetAreaLabelsVisible(bool visible);
+    void SetRoadDepictionsVisible(bool visible);
     void SetDisplayWorldMap(bool visible);
     void SetActiveNotification(const AppNotification& notification);
     void ClearActiveNotification();

@@ -78,6 +78,38 @@ struct WeatherSystemEvent
     bool hasForecastLocation = false;
 };
 
+struct WeatherWarningEvent
+{
+    std::wstring id;
+    std::wstring colour;
+    std::wstring type;
+    std::wstring headline;
+    std::wstring area;
+    std::wstring validFrom;
+    std::wstring validTo;
+    std::wstring issuedText;
+    std::wstring detail;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    bool hasLocation = false;
+};
+
+struct FloodEvent
+{
+    std::wstring id;
+    std::wstring severity;
+    std::wstring area;
+    std::wstring region;
+    std::wstring riverOrSea;
+    std::wstring message;
+    std::wstring timeRaised;
+    std::wstring timeChanged;
+    int severityLevel = 0;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    bool hasLocation = false;
+};
+
 struct AppNotificationLink
 {
     std::wstring text;

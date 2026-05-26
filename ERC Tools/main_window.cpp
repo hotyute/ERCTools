@@ -52,6 +52,16 @@ constexpr int IDM_FILE_LOGOUT = 2023;
 constexpr int IDM_ROADS_INCIDENTS_LIST = 2024;
 constexpr int IDM_FILE_USERS = 2025;
 constexpr int IDM_FILE_ACCOUNT_CREATOR = 2026;
+constexpr int IDM_WEATHER_WARNINGS_LIST = 2027;
+constexpr int IDM_FLOODS_LIST = 2028;
+constexpr int IDM_SHOW_WEATHER_WARNINGS = 2029;
+constexpr int IDM_WEATHER_WARNING_OVERLAY_NONE = 2030;
+constexpr int IDM_WEATHER_WARNING_OVERLAY_TYPE_AREA = 2031;
+constexpr int IDM_SHOW_FLOODS = 2032;
+constexpr int IDM_FLOOD_OVERLAY_NONE = 2033;
+constexpr int IDM_FLOOD_OVERLAY_SEVERITY_AREA = 2034;
+constexpr int IDM_VIEW_AREA_LABELS = 2035;
+constexpr int IDM_VIEW_ROAD_DEPICTIONS = 2036;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -137,6 +147,12 @@ constexpr int IDC_WEATHER_SYSTEMS_LIST_REFRESH_BTN = 2542;
 constexpr int IDC_WEATHER_SYSTEMS_LIST_CLOSE_BTN = 2543;
 constexpr int IDC_WEATHER_SYSTEM_NOTIFICATIONS_WIND_EDIT = 2551;
 constexpr int IDC_WEATHER_SYSTEM_NOTIFICATIONS_CLOSE_BTN = 2552;
+constexpr int IDC_WEATHER_WARNINGS_LIST_LISTVIEW = 2561;
+constexpr int IDC_WEATHER_WARNINGS_LIST_REFRESH_BTN = 2562;
+constexpr int IDC_WEATHER_WARNINGS_LIST_CLOSE_BTN = 2563;
+constexpr int IDC_FLOODS_LIST_LISTVIEW = 2571;
+constexpr int IDC_FLOODS_LIST_REFRESH_BTN = 2572;
+constexpr int IDC_FLOODS_LIST_CLOSE_BTN = 2573;
 constexpr int IDC_TEMPLATES_WIZARD_TITLE = 2601;
 constexpr int IDC_TEMPLATES_WIZARD_DESC = 2602;
 constexpr int IDC_TEMPLATES_WIZARD_LIST = 2603;
@@ -175,12 +191,16 @@ constexpr const wchar_t* kEarthquakeListClassName = L"TrafficEnglandEarthquakeLi
 constexpr const wchar_t* kEarthquakeNotificationsClassName = L"TrafficEnglandEarthquakeNotificationsWindow";
 constexpr const wchar_t* kWeatherSystemsListClassName = L"TrafficEnglandWeatherSystemsListWindow";
 constexpr const wchar_t* kWeatherSystemNotificationsClassName = L"TrafficEnglandWeatherSystemNotificationsWindow";
+constexpr const wchar_t* kWeatherWarningsListClassName = L"ERCToolsWeatherWarningsListWindow";
+constexpr const wchar_t* kFloodsListClassName = L"ERCToolsFloodsListWindow";
 constexpr const wchar_t* kTemplatesWizardClassName = L"TrafficEnglandTemplatesWizardWindow";
 constexpr const wchar_t* kTemplatesEditorClassName = L"TrafficEnglandTemplatesEditorWindow";
 constexpr const wchar_t* kAccountCreatorClassName = L"ERCToolsAccountCreatorWindow";
 constexpr UINT WM_APP_NOTIFY_ICON = WM_APP + 20;
 constexpr UINT WM_APP_UPDATE_READY = WM_APP + 21;
 constexpr UINT WM_APP_SETTINGS_SYNC_READY = WM_APP + 22;
+constexpr UINT WM_APP_WEATHER_WARNINGS_READY = WM_APP + 23;
+constexpr UINT WM_APP_FLOODS_READY = WM_APP + 24;
 constexpr UINT kNotificationIconId = 1;
 constexpr UINT_PTR kAlertRefreshTimerId = 1;
 constexpr UINT_PTR kServerPollTimerId = 2;
@@ -188,6 +208,8 @@ constexpr UINT_PTR kInAppNotificationTimerId = 3;
 constexpr UINT_PTR kEarthquakeRefreshTimerId = 4;
 constexpr UINT_PTR kWeatherSystemsRefreshTimerId = 5;
 constexpr const wchar_t* kWeatherSystemsSourceUrl = L"https://www.tropicalstormrisk.com/tracker/dynamic/main.html";
+constexpr const wchar_t* kWeatherWarningsSourceUrl = L"https://weather.metoffice.gov.uk/warnings-and-advice/uk-warnings";
+constexpr const wchar_t* kFloodsSourceUrl = L"https://environment.data.gov.uk/flood-monitoring/id/floods?_view=full";
 
 struct FeedResult
 {
@@ -226,6 +248,24 @@ struct WeatherSystemsResult
     std::wstring error;
     std::wstring statusText;
     std::vector<WeatherSystemEvent> systems;
+};
+
+struct WeatherWarningsResult
+{
+    bool ok = false;
+    bool notify = false;
+    std::wstring error;
+    std::wstring statusText;
+    std::vector<WeatherWarningEvent> warnings;
+};
+
+struct FloodsResult
+{
+    bool ok = false;
+    bool notify = false;
+    std::wstring error;
+    std::wstring statusText;
+    std::vector<FloodEvent> floods;
 };
 
 enum class ServerAction
@@ -296,6 +336,18 @@ struct EarthquakeNotificationState
 };
 
 struct WeatherSystemNotificationState
+{
+    std::wstring signature;
+    std::wstring line;
+};
+
+struct WeatherWarningNotificationState
+{
+    std::wstring signature;
+    std::wstring line;
+};
+
+struct FloodNotificationState
 {
     std::wstring signature;
     std::wstring line;
@@ -1436,6 +1488,354 @@ static std::vector<WeatherSystemEvent> ParseWeatherSystemEvents(const std::strin
     return systems;
 }
 
+static std::vector<std::wstring> HtmlToReadableLines(std::wstring html)
+{
+    html = std::regex_replace(html, std::wregex(LR"(<\s*br\s*/?\s*>)", std::regex_constants::icase), L"\n");
+    html = std::regex_replace(html, std::wregex(LR"(</\s*(?:p|div|section|article|li|ul|ol|tr|td|th|h[1-6])\s*>)", std::regex_constants::icase), L"\n");
+    html = std::regex_replace(html, std::wregex(LR"(<[^>]+>)"), L" ");
+    html = DecodeBasicHtmlEntities(html);
+
+    std::vector<std::wstring> lines;
+    std::wstringstream stream(html);
+    std::wstring line;
+    while (std::getline(stream, line)) {
+        line = Trim(std::regex_replace(line, std::wregex(LR"(\s+)"), L" "));
+        if (!line.empty())
+            lines.push_back(std::move(line));
+    }
+    return lines;
+}
+
+static bool TextContainsNoCase(const std::wstring& text, const std::wstring& needle)
+{
+    return ToLower(text).find(ToLower(needle)) != std::wstring::npos;
+}
+
+static bool TryApproximateUkAreaCentroid(const std::wstring& areaText, double& latOut, double& lonOut)
+{
+    struct AreaCentroid
+    {
+        const wchar_t* key;
+        double lat;
+        double lon;
+    };
+
+    static const AreaCentroid kAreas[] = {
+        { L"scotland", 56.4907, -4.2026 },
+        { L"northern ireland", 54.6079, -6.7080 },
+        { L"wales", 52.1307, -3.7837 },
+        { L"north east", 54.9783, -1.6178 },
+        { L"north west", 53.4808, -2.2426 },
+        { L"yorkshire", 53.8008, -1.5491 },
+        { L"humber", 53.7444, -0.3326 },
+        { L"east midlands", 52.9548, -1.1581 },
+        { L"west midlands", 52.4862, -1.8904 },
+        { L"east of england", 52.2405, 0.7110 },
+        { L"london", 51.5074, -0.1278 },
+        { L"south east", 51.2787, -0.5217 },
+        { L"south west", 51.4545, -2.5879 },
+        { L"cornwall", 50.2660, -5.0527 },
+        { L"devon", 50.7156, -3.5309 },
+        { L"somerset", 51.1051, -2.9262 },
+        { L"gloucestershire", 51.8642, -2.2382 },
+        { L"oxfordshire", 51.7520, -1.2577 },
+        { L"buckinghamshire", 51.8072, -0.8128 },
+        { L"cambridgeshire", 52.2053, 0.1218 },
+        { L"lincolnshire", 53.2307, -0.5406 },
+        { L"cheshire", 53.2326, -2.6103 },
+        { L"manchester", 53.4808, -2.2426 },
+        { L"merseyside", 53.4084, -2.9916 },
+        { L"kent", 51.2787, 0.5217 },
+        { L"sussex", 50.8225, -0.1372 },
+        { L"essex", 51.7343, 0.4691 },
+        { L"norfolk", 52.6309, 1.2974 },
+        { L"suffolk", 52.1872, 0.9708 },
+        { L"cumbria", 54.5772, -2.7975 },
+        { L"northumberland", 55.2083, -2.0784 },
+        { L"durham", 54.7753, -1.5849 },
+        { L"leicestershire", 52.6369, -1.1398 },
+        { L"nottinghamshire", 52.9548, -1.1581 },
+        { L"derbyshire", 53.1047, -1.5624 },
+        { L"staffordshire", 52.8050, -2.1164 },
+        { L"warwickshire", 52.2823, -1.5849 },
+        { L"worcestershire", 52.1920, -2.2200 },
+        { L"herefordshire", 52.0564, -2.7160 },
+        { L"shropshire", 52.7064, -2.7418 },
+        { L"bristol", 51.4545, -2.5879 },
+        { L"bath", 51.3758, -2.3599 }
+    };
+
+    std::wstring area = ToLower(areaText);
+    for (const AreaCentroid& item : kAreas) {
+        if (area.find(item.key) != std::wstring::npos) {
+            latOut = item.lat;
+            lonOut = item.lon;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool IsWeatherTypeLine(const std::wstring& line)
+{
+    static const wchar_t* kTypes[] = {
+        L"rain", L"wind", L"snow", L"ice", L"fog", L"thunderstorm",
+        L"lightning", L"extreme heat", L"rain & wind", L"rain and wind"
+    };
+    std::wstring value = ToLower(Trim(line));
+    for (const wchar_t* type : kTypes) {
+        if (value == type)
+            return true;
+    }
+    return false;
+}
+
+static bool LooksLikeMetOfficeTime(const std::wstring& line)
+{
+    return std::regex_match(Trim(line), std::wregex(LR"(\d{1,2}:\d{2})"));
+}
+
+static std::wstring JoinLimitedText(const std::vector<std::wstring>& values, size_t maxItems)
+{
+    std::wstring text;
+    const size_t count = MinValue(values.size(), maxItems);
+    for (size_t i = 0; i < count; ++i) {
+        if (!text.empty())
+            text += L", ";
+        text += values[i];
+    }
+    if (values.size() > count)
+        text += L", ...";
+    return text;
+}
+
+static std::vector<WeatherWarningEvent> ParseWeatherWarningEvents(const std::string& body, std::wstring& statusTextOut)
+{
+    std::vector<WeatherWarningEvent> warnings;
+    std::vector<std::wstring> lines = HtmlToReadableLines(Utf8ToWide(body));
+    statusTextOut.clear();
+
+    if (lines.empty())
+        return warnings;
+
+    auto firstForecastDay = std::find_if(lines.begin(), lines.end(), [](const std::wstring& line) {
+        return std::regex_search(line, std::wregex(LR"(\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{1,2}\s+\w{3}\b)", std::regex_constants::icase));
+        });
+    const size_t start = firstForecastDay == lines.end() ? 0 : static_cast<size_t>(std::distance(lines.begin(), firstForecastDay));
+
+    for (size_t i = start; i + 1 < lines.size(); ++i) {
+        std::wstring colour;
+        std::wstring lower = ToLower(lines[i]);
+        if (lower == L"red warning")
+            colour = L"Red";
+        else if (lower == L"amber warning")
+            colour = L"Amber";
+        else if (lower == L"yellow warning")
+            colour = L"Yellow";
+        else
+            continue;
+
+        size_t typeIndex = i + 1;
+        while (typeIndex < lines.size() && (lines[typeIndex] == L"x" || lines[typeIndex] == L"\x00d7"))
+            ++typeIndex;
+        if (typeIndex >= lines.size() || !IsWeatherTypeLine(lines[typeIndex]))
+            continue;
+
+        WeatherWarningEvent event;
+        event.colour = colour;
+        event.type = lines[typeIndex];
+
+        size_t cursor = typeIndex + 1;
+        while (cursor < lines.size() && !LooksLikeMetOfficeTime(lines[cursor]))
+            ++cursor;
+        if (cursor < lines.size()) {
+            event.validFrom = lines[cursor];
+            if (cursor + 1 < lines.size())
+                event.validFrom += L" " + lines[cursor + 1];
+            size_t toCursor = cursor + 1;
+            while (toCursor < lines.size() && !LooksLikeMetOfficeTime(lines[toCursor]))
+                ++toCursor;
+            if (toCursor < lines.size()) {
+                event.validTo = lines[toCursor];
+                if (toCursor + 1 < lines.size())
+                    event.validTo += L" " + lines[toCursor + 1];
+            }
+            cursor = toCursor;
+        }
+
+        size_t headlineIndex = cursor;
+        while (headlineIndex < lines.size()) {
+            const std::wstring lowerHeadline = ToLower(lines[headlineIndex]);
+            if (lines[headlineIndex].size() > 20 &&
+                lowerHeadline.find(L"what should") == std::wstring::npos &&
+                lowerHeadline.find(L"further detail") == std::wstring::npos &&
+                lowerHeadline.find(L"why is the warning") == std::wstring::npos)
+            {
+                event.headline = lines[headlineIndex];
+                break;
+            }
+            ++headlineIndex;
+        }
+
+        size_t regionHeaderIndex = lines.size();
+        size_t blockEndIndex = lines.size();
+        for (size_t j = headlineIndex + 1; j < lines.size(); ++j) {
+            std::wstring itemLower = ToLower(lines[j]);
+            if (itemLower == L"red warning" || itemLower == L"amber warning" || itemLower == L"yellow warning" ||
+                TextContainsNoCase(lines[j], L"Warnings are in force") ||
+                TextContainsNoCase(lines[j], L"Website feedback") ||
+                TextContainsNoCase(lines[j], L"Follow alerts in the app"))
+            {
+                blockEndIndex = j;
+                break;
+            }
+            if (TextContainsNoCase(lines[j], L"Regions and local authorities affected")) {
+                regionHeaderIndex = j;
+                continue;
+            }
+            if (TextContainsNoCase(lines[j], L"Issued") && j + 1 < lines.size()) {
+                event.issuedText = lines[j + 1];
+                continue;
+            }
+        }
+
+        std::vector<std::wstring> areas;
+        if (regionHeaderIndex < blockEndIndex) {
+            for (size_t j = regionHeaderIndex + 1; j < blockEndIndex; ++j) {
+                if (areas.size() >= 24)
+                    break;
+                if (TextContainsNoCase(lines[j], L"Issued") || TextContainsNoCase(lines[j], L"Warnings are in force"))
+                    break;
+                if (
+                !LooksLikeMetOfficeTime(lines[j]) &&
+                lines[j].find(L"UTC") == std::wstring::npos &&
+                lines[j].size() >= 4 &&
+                lines[j].size() <= 64 &&
+                lines[j].find(L".") == std::wstring::npos &&
+                lines[j].find(L":") == std::wstring::npos)
+                {
+                    static const wchar_t* ignored[] = {
+                        L"today", L"tomorrow", L"what should i expect?", L"what should i do?",
+                        L"further detail", L"issued", L"give us feedback about this warning"
+                    };
+                    bool skip = false;
+                    for (const wchar_t* value : ignored) {
+                        if (ToLower(lines[j]) == value) {
+                            skip = true;
+                            break;
+                        }
+                    }
+                    if (!skip)
+                        areas.push_back(lines[j]);
+                }
+            }
+        }
+
+        event.area = JoinLimitedText(areas, 10);
+        if (event.headline.empty())
+            event.headline = event.colour + L" warning for " + event.type;
+        event.detail = event.headline;
+        if (!event.area.empty())
+            event.detail += L" Affected: " + event.area;
+
+        const std::wstring mapText = event.area.empty() ? event.headline : event.area;
+        event.hasLocation = TryApproximateUkAreaCentroid(mapText, event.latitude, event.longitude);
+        event.id = event.colour + L"|" + event.type + L"|" + event.validFrom + L"|" + event.validTo + L"|" + event.headline;
+        warnings.push_back(std::move(event));
+    }
+
+    if (warnings.empty()) {
+        auto noWarnings = std::find_if(lines.begin() + static_cast<std::ptrdiff_t>(start), lines.end(), [](const std::wstring& line) {
+            return TextContainsNoCase(line, L"No warnings");
+            });
+        if (noWarnings != lines.end())
+            statusTextOut = L"No weather warnings found.";
+    }
+
+    return warnings;
+}
+
+static std::vector<FloodEvent> ParseFloodEvents(const std::string& body, std::wstring& statusTextOut)
+{
+    std::vector<FloodEvent> floods;
+    statusTextOut.clear();
+
+    json root = json::parse(body);
+    if (!root.is_object())
+        return floods;
+
+    auto itemsIt = root.find("items");
+    if (itemsIt == root.end())
+        return floods;
+
+    const json* items = &(*itemsIt);
+    if (items->is_object()) {
+        json single = json::array();
+        single.push_back(*items);
+        root["__single_items"] = std::move(single);
+        items = &root["__single_items"];
+    }
+    if (!items->is_array())
+        return floods;
+
+    for (const json& item : *items) {
+        if (!item.is_object())
+            continue;
+
+        FloodEvent event;
+        event.id = PickString(item, { "@id", "id" });
+        event.area = PickString(item, { "description", "label" });
+        event.region = PickString(item, { "eaRegionName", "eaAreaName", "county" });
+        event.severity = PickString(item, { "severity" });
+        event.message = PickString(item, { "message" });
+        event.timeRaised = PickString(item, { "timeRaised" });
+        event.timeChanged = PickString(item, { "timeMessageChanged", "timeSeverityChanged" });
+
+        double value = 0.0;
+        if (PickDouble(item, { "lat", "latitude" }, value))
+            event.latitude = value;
+        if (PickDouble(item, { "long", "lon", "lng", "longitude" }, value))
+            event.longitude = value;
+
+        auto levelIt = item.find("severityLevel");
+        if (levelIt != item.end() && levelIt->is_number_integer())
+            event.severityLevel = levelIt->get<int>();
+
+        auto areaIt = item.find("floodArea");
+        if (areaIt != item.end() && areaIt->is_object()) {
+            if (event.region.empty())
+                event.region = PickString(*areaIt, { "county", "eaRegionName", "eaAreaName" });
+            event.riverOrSea = PickString(*areaIt, { "riverOrSea" });
+            if (event.area.empty())
+                event.area = PickString(*areaIt, { "description", "label" });
+            if (!std::isfinite(event.latitude) || !std::isfinite(event.longitude) ||
+                (event.latitude == 0.0 && event.longitude == 0.0))
+            {
+                if (PickDouble(*areaIt, { "lat", "latitude" }, value))
+                    event.latitude = value;
+                if (PickDouble(*areaIt, { "long", "lon", "lng", "longitude" }, value))
+                    event.longitude = value;
+            }
+        }
+
+        event.hasLocation = IsValidMapCoordinate(event.latitude, event.longitude);
+        if (!event.hasLocation) {
+            std::wstring areaText = event.area + L" " + event.region + L" " + event.riverOrSea;
+            event.hasLocation = TryApproximateUkAreaCentroid(areaText, event.latitude, event.longitude);
+        }
+
+        if (event.id.empty())
+            event.id = event.area + L"|" + event.severity + L"|" + event.timeChanged;
+        if (!event.area.empty() || !event.severity.empty())
+            floods.push_back(std::move(event));
+    }
+
+    if (floods.empty())
+        statusTextOut = L"No flood warnings found.";
+    return floods;
+}
+
 static GeoPolygon GeoPolygonFromJson(const json& value)
 {
     GeoPolygon polygon;
@@ -1853,8 +2253,11 @@ private:
                 PollServerAsync();
             else if (wParam == kEarthquakeRefreshTimerId)
                 FetchEarthquakesAsync(true);
-            else if (wParam == kWeatherSystemsRefreshTimerId)
+            else if (wParam == kWeatherSystemsRefreshTimerId) {
                 FetchWeatherSystemsAsync(true);
+                FetchWeatherWarningsAsync(true);
+                FetchFloodsAsync(true);
+            }
             else if (wParam == kInAppNotificationTimerId) {
                 KillTimer(m_hwnd, kInAppNotificationTimerId);
                 m_map.ClearActiveNotification();
@@ -1882,6 +2285,14 @@ private:
 
         case WM_APP_WEATHER_READY:
             OnWeatherSystemsReady(reinterpret_cast<WeatherSystemsResult*>(lParam));
+            return 0;
+
+        case WM_APP_WEATHER_WARNINGS_READY:
+            OnWeatherWarningsReady(reinterpret_cast<WeatherWarningsResult*>(lParam));
+            return 0;
+
+        case WM_APP_FLOODS_READY:
+            OnFloodsReady(reinterpret_cast<FloodsResult*>(lParam));
             return 0;
 
         case WM_APP_UPDATE_READY:
@@ -2126,6 +2537,10 @@ private:
         m_map.SetUsersVisible(m_showUsersOverlay);
         m_map.SetEarthquakeOverlayVisible(m_showEarthquakes && m_showEarthquakeOverlayLabels);
         m_map.SetWeatherSystemOverlayVisible(m_showWeatherSystems && m_showWeatherSystemOverlayLabels);
+        m_map.SetWeatherWarningOverlayVisible(m_showWeatherWarnings && m_showWeatherWarningOverlayLabels);
+        m_map.SetFloodOverlayVisible(m_showFloods && m_showFloodOverlayLabels);
+        m_map.SetAreaLabelsVisible(m_showAreaLabels);
+        m_map.SetRoadDepictionsVisible(m_showRoadDepictions);
         m_map.SetDisplayWorldMap(m_displayWorldMap);
         RenderChatHistory();
         RenderOnlineUsers();
@@ -2142,6 +2557,8 @@ private:
         RefreshFeedAsync();
         FetchEarthquakesAsync(true);
         FetchWeatherSystemsAsync(true);
+        FetchWeatherWarningsAsync(true);
+        FetchFloodsAsync(true);
         if (IsOnlineMode()) {
             PollServerAsync();
             CheckForClientUpdateAsync();
@@ -2324,6 +2741,14 @@ private:
             ShowWeatherSystemNotificationsWindow();
             break;
 
+        case IDM_WEATHER_WARNINGS_LIST:
+            ShowWeatherWarningsListWindow();
+            break;
+
+        case IDM_FLOODS_LIST:
+            ShowFloodsListWindow();
+            break;
+
         case IDM_WEATHER_SYSTEMS_TEMPLATES_WIZARD:
             ShowWeatherSystemsTemplatesWizardWindow();
             break;
@@ -2344,8 +2769,40 @@ private:
             SetWeatherSystemOverlayLabels(true);
             break;
 
+        case IDM_SHOW_WEATHER_WARNINGS:
+            ToggleShowWeatherWarnings();
+            break;
+
+        case IDM_WEATHER_WARNING_OVERLAY_NONE:
+            SetWeatherWarningOverlayLabels(false);
+            break;
+
+        case IDM_WEATHER_WARNING_OVERLAY_TYPE_AREA:
+            SetWeatherWarningOverlayLabels(true);
+            break;
+
+        case IDM_SHOW_FLOODS:
+            ToggleShowFloods();
+            break;
+
+        case IDM_FLOOD_OVERLAY_NONE:
+            SetFloodOverlayLabels(false);
+            break;
+
+        case IDM_FLOOD_OVERLAY_SEVERITY_AREA:
+            SetFloodOverlayLabels(true);
+            break;
+
         case IDM_VIEW_NOTIFICATION_HISTORY:
             ToggleNotificationHistory();
+            break;
+
+        case IDM_VIEW_AREA_LABELS:
+            ToggleAreaLabels();
+            break;
+
+        case IDM_VIEW_ROAD_DEPICTIONS:
+            ToggleRoadDepictions();
             break;
 
         case IDM_ABOUT:
@@ -2699,6 +3156,12 @@ private:
             readBool("showEarthquakeOverlayLabels", m_showEarthquakeOverlayLabels);
             readBool("showWeatherSystems", m_showWeatherSystems);
             readBool("showWeatherSystemOverlayLabels", m_showWeatherSystemOverlayLabels);
+            readBool("showWeatherWarnings", m_showWeatherWarnings);
+            readBool("showWeatherWarningOverlayLabels", m_showWeatherWarningOverlayLabels);
+            readBool("showFloods", m_showFloods);
+            readBool("showFloodOverlayLabels", m_showFloodOverlayLabels);
+            readBool("showAreaLabels", m_showAreaLabels);
+            readBool("showRoadDepictions", m_showRoadDepictions);
             readString("earthquakeListMagnitudeText", m_earthquakeListMagnitudeText);
             readString("earthquakeListTimeText", m_earthquakeListTimeText);
             readString("earthquakeNotificationMagnitudeText", m_earthquakeNotificationMagnitudeText);
@@ -2927,6 +3390,12 @@ private:
             settings["showEarthquakeOverlayLabels"] = m_showEarthquakeOverlayLabels;
             settings["showWeatherSystems"] = m_showWeatherSystems;
             settings["showWeatherSystemOverlayLabels"] = m_showWeatherSystemOverlayLabels;
+            settings["showWeatherWarnings"] = m_showWeatherWarnings;
+            settings["showWeatherWarningOverlayLabels"] = m_showWeatherWarningOverlayLabels;
+            settings["showFloods"] = m_showFloods;
+            settings["showFloodOverlayLabels"] = m_showFloodOverlayLabels;
+            settings["showAreaLabels"] = m_showAreaLabels;
+            settings["showRoadDepictions"] = m_showRoadDepictions;
             settings["earthquakeListMagnitudeText"] = WideToUtf8(m_earthquakeListMagnitudeText);
             settings["earthquakeListTimeText"] = WideToUtf8(m_earthquakeListTimeText);
             settings["earthquakeFilterRegion"] = json::array();
@@ -3037,9 +3506,14 @@ private:
         UpdateNotificationHistoryMenu();
         UpdateEarthquakeMenu();
         UpdateWeatherSystemsMenu();
+        UpdateWeatherWarningMenu();
+        UpdateFloodMenu();
+        UpdateViewMenu();
         m_map.SetNotificationPolygons(m_incidentNotificationRegions);
         m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
         m_map.SetDisplayWorldMap(m_displayWorldMap);
+        m_map.SetAreaLabelsVisible(m_showAreaLabels);
+        m_map.SetRoadDepictionsVisible(m_showRoadDepictions);
 
         SortAlertsForCurrentOrder();
         if (m_listView)
@@ -3051,6 +3525,10 @@ private:
         m_filteredWeatherSystems = m_allWeatherSystems;
         RenderWeatherSystemsListRows();
         ApplyWeatherSystemVisibility();
+        RenderWeatherWarningsListRows();
+        ApplyWeatherWarningVisibility();
+        RenderFloodsListRows();
+        ApplyFloodVisibility();
         RenderNotificationHistory();
         SyncSettingsControls();
     }
@@ -4707,6 +5185,8 @@ private:
         SetMenuItemInfoW(earthquakeOverlayMenu, IDM_EARTHQUAKE_OVERLAY_MAG_REGION, FALSE, &earthquakeOverlayInfo);
         AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEMS_LIST, L"Weather Systems List...");
         AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEM_NOTIFICATIONS, L"Weather System Notifications...");
+        AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_WARNINGS_LIST, L"Weather Warnings...");
+        AppendMenuW(weatherMenu, MF_STRING, IDM_FLOODS_LIST, L"Floods...");
         AppendMenuW(weatherMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEMS_TEMPLATES_WIZARD, L"Templates Wizard...");
         AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEMS_EDIT_TEMPLATES, L"Edit Templates...");
@@ -4728,12 +5208,34 @@ private:
         weatherOverlayInfo.fType = MFT_RADIOCHECK;
         SetMenuItemInfoW(weatherOverlayMenu, IDM_WEATHER_SYSTEM_OVERLAY_NONE, FALSE, &weatherOverlayInfo);
         SetMenuItemInfoW(weatherOverlayMenu, IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND, FALSE, &weatherOverlayInfo);
+        AppendMenuW(weatherMenu, m_showWeatherWarnings ? MF_CHECKED : MF_UNCHECKED, IDM_SHOW_WEATHER_WARNINGS, L"Show Weather Warnings");
+        HMENU weatherWarningOverlayMenu = CreatePopupMenu();
+        const UINT weatherWarningOverlayEnabled = m_showWeatherWarnings ? MF_ENABLED : MF_GRAYED;
+        AppendMenuW(weatherWarningOverlayMenu, weatherWarningOverlayEnabled | (m_showWeatherWarningOverlayLabels ? MF_UNCHECKED : MF_CHECKED), IDM_WEATHER_WARNING_OVERLAY_NONE, L"None");
+        AppendMenuW(weatherWarningOverlayMenu, weatherWarningOverlayEnabled | (m_showWeatherWarningOverlayLabels ? MF_CHECKED : MF_UNCHECKED), IDM_WEATHER_WARNING_OVERLAY_TYPE_AREA, L"Type and Area");
+        AppendMenuW(weatherMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(weatherWarningOverlayMenu), L"Weather Warning Overlays");
+        SetMenuItemInfoW(weatherMenu, IDM_SHOW_WEATHER_WARNINGS, FALSE, &showWeatherInfo);
+        SetMenuItemInfoW(weatherWarningOverlayMenu, IDM_WEATHER_WARNING_OVERLAY_NONE, FALSE, &weatherOverlayInfo);
+        SetMenuItemInfoW(weatherWarningOverlayMenu, IDM_WEATHER_WARNING_OVERLAY_TYPE_AREA, FALSE, &weatherOverlayInfo);
+        AppendMenuW(weatherMenu, m_showFloods ? MF_CHECKED : MF_UNCHECKED, IDM_SHOW_FLOODS, L"Show Floods");
+        HMENU floodOverlayMenu = CreatePopupMenu();
+        const UINT floodOverlayEnabled = m_showFloods ? MF_ENABLED : MF_GRAYED;
+        AppendMenuW(floodOverlayMenu, floodOverlayEnabled | (m_showFloodOverlayLabels ? MF_UNCHECKED : MF_CHECKED), IDM_FLOOD_OVERLAY_NONE, L"None");
+        AppendMenuW(floodOverlayMenu, floodOverlayEnabled | (m_showFloodOverlayLabels ? MF_CHECKED : MF_UNCHECKED), IDM_FLOOD_OVERLAY_SEVERITY_AREA, L"Severity and Area");
+        AppendMenuW(weatherMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(floodOverlayMenu), L"Flood Overlays");
+        SetMenuItemInfoW(weatherMenu, IDM_SHOW_FLOODS, FALSE, &showWeatherInfo);
+        SetMenuItemInfoW(floodOverlayMenu, IDM_FLOOD_OVERLAY_NONE, FALSE, &weatherOverlayInfo);
+        SetMenuItemInfoW(floodOverlayMenu, IDM_FLOOD_OVERLAY_SEVERITY_AREA, FALSE, &weatherOverlayInfo);
         AppendMenuW(viewMenu, m_showNotificationHistory ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_NOTIFICATION_HISTORY, L"Notification History");
+        AppendMenuW(viewMenu, m_showAreaLabels ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_AREA_LABELS, L"Area Labels");
+        AppendMenuW(viewMenu, m_showRoadDepictions ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_ROAD_DEPICTIONS, L"Road Depictions");
         MENUITEMINFOW historyInfo{};
         historyInfo.cbSize = sizeof(historyInfo);
         historyInfo.fMask = MIIM_FTYPE;
         historyInfo.fType = MFT_RADIOCHECK;
         SetMenuItemInfoW(viewMenu, IDM_VIEW_NOTIFICATION_HISTORY, FALSE, &historyInfo);
+        SetMenuItemInfoW(viewMenu, IDM_VIEW_AREA_LABELS, FALSE, &historyInfo);
+        SetMenuItemInfoW(viewMenu, IDM_VIEW_ROAD_DEPICTIONS, FALSE, &historyInfo);
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"View");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
@@ -7541,6 +8043,16 @@ private:
         return L"https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&minlatitude=-82.94033&maxlatitude=82.9834&minlongitude=-180&maxlongitude=180&orderby=time&limit=20000";
     }
 
+    std::wstring WeatherWarningsQueryUrl() const
+    {
+        std::time_t now = std::time(nullptr);
+        std::tm local{};
+        localtime_s(&local, &now);
+        wchar_t date[32]{};
+        wcsftime(date, _countof(date), L"%Y-%m-%d", &local);
+        return std::wstring(kWeatherWarningsSourceUrl) + L"?date=" + date;
+    }
+
     void FetchEarthquakesAsync(bool notify)
     {
         if (m_earthquakeFetchInProgress.exchange(true))
@@ -7660,6 +8172,131 @@ private:
         delete result;
     }
 
+    void FetchWeatherWarningsAsync(bool notify)
+    {
+        if (m_weatherWarningsFetchInProgress.exchange(true))
+            return;
+
+        HWND hwnd = m_hwnd;
+        std::wstring url = WeatherWarningsQueryUrl();
+        ScheduleBackgroundTask([hwnd, notify, url]() {
+            auto* result = new WeatherWarningsResult{};
+            result->notify = notify;
+            std::string body;
+            std::wstring error;
+            if (HttpGetText(url, body, error)) {
+                try {
+                    result->warnings = ParseWeatherWarningEvents(body, result->statusText);
+                    result->ok = true;
+                }
+                catch (const std::exception& e) {
+                    result->ok = false;
+                    result->error = L"Weather warnings parse failed: " + Utf8ToWide(e.what());
+                }
+            }
+            else {
+                result->ok = false;
+                result->error = L"Weather warnings fetch failed: " + error;
+            }
+
+            if (g_appQuitting.load() || !IsWindow(hwnd)) {
+                delete result;
+                return;
+            }
+            if (!PostMessageW(hwnd, WM_APP_WEATHER_WARNINGS_READY, 0, reinterpret_cast<LPARAM>(result)))
+                delete result;
+            });
+    }
+
+    void OnWeatherWarningsReady(WeatherWarningsResult* result)
+    {
+        m_weatherWarningsFetchInProgress.store(false);
+        if (!result)
+            return;
+
+        if (!result->ok) {
+            if (m_weatherWarningsListWnd && IsWindowVisible(m_weatherWarningsListWnd))
+                SetStatusText(result->error);
+            delete result;
+            return;
+        }
+
+        m_allWeatherWarnings = std::move(result->warnings);
+        RenderWeatherWarningsListRows();
+        ApplyWeatherWarningVisibility();
+        if (result->notify)
+            NotifyForWeatherWarnings(m_allWeatherWarnings);
+        if (m_weatherWarningsListWnd && IsWindowVisible(m_weatherWarningsListWnd)) {
+            std::wstring status = L"Showing " + std::to_wstring(m_allWeatherWarnings.size()) + L" weather warning(s).";
+            if (!result->statusText.empty())
+                status += L" " + result->statusText;
+            SetStatusText(status);
+        }
+        delete result;
+    }
+
+    void FetchFloodsAsync(bool notify)
+    {
+        if (m_floodsFetchInProgress.exchange(true))
+            return;
+
+        HWND hwnd = m_hwnd;
+        ScheduleBackgroundTask([hwnd, notify]() {
+            auto* result = new FloodsResult{};
+            result->notify = notify;
+            std::string body;
+            std::wstring error;
+            if (HttpGetText(kFloodsSourceUrl, body, error)) {
+                try {
+                    result->floods = ParseFloodEvents(body, result->statusText);
+                    result->ok = true;
+                }
+                catch (const std::exception& e) {
+                    result->ok = false;
+                    result->error = L"Floods parse failed: " + Utf8ToWide(e.what());
+                }
+            }
+            else {
+                result->ok = false;
+                result->error = L"Floods fetch failed: " + error;
+            }
+
+            if (g_appQuitting.load() || !IsWindow(hwnd)) {
+                delete result;
+                return;
+            }
+            if (!PostMessageW(hwnd, WM_APP_FLOODS_READY, 0, reinterpret_cast<LPARAM>(result)))
+                delete result;
+            });
+    }
+
+    void OnFloodsReady(FloodsResult* result)
+    {
+        m_floodsFetchInProgress.store(false);
+        if (!result)
+            return;
+
+        if (!result->ok) {
+            if (m_floodsListWnd && IsWindowVisible(m_floodsListWnd))
+                SetStatusText(result->error);
+            delete result;
+            return;
+        }
+
+        m_allFloods = std::move(result->floods);
+        RenderFloodsListRows();
+        ApplyFloodVisibility();
+        if (result->notify)
+            NotifyForFloods(m_allFloods);
+        if (m_floodsListWnd && IsWindowVisible(m_floodsListWnd)) {
+            std::wstring status = L"Showing " + std::to_wstring(m_allFloods.size()) + L" flood item(s).";
+            if (!result->statusText.empty())
+                status += L" " + result->statusText;
+            SetStatusText(status);
+        }
+        delete result;
+    }
+
     void ApplyEarthquakeVisibility()
     {
         m_map.SetEarthquakeOverlayVisible(m_showEarthquakes && m_showEarthquakeOverlayLabels);
@@ -7700,10 +8337,21 @@ private:
             CheckMenuItem(menu, IDM_VIEW_NOTIFICATION_HISTORY, MF_BYCOMMAND | (m_showNotificationHistory ? MF_CHECKED : MF_UNCHECKED));
     }
 
+    void UpdateViewMenu()
+    {
+        HMENU menu = GetMenu(m_hwnd);
+        if (!menu)
+            return;
+
+        CheckMenuItem(menu, IDM_VIEW_NOTIFICATION_HISTORY, MF_BYCOMMAND | (m_showNotificationHistory ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(menu, IDM_VIEW_AREA_LABELS, MF_BYCOMMAND | (m_showAreaLabels ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(menu, IDM_VIEW_ROAD_DEPICTIONS, MF_BYCOMMAND | (m_showRoadDepictions ? MF_CHECKED : MF_UNCHECKED));
+    }
+
     void ToggleNotificationHistory()
     {
         m_showNotificationHistory = !m_showNotificationHistory;
-        UpdateNotificationHistoryMenu();
+        UpdateViewMenu();
         m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
         RenderNotificationHistory();
         SaveSettings();
@@ -7766,6 +8414,108 @@ private:
         m_showWeatherSystemOverlayLabels = visible;
         UpdateWeatherSystemsMenu();
         ApplyWeatherSystemVisibility();
+        SaveSettings();
+    }
+
+    void ApplyWeatherWarningVisibility()
+    {
+        m_map.SetWeatherWarningOverlayVisible(m_showWeatherWarnings && m_showWeatherWarningOverlayLabels);
+        if (m_showWeatherWarnings)
+            m_map.SetWeatherWarnings(m_allWeatherWarnings);
+        else
+            m_map.SetWeatherWarnings({});
+    }
+
+    void ApplyFloodVisibility()
+    {
+        m_map.SetFloodOverlayVisible(m_showFloods && m_showFloodOverlayLabels);
+        if (m_showFloods)
+            m_map.SetFloods(m_allFloods);
+        else
+            m_map.SetFloods({});
+    }
+
+    void UpdateWeatherWarningMenu()
+    {
+        HMENU menu = GetMenu(m_hwnd);
+        if (!menu)
+            return;
+
+        CheckMenuItem(menu, IDM_SHOW_WEATHER_WARNINGS, MF_BYCOMMAND | (m_showWeatherWarnings ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(menu, IDM_WEATHER_WARNING_OVERLAY_NONE, MF_BYCOMMAND | (m_showWeatherWarningOverlayLabels ? MF_UNCHECKED : MF_CHECKED));
+        CheckMenuItem(menu, IDM_WEATHER_WARNING_OVERLAY_TYPE_AREA, MF_BYCOMMAND | (m_showWeatherWarningOverlayLabels ? MF_CHECKED : MF_UNCHECKED));
+        EnableMenuItem(menu, IDM_WEATHER_WARNING_OVERLAY_NONE, MF_BYCOMMAND | (m_showWeatherWarnings ? MF_ENABLED : MF_GRAYED));
+        EnableMenuItem(menu, IDM_WEATHER_WARNING_OVERLAY_TYPE_AREA, MF_BYCOMMAND | (m_showWeatherWarnings ? MF_ENABLED : MF_GRAYED));
+    }
+
+    void UpdateFloodMenu()
+    {
+        HMENU menu = GetMenu(m_hwnd);
+        if (!menu)
+            return;
+
+        CheckMenuItem(menu, IDM_SHOW_FLOODS, MF_BYCOMMAND | (m_showFloods ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(menu, IDM_FLOOD_OVERLAY_NONE, MF_BYCOMMAND | (m_showFloodOverlayLabels ? MF_UNCHECKED : MF_CHECKED));
+        CheckMenuItem(menu, IDM_FLOOD_OVERLAY_SEVERITY_AREA, MF_BYCOMMAND | (m_showFloodOverlayLabels ? MF_CHECKED : MF_UNCHECKED));
+        EnableMenuItem(menu, IDM_FLOOD_OVERLAY_NONE, MF_BYCOMMAND | (m_showFloods ? MF_ENABLED : MF_GRAYED));
+        EnableMenuItem(menu, IDM_FLOOD_OVERLAY_SEVERITY_AREA, MF_BYCOMMAND | (m_showFloods ? MF_ENABLED : MF_GRAYED));
+    }
+
+    void ToggleShowWeatherWarnings()
+    {
+        m_showWeatherWarnings = !m_showWeatherWarnings;
+        UpdateWeatherWarningMenu();
+        ApplyWeatherWarningVisibility();
+        SaveSettings();
+        if (m_showWeatherWarnings && m_allWeatherWarnings.empty())
+            FetchWeatherWarningsAsync(false);
+    }
+
+    void SetWeatherWarningOverlayLabels(bool visible)
+    {
+        if (m_showWeatherWarningOverlayLabels == visible)
+            return;
+
+        m_showWeatherWarningOverlayLabels = visible;
+        UpdateWeatherWarningMenu();
+        ApplyWeatherWarningVisibility();
+        SaveSettings();
+    }
+
+    void ToggleShowFloods()
+    {
+        m_showFloods = !m_showFloods;
+        UpdateFloodMenu();
+        ApplyFloodVisibility();
+        SaveSettings();
+        if (m_showFloods && m_allFloods.empty())
+            FetchFloodsAsync(false);
+    }
+
+    void SetFloodOverlayLabels(bool visible)
+    {
+        if (m_showFloodOverlayLabels == visible)
+            return;
+
+        m_showFloodOverlayLabels = visible;
+        UpdateFloodMenu();
+        ApplyFloodVisibility();
+        SaveSettings();
+    }
+
+    void ToggleAreaLabels()
+    {
+        m_showAreaLabels = !m_showAreaLabels;
+        UpdateViewMenu();
+        m_map.SetAreaLabelsVisible(m_showAreaLabels);
+        SaveSettings();
+    }
+
+    void ToggleRoadDepictions()
+    {
+        m_showRoadDepictions = !m_showRoadDepictions;
+        UpdateViewMenu();
+        m_map.SetRoadDepictionsVisible(m_showRoadDepictions);
         SaveSettings();
     }
 
@@ -8028,6 +8778,172 @@ private:
         PublishWeatherSystemNotificationBatch(newLines, L"Weather system notification", L"weather system notifications");
         PublishWeatherSystemNotificationBatch(updateLines, L"Weather system update", L"weather system updates");
         PublishWeatherSystemNotificationBatch(removedLines, L"Weather system removed", L"weather system removals");
+    }
+
+    std::wstring WeatherWarningStableKey(const WeatherWarningEvent& warning) const
+    {
+        if (!warning.id.empty())
+            return warning.id;
+        return warning.colour + L"|" + warning.type + L"|" + warning.validFrom + L"|" + warning.headline;
+    }
+
+    std::wstring WeatherWarningSignature(const WeatherWarningEvent& warning) const
+    {
+        return warning.colour + L"|" + warning.type + L"|" + warning.area + L"|" +
+            warning.validFrom + L"|" + warning.validTo + L"|" + warning.headline + L"|" + warning.issuedText;
+    }
+
+    std::wstring WeatherWarningNotificationLine(const WeatherWarningEvent& warning) const
+    {
+        std::wstring line = warning.colour.empty() ? L"Weather warning" : warning.colour + L" warning";
+        if (!warning.type.empty()) {
+            line += L" - ";
+            line += warning.type;
+        }
+        if (!warning.area.empty()) {
+            line += L" - ";
+            line += warning.area;
+        }
+        if (!warning.validFrom.empty() || !warning.validTo.empty()) {
+            line += L" (";
+            line += warning.validFrom;
+            if (!warning.validTo.empty()) {
+                line += L" to ";
+                line += warning.validTo;
+            }
+            line += L")";
+        }
+        return line;
+    }
+
+    std::wstring FloodStableKey(const FloodEvent& flood) const
+    {
+        if (!flood.id.empty())
+            return flood.id;
+        return flood.area + L"|" + flood.region + L"|" + flood.riverOrSea;
+    }
+
+    std::wstring FloodSignature(const FloodEvent& flood) const
+    {
+        return flood.severity + L"|" + flood.area + L"|" + flood.region + L"|" +
+            flood.riverOrSea + L"|" + flood.message + L"|" + flood.timeChanged + L"|" +
+            std::to_wstring(flood.severityLevel);
+    }
+
+    std::wstring FloodNotificationLine(const FloodEvent& flood) const
+    {
+        std::wstring line = flood.severity.empty() ? L"Flood alert" : flood.severity;
+        if (!flood.area.empty()) {
+            line += L" - ";
+            line += flood.area;
+        }
+        if (!flood.riverOrSea.empty()) {
+            line += L" - ";
+            line += flood.riverOrSea;
+        }
+        return line;
+    }
+
+    void PublishWeatherWarningNotificationBatch(
+        const std::vector<std::wstring>& lines,
+        const std::wstring& singleTitle,
+        const std::wstring& pluralSuffix)
+    {
+        PublishEarthquakeNotificationBatch(lines, singleTitle, pluralSuffix);
+    }
+
+    void PublishFloodNotificationBatch(
+        const std::vector<std::wstring>& lines,
+        const std::wstring& singleTitle,
+        const std::wstring& pluralSuffix)
+    {
+        PublishEarthquakeNotificationBatch(lines, singleTitle, pluralSuffix);
+    }
+
+    void NotifyForWeatherWarnings(const std::vector<WeatherWarningEvent>& warnings)
+    {
+        std::unordered_set<std::wstring> currentKeys;
+        std::vector<std::wstring> newLines;
+        std::vector<std::wstring> updateLines;
+        std::vector<std::wstring> removedLines;
+
+        for (const WeatherWarningEvent& warning : warnings) {
+            std::wstring key = WeatherWarningStableKey(warning);
+            currentKeys.insert(key);
+
+            std::wstring signature = WeatherWarningSignature(warning);
+            std::wstring line = WeatherWarningNotificationLine(warning);
+            auto existing = m_notifiedWeatherWarningStates.find(key);
+            if (existing == m_notifiedWeatherWarningStates.end()) {
+                newLines.push_back(line);
+                m_notifiedWeatherWarningStates[key] = WeatherWarningNotificationState{ signature, line };
+            }
+            else if (existing->second.signature != signature) {
+                updateLines.push_back(line);
+                existing->second.signature = std::move(signature);
+                existing->second.line = std::move(line);
+            }
+        }
+
+        if (m_haveWeatherWarningNotificationSnapshot) {
+            for (auto it = m_notifiedWeatherWarningStates.begin(); it != m_notifiedWeatherWarningStates.end();) {
+                if (currentKeys.find(it->first) == currentKeys.end()) {
+                    removedLines.push_back(it->second.line);
+                    it = m_notifiedWeatherWarningStates.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+
+        m_haveWeatherWarningNotificationSnapshot = true;
+        PublishWeatherWarningNotificationBatch(newLines, L"Weather warning", L"weather warnings");
+        PublishWeatherWarningNotificationBatch(updateLines, L"Weather warning update", L"weather warning updates");
+        PublishWeatherWarningNotificationBatch(removedLines, L"Weather warning removed", L"weather warning removals");
+    }
+
+    void NotifyForFloods(const std::vector<FloodEvent>& floods)
+    {
+        std::unordered_set<std::wstring> currentKeys;
+        std::vector<std::wstring> newLines;
+        std::vector<std::wstring> updateLines;
+        std::vector<std::wstring> removedLines;
+
+        for (const FloodEvent& flood : floods) {
+            std::wstring key = FloodStableKey(flood);
+            currentKeys.insert(key);
+
+            std::wstring signature = FloodSignature(flood);
+            std::wstring line = FloodNotificationLine(flood);
+            auto existing = m_notifiedFloodStates.find(key);
+            if (existing == m_notifiedFloodStates.end()) {
+                newLines.push_back(line);
+                m_notifiedFloodStates[key] = FloodNotificationState{ signature, line };
+            }
+            else if (existing->second.signature != signature) {
+                updateLines.push_back(line);
+                existing->second.signature = std::move(signature);
+                existing->second.line = std::move(line);
+            }
+        }
+
+        if (m_haveFloodNotificationSnapshot) {
+            for (auto it = m_notifiedFloodStates.begin(); it != m_notifiedFloodStates.end();) {
+                if (currentKeys.find(it->first) == currentKeys.end()) {
+                    removedLines.push_back(it->second.line);
+                    it = m_notifiedFloodStates.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+
+        m_haveFloodNotificationSnapshot = true;
+        PublishFloodNotificationBatch(newLines, L"Flood notification", L"flood notifications");
+        PublishFloodNotificationBatch(updateLines, L"Flood update", L"flood updates");
+        PublishFloodNotificationBatch(removedLines, L"Flood removed", L"flood removals");
     }
 
     static LRESULT CALLBACK EarthquakeListWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -8559,6 +9475,310 @@ private:
         }
     }
 
+    static LRESULT CALLBACK WeatherWarningsListWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleWeatherWarningsListMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleWeatherWarningsListMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateWeatherWarningsListControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnWeatherWarningsListCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowWeatherWarningsListWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = WeatherWarningsListWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kWeatherWarningsListClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_weatherWarningsListWnd || !IsWindow(m_weatherWarningsListWnd)) {
+            m_weatherWarningsListWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kWeatherWarningsListClassName,
+                L"Weather Warnings",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                900,
+                480,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        RenderWeatherWarningsListRows();
+        ShowWindow(m_weatherWarningsListWnd, SW_SHOW);
+        SetForegroundWindow(m_weatherWarningsListWnd);
+        if (m_allWeatherWarnings.empty())
+            FetchWeatherWarningsAsync(false);
+    }
+
+    void CreateWeatherWarningsListControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Weather Warnings", 18, 18, m_headerFont);
+        HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 626, 54, 102, 32, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_REFRESH_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 742, 54, 102, 32, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_CLOSE_BTN), m_hInst, nullptr);
+        m_weatherWarningsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 102, 826, 300, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_LISTVIEW), m_hInst, nullptr);
+
+        for (HWND h : { refreshBtn, closeBtn, m_weatherWarningsListView }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+        SendMessageW(m_weatherWarningsListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
+
+        struct ColumnDef { const wchar_t* text; int width; };
+        const ColumnDef columns[] = {
+            { L"Colour", 80 },
+            { L"Type", 120 },
+            { L"Area", 260 },
+            { L"From", 120 },
+            { L"To", 120 },
+            { L"Headline", 260 }
+        };
+        for (int i = 0; i < static_cast<int>(_countof(columns)); ++i) {
+            LVCOLUMNW col{};
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            col.pszText = const_cast<LPWSTR>(columns[i].text);
+            col.cx = columns[i].width;
+            col.iSubItem = i;
+            SendMessageW(m_weatherWarningsListView, LVM_INSERTCOLUMNW, i, reinterpret_cast<LPARAM>(&col));
+        }
+        RenderWeatherWarningsListRows();
+        AutoFitWindowToChildren(parent);
+    }
+
+    void RenderWeatherWarningsListRows()
+    {
+        if (!m_weatherWarningsListView)
+            return;
+
+        SendMessageW(m_weatherWarningsListView, LVM_DELETEALLITEMS, 0, 0);
+        int row = 0;
+        for (const WeatherWarningEvent& warning : m_allWeatherWarnings) {
+            LVITEMW item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = row;
+            item.iSubItem = 0;
+            item.pszText = const_cast<LPWSTR>(warning.colour.c_str());
+            int inserted = static_cast<int>(SendMessageW(m_weatherWarningsListView, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+            if (inserted < 0)
+                continue;
+
+            const std::wstring values[] = {
+                warning.type,
+                warning.area,
+                warning.validFrom,
+                warning.validTo,
+                warning.headline
+            };
+            for (int i = 0; i < static_cast<int>(_countof(values)); ++i) {
+                LVITEMW sub{};
+                sub.iSubItem = i + 1;
+                sub.pszText = const_cast<LPWSTR>(values[i].c_str());
+                SendMessageW(m_weatherWarningsListView, LVM_SETITEMTEXTW, inserted, reinterpret_cast<LPARAM>(&sub));
+            }
+            ++row;
+        }
+    }
+
+    void OnWeatherWarningsListCommand(int id, int code)
+    {
+        if (id == IDC_WEATHER_WARNINGS_LIST_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_weatherWarningsListWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_WEATHER_WARNINGS_LIST_REFRESH_BTN && code == BN_CLICKED) {
+            FetchWeatherWarningsAsync(false);
+            return;
+        }
+    }
+
+    static LRESULT CALLBACK FloodsListWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleFloodsListMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleFloodsListMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateFloodsListControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnFloodsListCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowFloodsListWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = FloodsListWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kFloodsListClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_floodsListWnd || !IsWindow(m_floodsListWnd)) {
+            m_floodsListWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kFloodsListClassName,
+                L"Floods",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                900,
+                480,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        RenderFloodsListRows();
+        ShowWindow(m_floodsListWnd, SW_SHOW);
+        SetForegroundWindow(m_floodsListWnd);
+        if (m_allFloods.empty())
+            FetchFloodsAsync(false);
+    }
+
+    void CreateFloodsListControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Floods", 18, 18, m_headerFont);
+        HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 626, 54, 102, 32, parent, ControlId(IDC_FLOODS_LIST_REFRESH_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 742, 54, 102, 32, parent, ControlId(IDC_FLOODS_LIST_CLOSE_BTN), m_hInst, nullptr);
+        m_floodsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 102, 826, 300, parent, ControlId(IDC_FLOODS_LIST_LISTVIEW), m_hInst, nullptr);
+
+        for (HWND h : { refreshBtn, closeBtn, m_floodsListView }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+        SendMessageW(m_floodsListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
+
+        struct ColumnDef { const wchar_t* text; int width; };
+        const ColumnDef columns[] = {
+            { L"Severity", 150 },
+            { L"Area", 280 },
+            { L"Region", 130 },
+            { L"River/Sea", 170 },
+            { L"Updated", 140 },
+            { L"Message", 260 }
+        };
+        for (int i = 0; i < static_cast<int>(_countof(columns)); ++i) {
+            LVCOLUMNW col{};
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            col.pszText = const_cast<LPWSTR>(columns[i].text);
+            col.cx = columns[i].width;
+            col.iSubItem = i;
+            SendMessageW(m_floodsListView, LVM_INSERTCOLUMNW, i, reinterpret_cast<LPARAM>(&col));
+        }
+        RenderFloodsListRows();
+        AutoFitWindowToChildren(parent);
+    }
+
+    void RenderFloodsListRows()
+    {
+        if (!m_floodsListView)
+            return;
+
+        SendMessageW(m_floodsListView, LVM_DELETEALLITEMS, 0, 0);
+        int row = 0;
+        for (const FloodEvent& flood : m_allFloods) {
+            LVITEMW item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = row;
+            item.iSubItem = 0;
+            item.pszText = const_cast<LPWSTR>(flood.severity.c_str());
+            int inserted = static_cast<int>(SendMessageW(m_floodsListView, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+            if (inserted < 0)
+                continue;
+
+            const std::wstring values[] = {
+                flood.area,
+                flood.region,
+                flood.riverOrSea,
+                flood.timeChanged.empty() ? flood.timeRaised : flood.timeChanged,
+                flood.message
+            };
+            for (int i = 0; i < static_cast<int>(_countof(values)); ++i) {
+                LVITEMW sub{};
+                sub.iSubItem = i + 1;
+                sub.pszText = const_cast<LPWSTR>(values[i].c_str());
+                SendMessageW(m_floodsListView, LVM_SETITEMTEXTW, inserted, reinterpret_cast<LPARAM>(&sub));
+            }
+            ++row;
+        }
+    }
+
+    void OnFloodsListCommand(int id, int code)
+    {
+        if (id == IDC_FLOODS_LIST_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_floodsListWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_FLOODS_LIST_REFRESH_BTN && code == BN_CLICKED) {
+            FetchFloodsAsync(false);
+            return;
+        }
+    }
+
     static LRESULT CALLBACK WeatherSystemNotificationsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -9076,6 +10296,10 @@ private:
     HWND m_weatherSystemNotificationsWnd = nullptr;
     HWND m_weatherSystemsListView = nullptr;
     HWND m_weatherSystemNotificationWindEdit = nullptr;
+    HWND m_weatherWarningsListWnd = nullptr;
+    HWND m_weatherWarningsListView = nullptr;
+    HWND m_floodsListWnd = nullptr;
+    HWND m_floodsListView = nullptr;
     HWND m_templateWizardDesc = nullptr;
     HWND m_templateWizardList = nullptr;
     HWND m_templateWizardVariablesEdit = nullptr;
@@ -9119,6 +10343,8 @@ private:
     std::vector<EarthquakeEvent> m_filteredEarthquakes;
     std::vector<WeatherSystemEvent> m_allWeatherSystems;
     std::vector<WeatherSystemEvent> m_filteredWeatherSystems;
+    std::vector<WeatherWarningEvent> m_allWeatherWarnings;
+    std::vector<FloodEvent> m_allFloods;
     std::vector<GeoPoint> m_earthquakeFilterRegion;
     std::vector<std::wstring> m_incidentsListKeys;
     std::wstring m_selectedId;
@@ -9155,6 +10381,12 @@ private:
     bool m_showEarthquakeOverlayLabels = false;
     bool m_showWeatherSystems = false;
     bool m_showWeatherSystemOverlayLabels = false;
+    bool m_showWeatherWarnings = false;
+    bool m_showWeatherWarningOverlayLabels = false;
+    bool m_showFloods = false;
+    bool m_showFloodOverlayLabels = false;
+    bool m_showAreaLabels = true;
+    bool m_showRoadDepictions = false;
     bool m_displayWorldMap = false;
     bool m_syncSettingsFromServer = false;
     std::wstring m_earthquakeListMagnitudeText;
@@ -9172,18 +10404,24 @@ private:
     UINT m_refreshIntervalMs = 5 * 60 * 1000;
     std::atomic_bool m_serverRequestInProgress{ false };
     std::atomic_bool m_earthquakeFetchInProgress{ false };
+    std::atomic_bool m_weatherWarningsFetchInProgress{ false };
+    std::atomic_bool m_floodsFetchInProgress{ false };
     bool m_notificationIconAdded = false;
     bool m_logoutRequested = false;
     bool m_logoutSent = false;
     bool m_haveIncidentNotificationSnapshot = false;
     bool m_haveEarthquakeNotificationSnapshot = false;
     bool m_haveWeatherSystemNotificationSnapshot = false;
+    bool m_haveWeatherWarningNotificationSnapshot = false;
+    bool m_haveFloodNotificationSnapshot = false;
     bool m_reportTemplatesConfigured = false;
     bool m_earthquakeReportTemplatesConfigured = false;
     bool m_weatherSystemReportTemplatesConfigured = false;
     std::unordered_map<std::wstring, IncidentNotificationState> m_notifiedIncidentStates;
     std::unordered_map<std::wstring, EarthquakeNotificationState> m_notifiedEarthquakeStates;
     std::unordered_map<std::wstring, WeatherSystemNotificationState> m_notifiedWeatherSystemStates;
+    std::unordered_map<std::wstring, WeatherWarningNotificationState> m_notifiedWeatherWarningStates;
+    std::unordered_map<std::wstring, FloodNotificationState> m_notifiedFloodStates;
     PolygonCaptureTarget m_polygonCaptureTarget = PolygonCaptureTarget::None;
     size_t m_activeIncidentRegionIndex = static_cast<size_t>(-1);
     std::unordered_set<std::wstring> m_deletedNoteIds;
