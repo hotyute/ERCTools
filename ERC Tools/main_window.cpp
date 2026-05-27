@@ -1524,16 +1524,16 @@ static bool TryApproximateUkAreaCentroid(const std::wstring& areaText, double& l
         { L"scotland", 56.4907, -4.2026 },
         { L"northern ireland", 54.6079, -6.7080 },
         { L"wales", 52.1307, -3.7837 },
-        { L"north east", 54.9783, -1.6178 },
-        { L"north west", 53.4808, -2.2426 },
+        { L"north east england", 54.9783, -1.6178 },
+        { L"north west england", 53.4808, -2.2426 },
         { L"yorkshire", 53.8008, -1.5491 },
         { L"humber", 53.7444, -0.3326 },
         { L"east midlands", 52.9548, -1.1581 },
         { L"west midlands", 52.4862, -1.8904 },
         { L"east of england", 52.2405, 0.7110 },
         { L"london", 51.5074, -0.1278 },
-        { L"south east", 51.2787, -0.5217 },
-        { L"south west", 51.4545, -2.5879 },
+        { L"south east england", 51.2787, -0.5217 },
+        { L"south west england", 51.4545, -2.5879 },
         { L"cornwall", 50.2660, -5.0527 },
         { L"devon", 50.7156, -3.5309 },
         { L"somerset", 51.1051, -2.9262 },
@@ -1610,9 +1610,273 @@ static std::wstring JoinLimitedText(const std::vector<std::wstring>& values, siz
     return text;
 }
 
+struct MetOfficeWarningGeometry
+{
+    std::wstring id;
+    std::wstring colour;
+    std::wstring type;
+    std::vector<GeoPoint> polygon;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    bool hasLocation = false;
+};
+
+static size_t FindJsonObjectEnd(const std::string& text, size_t openBrace)
+{
+    bool inString = false;
+    bool escaped = false;
+    int depth = 0;
+    for (size_t i = openBrace; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            }
+            else if (ch == '\\') {
+                escaped = true;
+            }
+            else if (ch == '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (ch == '"') {
+            inString = true;
+        }
+        else if (ch == '{') {
+            ++depth;
+        }
+        else if (ch == '}') {
+            --depth;
+            if (depth == 0)
+                return i;
+        }
+    }
+    return std::string::npos;
+}
+
+static bool TryExtractCoordinatePair(const json& point, double& latOut, double& lonOut)
+{
+    if (!point.is_array() || point.size() < 2)
+        return false;
+
+    double lon = 0.0;
+    double lat = 0.0;
+    if (!TryGetDoubleFromJsonValue(point[0], lon) || !TryGetDoubleFromJsonValue(point[1], lat))
+        return false;
+    if (!IsValidMapCoordinate(lat, lon))
+        return false;
+
+    latOut = lat;
+    lonOut = lon;
+    return true;
+}
+
+static bool TryExtractPolygonRing(const json& coords, const std::wstring& type, std::vector<GeoPoint>& ringOut)
+{
+    const json* ring = nullptr;
+    if (type == L"Polygon") {
+        if (coords.is_array() && !coords.empty() && coords[0].is_array())
+            ring = &coords[0];
+    }
+    else if (type == L"MultiPolygon") {
+        if (coords.is_array() && !coords.empty() && coords[0].is_array() && !coords[0].empty() && coords[0][0].is_array())
+            ring = &coords[0][0];
+    }
+
+    if (!ring)
+        return false;
+
+    std::vector<GeoPoint> points;
+    for (const json& item : *ring) {
+        double lat = 0.0;
+        double lon = 0.0;
+        if (TryExtractCoordinatePair(item, lat, lon))
+            points.push_back({ lat, lon });
+    }
+
+    if (points.size() < 3)
+        return false;
+
+    ringOut = std::move(points);
+    return true;
+}
+
+static bool TryPolygonCentroid(const std::vector<GeoPoint>& ring, double& latOut, double& lonOut)
+{
+    if (ring.size() < 3)
+        return false;
+
+    double signedArea = 0.0;
+    double cx = 0.0;
+    double cy = 0.0;
+    for (size_t i = 0; i < ring.size(); ++i) {
+        const GeoPoint& a = ring[i];
+        const GeoPoint& b = ring[(i + 1) % ring.size()];
+        const double cross = a.lon * b.lat - b.lon * a.lat;
+        signedArea += cross;
+        cx += (a.lon + b.lon) * cross;
+        cy += (a.lat + b.lat) * cross;
+    }
+
+    if (std::abs(signedArea) > 1e-9) {
+        signedArea *= 0.5;
+        lonOut = cx / (6.0 * signedArea);
+        latOut = cy / (6.0 * signedArea);
+        return IsValidMapCoordinate(latOut, lonOut);
+    }
+
+    double latSum = 0.0;
+    double lonSum = 0.0;
+    for (const GeoPoint& point : ring) {
+        latSum += point.lat;
+        lonSum += point.lon;
+    }
+    latOut = latSum / static_cast<double>(ring.size());
+    lonOut = lonSum / static_cast<double>(ring.size());
+    return IsValidMapCoordinate(latOut, lonOut);
+}
+
+static std::vector<MetOfficeWarningGeometry> ExtractMetOfficeWarningGeometries(const std::string& body)
+{
+    std::vector<MetOfficeWarningGeometry> geometries;
+    const std::string marker = "polygonsGeoJson:";
+    size_t markerPos = body.find(marker);
+    if (markerPos == std::string::npos)
+        return geometries;
+
+    size_t openBrace = body.find('{', markerPos + marker.size());
+    if (openBrace == std::string::npos)
+        return geometries;
+
+    size_t closeBrace = FindJsonObjectEnd(body, openBrace);
+    if (closeBrace == std::string::npos || closeBrace <= openBrace)
+        return geometries;
+
+    try {
+        json root = json::parse(body.substr(openBrace, closeBrace - openBrace + 1));
+        auto featuresIt = root.find("features");
+        if (featuresIt == root.end() || !featuresIt->is_array())
+            return geometries;
+
+        std::unordered_map<std::wstring, size_t> byId;
+        for (const json& feature : *featuresIt) {
+            if (!feature.is_object())
+                continue;
+
+            const json* props = nullptr;
+            auto propsIt = feature.find("properties");
+            if (propsIt != feature.end() && propsIt->is_object())
+                props = &(*propsIt);
+            if (!props)
+                continue;
+
+            std::wstring id = PickString(*props, { "id" });
+            if (id.empty())
+                continue;
+
+            size_t index = 0;
+            auto existing = byId.find(id);
+            if (existing == byId.end()) {
+                index = geometries.size();
+                byId[id] = index;
+                MetOfficeWarningGeometry geometry;
+                geometry.id = id;
+                geometry.colour = PickString(*props, { "warningLevel" });
+                geometry.type = PickString(*props, { "weather" });
+                geometries.push_back(std::move(geometry));
+            }
+            else {
+                index = existing->second;
+            }
+
+            const json* geom = nullptr;
+            auto geomIt = feature.find("geometry");
+            if (geomIt != feature.end() && geomIt->is_object())
+                geom = &(*geomIt);
+            if (!geom)
+                continue;
+
+            std::wstring geomType = PickString(*geom, { "type" });
+            auto coordsIt = geom->find("coordinates");
+            if (coordsIt == geom->end())
+                continue;
+
+            MetOfficeWarningGeometry& geometry = geometries[index];
+            if (geomType == L"Point") {
+                double lat = 0.0;
+                double lon = 0.0;
+                if (TryExtractCoordinatePair(*coordsIt, lat, lon)) {
+                    geometry.latitude = lat;
+                    geometry.longitude = lon;
+                    geometry.hasLocation = true;
+                }
+            }
+            else if (geometry.polygon.empty()) {
+                TryExtractPolygonRing(*coordsIt, geomType, geometry.polygon);
+            }
+        }
+
+        for (MetOfficeWarningGeometry& geometry : geometries) {
+            if (!geometry.hasLocation && TryPolygonCentroid(geometry.polygon, geometry.latitude, geometry.longitude))
+                geometry.hasLocation = true;
+        }
+    }
+    catch (...) {
+        geometries.clear();
+    }
+
+    return geometries;
+}
+
+static bool WeatherWarningGeometryMatches(const MetOfficeWarningGeometry& geometry, const WeatherWarningEvent& event)
+{
+    const std::wstring geometryColour = ToLower(Trim(geometry.colour));
+    const std::wstring eventColour = ToLower(Trim(event.colour));
+    const std::wstring geometryType = ToLower(Trim(geometry.type));
+    const std::wstring eventType = ToLower(Trim(event.type));
+    return (geometryColour.empty() || eventColour.empty() || geometryColour == eventColour) &&
+        (geometryType.empty() || eventType.empty() || geometryType == eventType);
+}
+
+static bool AssignMetOfficeWarningGeometry(
+    WeatherWarningEvent& event,
+    const std::vector<MetOfficeWarningGeometry>& geometries,
+    std::vector<bool>& usedGeometries)
+{
+    auto assignAt = [&](size_t index) {
+        const MetOfficeWarningGeometry& geometry = geometries[index];
+        usedGeometries[index] = true;
+        if (!geometry.id.empty())
+            event.id = geometry.id;
+        event.polygon = geometry.polygon;
+        if (geometry.hasLocation) {
+            event.latitude = geometry.latitude;
+            event.longitude = geometry.longitude;
+            event.hasLocation = true;
+        }
+        return true;
+        };
+
+    for (size_t i = 0; i < geometries.size(); ++i) {
+        if (!usedGeometries[i] && WeatherWarningGeometryMatches(geometries[i], event))
+            return assignAt(i);
+    }
+
+    for (size_t i = 0; i < geometries.size(); ++i) {
+        if (!usedGeometries[i])
+            return assignAt(i);
+    }
+
+    return false;
+}
+
 static std::vector<WeatherWarningEvent> ParseWeatherWarningEvents(const std::string& body, std::wstring& statusTextOut)
 {
     std::vector<WeatherWarningEvent> warnings;
+    std::vector<MetOfficeWarningGeometry> geometries = ExtractMetOfficeWarningGeometries(body);
+    std::vector<bool> usedGeometries(geometries.size(), false);
     std::vector<std::wstring> lines = HtmlToReadableLines(Utf8ToWide(body));
     statusTextOut.clear();
 
@@ -1739,9 +2003,13 @@ static std::vector<WeatherWarningEvent> ParseWeatherWarningEvents(const std::str
         if (!event.area.empty())
             event.detail += L" Affected: " + event.area;
 
-        const std::wstring mapText = event.area.empty() ? event.headline : event.area;
-        event.hasLocation = TryApproximateUkAreaCentroid(mapText, event.latitude, event.longitude);
-        event.id = event.colour + L"|" + event.type + L"|" + event.validFrom + L"|" + event.validTo + L"|" + event.headline;
+        AssignMetOfficeWarningGeometry(event, geometries, usedGeometries);
+        if (!event.hasLocation) {
+            const std::wstring mapText = event.area.empty() ? event.headline : event.area;
+            event.hasLocation = TryApproximateUkAreaCentroid(mapText, event.latitude, event.longitude);
+        }
+        if (event.id.empty())
+            event.id = event.colour + L"|" + event.type + L"|" + event.validFrom + L"|" + event.validTo + L"|" + event.headline;
         warnings.push_back(std::move(event));
     }
 

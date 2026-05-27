@@ -89,6 +89,7 @@ struct WeatherWarningEvent
     std::wstring validTo;
     std::wstring issuedText;
     std::wstring detail;
+    std::vector<GeoPoint> polygon;
     double latitude = 0.0;
     double longitude = 0.0;
     bool hasLocation = false;

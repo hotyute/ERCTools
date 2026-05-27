@@ -2075,6 +2075,7 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.10f, 0.16f, 0.86f), &m_earthquakeBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.02f, 0.48f, 0.64f, 0.92f), &m_weatherSystemBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.98f, 0.80f, 0.10f, 0.96f), &m_weatherWarningBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.98f, 0.80f, 0.10f, 0.18f), &m_weatherWarningFillBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.05f, 0.42f, 0.84f, 0.94f), &m_floodBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.97f, 0.84f, 0.88f), &m_roadBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.11f, 0.19f, 0.24f, 0.70f), &m_roadCasingBrush);
@@ -2119,6 +2120,7 @@ private:
         m_earthquakeBrush.Reset();
         m_weatherSystemBrush.Reset();
         m_weatherWarningBrush.Reset();
+        m_weatherWarningFillBrush.Reset();
         m_floodBrush.Reset();
         m_roadBrush.Reset();
         m_roadCasingBrush.Reset();
@@ -2624,6 +2626,16 @@ private:
         for (const WeatherWarningEvent& warning : m_weatherWarnings) {
             if (!warning.hasLocation || !IsGeoPointInView(view, warning.latitude, warning.longitude))
                 continue;
+
+            if (warning.polygon.size() >= 3) {
+                DrawPolygonPath(
+                    view,
+                    warning.polygon,
+                    true,
+                    m_weatherWarningFillBrush.Get(),
+                    WeatherWarningBrush(warning),
+                    warning.id == m_hoveredWeatherWarningId ? 2.4f : 1.3f);
+            }
 
             D2D1_POINT_2F p = GeoToScreen(view, warning.latitude, warning.longitude);
             const float radius = 13.0f;
@@ -5112,6 +5124,7 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_earthquakeBrush;
     ComPtr<ID2D1SolidColorBrush> m_weatherSystemBrush;
     ComPtr<ID2D1SolidColorBrush> m_weatherWarningBrush;
+    ComPtr<ID2D1SolidColorBrush> m_weatherWarningFillBrush;
     ComPtr<ID2D1SolidColorBrush> m_floodBrush;
     ComPtr<ID2D1SolidColorBrush> m_roadBrush;
     ComPtr<ID2D1SolidColorBrush> m_roadCasingBrush;
