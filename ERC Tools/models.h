@@ -65,7 +65,6 @@ struct WeatherForecastPoint
     std::wstring windText;
     int leadHours = 0;
     double windKnots = 0.0;
-    double errorRadiusNm = 0.0;
     double latitude = 0.0;
     double longitude = 0.0;
     bool hasLocation = false;

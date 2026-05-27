@@ -7,9 +7,11 @@
 #include "app_state.h"
 #include "binary_protocol.h"
 #include "client_update.h"
+#include "earthquake_data.h"
 #include "http.h"
 #include "map_view.h"
 #include "parsing.h"
+#include "time_filters.h"
 #include "util.h"
 #include "weather_data.h"
 
@@ -78,6 +80,7 @@ constexpr int IDM_INCIDENT_OVERLAY_NONE = 2038;
 constexpr int IDM_INCIDENT_OVERLAY_SUMMARY = 2039;
 constexpr int IDM_INCIDENT_OVERLAY_NOTIFIED_ONLY = 2040;
 constexpr int IDM_WEATHER_WARNING_POLYGONS = 2041;
+constexpr int IDM_WEATHER_SYSTEM_FORECASTS = 2042;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -1128,160 +1131,6 @@ static std::wstring ExtractLabeledNotificationField(const std::wstring& descript
     return L"";
 }
 
-static std::wstring CompactDurationText(std::wstring value)
-{
-    for (wchar_t& ch : value) {
-        if (ch == L'-' || ch == L',' || ch == L';')
-            ch = L' ';
-    }
-
-    std::wstring compact;
-    compact.reserve(value.size());
-    bool lastSpace = false;
-    for (wchar_t ch : value) {
-        if (iswspace(ch)) {
-            if (!lastSpace)
-                compact.push_back(L' ');
-            lastSpace = true;
-        }
-        else {
-            compact.push_back(ch);
-            lastSpace = false;
-        }
-    }
-    return Trim(compact);
-}
-
-static bool TryParseDurationNumberToken(std::wstring token, double& valueOut)
-{
-    token = ToLower(Trim(token));
-    if (token.empty())
-        return false;
-
-    wchar_t* end = nullptr;
-    double parsed = std::wcstod(token.c_str(), &end);
-    if (end != token.c_str() && Trim(end ? end : L"").empty() && std::isfinite(parsed) && parsed >= 0.0) {
-        valueOut = parsed;
-        return true;
-    }
-
-    if (token == L"a" || token == L"an")
-        token = L"one";
-
-    static const std::unordered_map<std::wstring, double> words = {
-        { L"zero", 0.0 }, { L"one", 1.0 }, { L"two", 2.0 }, { L"three", 3.0 },
-        { L"four", 4.0 }, { L"five", 5.0 }, { L"six", 6.0 }, { L"seven", 7.0 },
-        { L"eight", 8.0 }, { L"nine", 9.0 }, { L"ten", 10.0 }, { L"eleven", 11.0 },
-        { L"twelve", 12.0 }
-    };
-    auto it = words.find(token);
-    if (it == words.end())
-        return false;
-    valueOut = it->second;
-    return true;
-}
-
-static bool DurationUnitIsHour(const std::wstring& unit)
-{
-    return unit == L"h" || unit == L"hr" || unit == L"hrs" || unit == L"hour" || unit == L"hours";
-}
-
-static bool DurationUnitIsMinute(const std::wstring& unit)
-{
-    return unit == L"m" || unit == L"min" || unit == L"mins" || unit == L"minute" || unit == L"minutes";
-}
-
-static bool TryParseDurationMinutes(const std::wstring& text, double& minutesOut)
-{
-    std::wstring value = CompactDurationText(ToLower(Trim(text)));
-    if (value.empty())
-        return false;
-
-    double total = 0.0;
-    bool matched = false;
-    std::wsmatch m;
-
-    std::wregex hourHalfRe(
-        LR"(\b(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:and\s+)?(?:a\s+)?half\s+hours?\b)",
-        std::regex_constants::icase);
-    if (std::regex_search(value, m, hourHalfRe) && m.size() > 1) {
-        double amount = 0.0;
-        if (TryParseDurationNumberToken(m[1].str(), amount)) {
-            total += (amount + 0.5) * 60.0;
-            matched = true;
-            value = std::regex_replace(value, hourHalfRe, L" ");
-        }
-    }
-
-    std::wregex numericHourAndHalfRe(
-        LR"(\b(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+hours?\s+(?:and\s+)?(?:a\s+)?half\b)",
-        std::regex_constants::icase);
-    if (std::regex_search(value, m, numericHourAndHalfRe) && m.size() > 1) {
-        double amount = 0.0;
-        if (TryParseDurationNumberToken(m[1].str(), amount)) {
-            total += (amount + 0.5) * 60.0;
-            matched = true;
-            value = std::regex_replace(value, numericHourAndHalfRe, L" ");
-        }
-    }
-
-    std::wregex hourAndHalfRe(
-        LR"(\bhours?\s+(?:and\s+)?(?:a\s+)?half\b)",
-        std::regex_constants::icase);
-    if (std::regex_search(value, hourAndHalfRe)) {
-        total += 90.0;
-        matched = true;
-        value = std::regex_replace(value, hourAndHalfRe, L" ");
-    }
-
-    std::wregex halfHourRe(LR"(\bhalf\s+(?:an?\s+)?hours?\b|\bhalf\s+hour\b)", std::regex_constants::icase);
-    if (std::regex_search(value, halfHourRe)) {
-        total += 30.0;
-        matched = true;
-        value = std::regex_replace(value, halfHourRe, L" ");
-    }
-
-    std::wregex segmentRe(
-        LR"(\b(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(hours?|hrs?|hr|h|minutes?|mins?|min|m)\b)",
-        std::regex_constants::icase);
-    for (std::wsregex_iterator it(value.begin(), value.end(), segmentRe), endIt; it != endIt; ++it) {
-        if (it->size() < 3)
-            continue;
-        double amount = 0.0;
-        if (!TryParseDurationNumberToken((*it)[1].str(), amount))
-            continue;
-        std::wstring unit = ToLower((*it)[2].str());
-        if (DurationUnitIsHour(unit))
-            total += amount * 60.0;
-        else if (DurationUnitIsMinute(unit))
-            total += amount;
-        else
-            continue;
-        matched = true;
-    }
-
-    if (!matched || !std::isfinite(total) || total < 0.0)
-        return false;
-
-    minutesOut = total;
-    return true;
-}
-
-static int PeriodHoursFromText(const std::wstring& text, int fallbackHours = 24)
-{
-    double minutes = 0.0;
-    if (TryParseDurationMinutes(text, minutes) && minutes > 0.0)
-        return MaxInt(1, static_cast<int>(std::round(minutes / 60.0)));
-    return fallbackHours;
-}
-
-static long long PeriodStartTimeMs(const std::wstring& text)
-{
-    int hours = PeriodHoursFromText(text, 24);
-    std::time_t now = std::time(nullptr);
-    return (static_cast<long long>(now) - static_cast<long long>(hours) * 60LL * 60LL) * 1000LL;
-}
-
 static std::wstring FormatKnotsAsMph(double knots)
 {
     const int mph = static_cast<int>(std::round(knots * 1.150779448));
@@ -1291,21 +1140,6 @@ static std::wstring FormatKnotsAsMph(double knots)
 static double KnotsToMph(double knots)
 {
     return knots * 1.150779448;
-}
-
-static bool TryParseDoubleText(const std::wstring& text, double& valueOut)
-{
-    std::wstring value = Trim(text);
-    if (value.empty())
-        return false;
-
-    wchar_t* end = nullptr;
-    double parsed = std::wcstod(value.c_str(), &end);
-    if (end == value.c_str() || !std::isfinite(parsed) || !Trim(end ? end : L"").empty())
-        return false;
-
-    valueOut = parsed;
-    return true;
 }
 
 static bool TryExtractAlertDelayMinutes(const TrafficAlert& alert, double& minutesOut)
@@ -1343,102 +1177,6 @@ static bool PointInPolygon(double lat, double lon, const std::vector<GeoPoint>& 
     }
     return inside;
 }
-
-static bool TryParseDateTimeFilter(const std::wstring& text, long long& timeMsOut)
-{
-    std::wstring value = Trim(text);
-    if (value.empty()) {
-        timeMsOut = 0;
-        return true;
-    }
-
-    std::tm tm{};
-    int y = 0, mon = 0, d = 0, h = 0, min = 0;
-    int count = swscanf_s(value.c_str(), L"%d-%d-%d %d:%d", &y, &mon, &d, &h, &min);
-    if (count < 3)
-        count = swscanf_s(value.c_str(), L"%d/%d/%d %d:%d", &y, &mon, &d, &h, &min);
-    if (count < 3)
-        return false;
-
-    tm.tm_year = y - 1900;
-    tm.tm_mon = mon - 1;
-    tm.tm_mday = d;
-    tm.tm_hour = count >= 4 ? h : 0;
-    tm.tm_min = count >= 5 ? min : 0;
-    tm.tm_sec = 0;
-    tm.tm_isdst = -1;
-
-    std::time_t t = std::mktime(&tm);
-    if (t == static_cast<std::time_t>(-1))
-        return false;
-
-    timeMsOut = static_cast<long long>(t) * 1000LL;
-    return true;
-}
-
-static std::wstring EarthquakeTimeText(long long timeMs)
-{
-    if (timeMs <= 0)
-        return L"";
-
-    std::time_t t = static_cast<std::time_t>(timeMs / 1000LL);
-    std::tm tm{};
-    localtime_s(&tm, &t);
-    wchar_t buf[64]{};
-    wcsftime(buf, _countof(buf), L"%Y-%m-%d %H:%M", &tm);
-    return buf;
-}
-
-static std::vector<EarthquakeEvent> ParseEarthquakeEvents(const std::string& body)
-{
-    std::vector<EarthquakeEvent> out;
-    json root = json::parse(body);
-    if (!root.is_object())
-        return out;
-
-    auto featuresIt = root.find("features");
-    if (featuresIt == root.end() || !featuresIt->is_array())
-        return out;
-
-    for (const json& feature : *featuresIt) {
-        if (!feature.is_object())
-            continue;
-
-        const json* propsPtr = nullptr;
-        const json* geomPtr = nullptr;
-        auto propsIt = feature.find("properties");
-        if (propsIt != feature.end() && propsIt->is_object())
-            propsPtr = &(*propsIt);
-        auto geomIt = feature.find("geometry");
-        if (geomIt != feature.end() && geomIt->is_object())
-            geomPtr = &(*geomIt);
-        const json& props = propsPtr ? *propsPtr : feature;
-        const json& geom = geomPtr ? *geomPtr : feature;
-        EarthquakeEvent event;
-        event.id = PickString(feature, { "id" });
-        event.place = PickString(props, { "place", "title" });
-        PickDouble(props, { "mag", "magnitude" }, event.magnitude);
-        event.timeMs = props.value("time", 0LL);
-        event.timeText = EarthquakeTimeText(event.timeMs);
-
-        auto coordsIt = geom.find("coordinates");
-        if (coordsIt != geom.end() && coordsIt->is_array() && coordsIt->size() >= 2) {
-            TryGetDoubleFromJsonValue((*coordsIt)[0], event.longitude);
-            TryGetDoubleFromJsonValue((*coordsIt)[1], event.latitude);
-            if (coordsIt->size() >= 3)
-                TryGetDoubleFromJsonValue((*coordsIt)[2], event.depthKm);
-            event.hasLocation = std::isfinite(event.latitude) && std::isfinite(event.longitude);
-        }
-
-        if (event.id.empty())
-            event.id = event.place + L"|" + std::to_wstring(event.timeMs);
-        out.push_back(std::move(event));
-    }
-
-    return out;
-}
-
-
 
 static GeoPolygon GeoPolygonFromJson(const json& value)
 {
@@ -2391,6 +2129,10 @@ private:
             SetWeatherSystemOverlayLabels(true);
             break;
 
+        case IDM_WEATHER_SYSTEM_FORECASTS:
+            ToggleWeatherSystemForecasts();
+            break;
+
         case IDM_SHOW_WEATHER_WARNINGS:
             ToggleShowWeatherWarnings();
             break;
@@ -2786,6 +2528,7 @@ private:
             readBool("incidentOverlayNotifiedOnly", m_incidentOverlayNotifiedOnly);
             readBool("showWeatherSystems", m_showWeatherSystems);
             readBool("showWeatherSystemOverlayLabels", m_showWeatherSystemOverlayLabels);
+            readBool("showWeatherSystemForecasts", m_showWeatherSystemForecasts);
             readBool("showWeatherWarnings", m_showWeatherWarnings);
             readBool("showWeatherWarningOverlayLabels", m_showWeatherWarningOverlayLabels);
             readBool("showWeatherWarningPolygons", m_showWeatherWarningPolygons);
@@ -2794,10 +2537,19 @@ private:
             readBool("showAreaLabels", m_showAreaLabels);
             readBool("showRoadDepictions", m_showRoadDepictions);
             readString("earthquakeListMagnitudeText", m_earthquakeListMagnitudeText);
+            readString("earthquakeListTimeText", m_earthquakeListTimeText);
             readString("earthquakeListPeriodText", m_earthquakeListPeriodText);
             readString("weatherSystemsListPeriodText", m_weatherSystemsListPeriodText);
             readString("weatherWarningsListPeriodText", m_weatherWarningsListPeriodText);
             readString("floodsListPeriodText", m_floodsListPeriodText);
+            auto hiddenWeatherSystemForecastsIt = settings->find("hiddenWeatherSystemForecasts");
+            if (hiddenWeatherSystemForecastsIt != settings->end() && hiddenWeatherSystemForecastsIt->is_array()) {
+                m_hiddenWeatherSystemForecastIds.clear();
+                for (const json& item : *hiddenWeatherSystemForecastsIt) {
+                    if (item.is_string())
+                        m_hiddenWeatherSystemForecastIds.insert(Utf8ToWide(item.get<std::string>()));
+                }
+            }
             auto hiddenWeatherWarningPolygonsIt = settings->find("hiddenWeatherWarningPolygons");
             if (hiddenWeatherWarningPolygonsIt != settings->end() && hiddenWeatherWarningPolygonsIt->is_array()) {
                 m_hiddenWeatherWarningPolygonIds.clear();
@@ -3048,6 +2800,7 @@ private:
             settings["incidentOverlayNotifiedOnly"] = m_incidentOverlayNotifiedOnly;
             settings["showWeatherSystems"] = m_showWeatherSystems;
             settings["showWeatherSystemOverlayLabels"] = m_showWeatherSystemOverlayLabels;
+            settings["showWeatherSystemForecasts"] = m_showWeatherSystemForecasts;
             settings["showWeatherWarnings"] = m_showWeatherWarnings;
             settings["showWeatherWarningOverlayLabels"] = m_showWeatherWarningOverlayLabels;
             settings["showWeatherWarningPolygons"] = m_showWeatherWarningPolygons;
@@ -3056,10 +2809,14 @@ private:
             settings["showAreaLabels"] = m_showAreaLabels;
             settings["showRoadDepictions"] = m_showRoadDepictions;
             settings["earthquakeListMagnitudeText"] = WideToUtf8(m_earthquakeListMagnitudeText);
+            settings["earthquakeListTimeText"] = WideToUtf8(m_earthquakeListTimeText);
             settings["earthquakeListPeriodText"] = WideToUtf8(m_earthquakeListPeriodText);
             settings["weatherSystemsListPeriodText"] = WideToUtf8(m_weatherSystemsListPeriodText);
             settings["weatherWarningsListPeriodText"] = WideToUtf8(m_weatherWarningsListPeriodText);
             settings["floodsListPeriodText"] = WideToUtf8(m_floodsListPeriodText);
+            settings["hiddenWeatherSystemForecasts"] = json::array();
+            for (const std::wstring& id : m_hiddenWeatherSystemForecastIds)
+                settings["hiddenWeatherSystemForecasts"].push_back(WideToUtf8(id));
             settings["hiddenWeatherWarningPolygons"] = json::array();
             for (const std::wstring& id : m_hiddenWeatherWarningPolygonIds)
                 settings["hiddenWeatherWarningPolygons"].push_back(WideToUtf8(id));
@@ -4916,6 +4673,7 @@ private:
         AppendMenuW(weatherOverlayMenu, weatherOverlayEnabled | (m_showWeatherSystemOverlayLabels ? MF_UNCHECKED : MF_CHECKED), IDM_WEATHER_SYSTEM_OVERLAY_NONE, L"None");
         AppendMenuW(weatherOverlayMenu, weatherOverlayEnabled | (m_showWeatherSystemOverlayLabels ? MF_CHECKED : MF_UNCHECKED), IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND, L"Name and Wind");
         AppendMenuW(weatherMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(weatherOverlayMenu), L"Weather System Overlays");
+        AppendMenuW(weatherMenu, weatherOverlayEnabled | (m_showWeatherSystemForecasts ? MF_CHECKED : MF_UNCHECKED), IDM_WEATHER_SYSTEM_FORECASTS, L"Weather System Forecasts");
         MENUITEMINFOW showWeatherInfo{};
         showWeatherInfo.cbSize = sizeof(showWeatherInfo);
         showWeatherInfo.fMask = MIIM_FTYPE;
@@ -4973,7 +4731,7 @@ private:
     {
         MessageBoxW(
             m_hwnd,
-            L"ERC Tools\n\nView live alerts on a UK map, collaborate with local responders, and share map notes.",
+            L"ERC Tools\n\nCreated by Samuel Mason.\n\nView live alerts on a UK map, collaborate with local responders, and share map notes.",
             L"About ERC Tools",
             MB_OK | MB_ICONINFORMATION);
     }
@@ -8052,18 +7810,8 @@ private:
     void ApplyWeatherSystemsListFilter(bool save)
     {
         StoreWeatherListPeriodFiltersFromControls();
-        const int maxLeadHours = PeriodHoursFromText(m_weatherSystemsListPeriodText, 24);
         m_filteredWeatherSystems.clear();
-        for (WeatherSystemEvent system : m_allWeatherSystems) {
-            if (!system.forecastTrack.empty()) {
-                system.forecastTrack.erase(
-                    std::remove_if(system.forecastTrack.begin(), system.forecastTrack.end(), [&](const WeatherForecastPoint& point) {
-                        return point.leadHours > maxLeadHours;
-                        }),
-                    system.forecastTrack.end());
-            }
-            m_filteredWeatherSystems.push_back(std::move(system));
-        }
+        m_filteredWeatherSystems = m_allWeatherSystems;
         RenderWeatherSystemsListRows();
         ApplyWeatherSystemVisibility();
         if (save)
@@ -8166,8 +7914,10 @@ private:
             CheckMenuItem(menu, IDM_SHOW_WEATHER_SYSTEMS, MF_BYCOMMAND | (m_showWeatherSystems ? MF_CHECKED : MF_UNCHECKED));
             CheckMenuItem(menu, IDM_WEATHER_SYSTEM_OVERLAY_NONE, MF_BYCOMMAND | (m_showWeatherSystemOverlayLabels ? MF_UNCHECKED : MF_CHECKED));
             CheckMenuItem(menu, IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND, MF_BYCOMMAND | (m_showWeatherSystemOverlayLabels ? MF_CHECKED : MF_UNCHECKED));
+            CheckMenuItem(menu, IDM_WEATHER_SYSTEM_FORECASTS, MF_BYCOMMAND | (m_showWeatherSystemForecasts ? MF_CHECKED : MF_UNCHECKED));
             EnableMenuItem(menu, IDM_WEATHER_SYSTEM_OVERLAY_NONE, MF_BYCOMMAND | (m_showWeatherSystems ? MF_ENABLED : MF_GRAYED));
             EnableMenuItem(menu, IDM_WEATHER_SYSTEM_OVERLAY_NAME_WIND, MF_BYCOMMAND | (m_showWeatherSystems ? MF_ENABLED : MF_GRAYED));
+            EnableMenuItem(menu, IDM_WEATHER_SYSTEM_FORECASTS, MF_BYCOMMAND | (m_showWeatherSystems ? MF_ENABLED : MF_GRAYED));
         }
     }
 
@@ -8273,10 +8023,22 @@ private:
     void ApplyWeatherSystemVisibility()
     {
         m_map.SetWeatherSystemOverlayVisible(m_showWeatherSystems && m_showWeatherSystemOverlayLabels);
-        if (m_showWeatherSystems)
-            m_map.SetWeatherSystems(m_filteredWeatherSystems);
-        else
+        if (!m_showWeatherSystems) {
             m_map.SetWeatherSystems({});
+            return;
+        }
+
+        std::vector<WeatherSystemEvent> systems = m_allWeatherSystems;
+        for (WeatherSystemEvent& system : systems) {
+            const std::wstring key = WeatherSystemStableKey(system);
+            if (!m_showWeatherSystemForecasts ||
+                m_hiddenWeatherSystemForecastIds.find(key) != m_hiddenWeatherSystemForecastIds.end())
+            {
+                system.forecastTrack.clear();
+                system.hasForecastLocation = false;
+            }
+        }
+        m_map.SetWeatherSystems(systems);
     }
 
     void ToggleShowWeatherSystems()
@@ -8295,6 +8057,14 @@ private:
             return;
 
         m_showWeatherSystemOverlayLabels = visible;
+        UpdateWeatherSystemsMenu();
+        ApplyWeatherSystemVisibility();
+        SaveSettings();
+    }
+
+    void ToggleWeatherSystemForecasts()
+    {
+        m_showWeatherSystemForecasts = !m_showWeatherSystemForecasts;
         UpdateWeatherSystemsMenu();
         ApplyWeatherSystemVisibility();
         SaveSettings();
@@ -8910,7 +8680,7 @@ private:
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                820,
+                980,
                 540,
                 m_hwnd,
                 nullptr,
@@ -8930,20 +8700,24 @@ private:
         CreateAutoLabel(parent, 0, L"Earthquakes List", 18, 18, m_headerFont);
         CreateAutoLabel(parent, 0, L"Minimum magnitude", 18, 58);
         m_earthquakeListMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 84, 120, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_MAG_EDIT), m_hInst, nullptr);
-        CreateAutoLabel(parent, 0, L"Period", 160, 58);
-        m_earthquakeListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 160, 84, 130, 120, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_COMBO), m_hInst, nullptr);
-        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 350, 80, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
-        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 478, 80, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 672, 80, 102, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 126, 756, 350, parent, ControlId(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"After date/time", 160, 58);
+        m_earthquakeListTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 160, 84, 170, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_TIME_EDIT), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Period", 350, 58);
+        m_earthquakeListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 350, 84, 130, 120, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_COMBO), m_hInst, nullptr);
+        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 500, 80, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
+        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 628, 80, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 812, 80, 102, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
+        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 126, 920, 350, parent, ControlId(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
 
-        for (HWND h : { m_earthquakeListMagnitudeEdit, m_earthquakeListPeriodCombo, m_earthquakeListRegionBtn, m_earthquakeListClearRegionBtn, closeBtn, m_earthquakeListView }) {
+        for (HWND h : { m_earthquakeListMagnitudeEdit, m_earthquakeListTimeEdit, m_earthquakeListPeriodCombo, m_earthquakeListRegionBtn, m_earthquakeListClearRegionBtn, closeBtn, m_earthquakeListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
         SendMessageW(m_earthquakeListMagnitudeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"2.5"));
+        SendMessageW(m_earthquakeListTimeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"2026-05-14 09:00"));
         PopulatePeriodCombo(m_earthquakeListPeriodCombo, m_earthquakeListPeriodText);
         SetWindowTextSafe(m_earthquakeListMagnitudeEdit, m_earthquakeListMagnitudeText);
+        SetWindowTextSafe(m_earthquakeListTimeEdit, m_earthquakeListTimeText);
         SendMessageW(m_earthquakeListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
 
         LVCOLUMNW col{};
@@ -8988,6 +8762,8 @@ private:
     {
         if (m_earthquakeListMagnitudeEdit)
             m_earthquakeListMagnitudeText = Trim(GetWindowTextString(m_earthquakeListMagnitudeEdit));
+        if (m_earthquakeListTimeEdit)
+            m_earthquakeListTimeText = Trim(GetWindowTextString(m_earthquakeListTimeEdit));
         if (m_earthquakeListPeriodCombo)
             m_earthquakeListPeriodText = Trim(GetWindowTextString(m_earthquakeListPeriodCombo));
     }
@@ -9002,7 +8778,10 @@ private:
             return false;
         }
 
-        const long long afterMs = PeriodStartTimeMs(m_earthquakeListPeriodText);
+        long long afterMs = PeriodStartTimeMs(m_earthquakeListPeriodText);
+        long long dateFilterMs = 0;
+        if (!m_earthquakeListTimeText.empty() && TryParseDateTimeFilter(m_earthquakeListTimeText, dateFilterMs))
+            afterMs = dateFilterMs;
         if (event.timeMs > 0 && event.timeMs < afterMs)
         {
             return false;
@@ -9099,7 +8878,7 @@ private:
             ApplyEarthquakeListFilters();
             return;
         }
-        if ((id == IDC_EARTHQUAKE_LIST_MAG_EDIT) &&
+        if ((id == IDC_EARTHQUAKE_LIST_MAG_EDIT || id == IDC_EARTHQUAKE_LIST_TIME_EDIT) &&
             (code == EN_CHANGE || code == EN_KILLFOCUS))
         {
             ApplyEarthquakeListFilters();
@@ -9245,6 +9024,8 @@ private:
         case WM_COMMAND:
             OnWeatherSystemsListCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_NOTIFY:
+            return OnWeatherSystemsListNotify(reinterpret_cast<NMHDR*>(lParam));
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
         case WM_CTLCOLOREDIT:
@@ -9311,7 +9092,7 @@ private:
             ApplyExplorerTheme(h);
         }
         PopulatePeriodCombo(m_weatherSystemsListPeriodCombo, m_weatherSystemsListPeriodText);
-        SendMessageW(m_weatherSystemsListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
+        SendMessageW(m_weatherSystemsListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_CHECKBOXES);
 
         struct ColumnDef { const wchar_t* text; int width; };
         const ColumnDef columns[] = {
@@ -9321,10 +9102,10 @@ private:
             { L"Long", 80 },
             { L"Wind", 80 },
             { L"Cat", 70 },
-            { L"24h Lat", 80 },
-            { L"24h Long", 80 },
-            { L"24h Wind", 90 },
-            { L"24h Cat", 80 }
+            { L"Forecast Lat", 90 },
+            { L"Forecast Long", 95 },
+            { L"Forecast Wind", 100 },
+            { L"Forecast Cat", 95 }
         };
         for (int i = 0; i < static_cast<int>(_countof(columns)); ++i) {
             LVCOLUMNW col{};
@@ -9346,11 +9127,25 @@ private:
         return buffer;
     }
 
+    const WeatherForecastPoint* WeatherSystemForecastForList(const WeatherSystemEvent& system) const
+    {
+        const int hours = PeriodHoursFromText(m_weatherSystemsListPeriodText, 24);
+        const WeatherForecastPoint* best = nullptr;
+        for (const WeatherForecastPoint& point : system.forecastTrack) {
+            if (!point.hasLocation || point.leadHours <= 0 || point.leadHours > hours)
+                continue;
+            if (!best || point.leadHours > best->leadHours)
+                best = &point;
+        }
+        return best;
+    }
+
     void RenderWeatherSystemsListRows()
     {
         if (!m_weatherSystemsListView)
             return;
 
+        m_syncingControls = true;
         SendMessageW(m_weatherSystemsListView, LVM_DELETEALLITEMS, 0, 0);
         int row = 0;
         for (const WeatherSystemEvent& system : m_filteredWeatherSystems) {
@@ -9362,11 +9157,28 @@ private:
             int inserted = static_cast<int>(SendMessageW(m_weatherSystemsListView, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
             if (inserted < 0)
                 continue;
+            const bool forecastVisible = m_hiddenWeatherSystemForecastIds.find(WeatherSystemStableKey(system)) == m_hiddenWeatherSystemForecastIds.end();
+            ListView_SetCheckState(m_weatherSystemsListView, inserted, forecastVisible);
 
             std::wstring lat = system.hasLocation ? FormatCoordinateForList(system.latitude, true) : L"";
             std::wstring lon = system.hasLocation ? FormatCoordinateForList(system.longitude, false) : L"";
-            std::wstring forecastLat = system.hasForecastLocation ? FormatCoordinateForList(system.forecastLatitude, true) : L"";
-            std::wstring forecastLon = system.hasForecastLocation ? FormatCoordinateForList(system.forecastLongitude, false) : L"";
+            const WeatherForecastPoint* forecast = WeatherSystemForecastForList(system);
+            std::wstring forecastLat;
+            std::wstring forecastLon;
+            std::wstring forecastWind;
+            std::wstring forecastCategory;
+            if (forecast) {
+                forecastLat = FormatCoordinateForList(forecast->latitude, true);
+                forecastLon = FormatCoordinateForList(forecast->longitude, false);
+                forecastWind = forecast->windText;
+                forecastCategory = forecast->category;
+            }
+            else if (system.hasForecastLocation) {
+                forecastLat = FormatCoordinateForList(system.forecastLatitude, true);
+                forecastLon = FormatCoordinateForList(system.forecastLongitude, false);
+                forecastWind = system.forecastWindText;
+                forecastCategory = system.forecastCategory;
+            }
             const std::wstring values[] = {
                 system.basin,
                 lat,
@@ -9375,8 +9187,8 @@ private:
                 system.category,
                 forecastLat,
                 forecastLon,
-                system.forecastWindText,
-                system.forecastCategory
+                forecastWind,
+                forecastCategory
             };
             for (int i = 0; i < static_cast<int>(_countof(values)); ++i) {
                 LVITEMW sub{};
@@ -9386,6 +9198,33 @@ private:
             }
             ++row;
         }
+        m_syncingControls = false;
+    }
+
+    LRESULT OnWeatherSystemsListNotify(NMHDR* nmh)
+    {
+        if (!nmh || nmh->hwndFrom != m_weatherSystemsListView || nmh->code != LVN_ITEMCHANGED || m_syncingControls)
+            return 0;
+
+        NMLISTVIEW* lv = reinterpret_cast<NMLISTVIEW*>(nmh);
+        if (lv->iItem < 0 || lv->iItem >= static_cast<int>(m_filteredWeatherSystems.size()))
+            return 0;
+        if ((lv->uChanged & LVIF_STATE) == 0)
+            return 0;
+
+        const UINT oldCheck = lv->uOldState & LVIS_STATEIMAGEMASK;
+        const UINT newCheck = lv->uNewState & LVIS_STATEIMAGEMASK;
+        if (oldCheck == newCheck)
+            return 0;
+
+        const std::wstring id = WeatherSystemStableKey(m_filteredWeatherSystems[static_cast<size_t>(lv->iItem)]);
+        if (ListView_GetCheckState(m_weatherSystemsListView, lv->iItem))
+            m_hiddenWeatherSystemForecastIds.erase(id);
+        else
+            m_hiddenWeatherSystemForecastIds.insert(id);
+        ApplyWeatherSystemVisibility();
+        SaveSettings();
+        return 0;
     }
 
     void OnWeatherSystemsListCommand(int id, int code)
@@ -9520,9 +9359,9 @@ private:
         if (!m_weatherWarningsListView)
             return;
 
+        m_syncingControls = true;
         SendMessageW(m_weatherWarningsListView, LVM_DELETEALLITEMS, 0, 0);
         int row = 0;
-        m_syncingControls = true;
         for (const WeatherWarningEvent& warning : m_filteredWeatherWarnings) {
             LVITEMW item{};
             item.mask = LVIF_TEXT;
@@ -10263,6 +10102,7 @@ private:
     HWND m_incidentsListSeverityCombo = nullptr;
     HWND m_incidentsListView = nullptr;
     HWND m_earthquakeListMagnitudeEdit = nullptr;
+    HWND m_earthquakeListTimeEdit = nullptr;
     HWND m_earthquakeListPeriodCombo = nullptr;
     HWND m_earthquakeListRegionBtn = nullptr;
     HWND m_earthquakeListClearRegionBtn = nullptr;
@@ -10366,6 +10206,7 @@ private:
     bool m_incidentOverlayNotifiedOnly = false;
     bool m_showWeatherSystems = false;
     bool m_showWeatherSystemOverlayLabels = false;
+    bool m_showWeatherSystemForecasts = true;
     bool m_showWeatherWarnings = false;
     bool m_showWeatherWarningOverlayLabels = false;
     bool m_showWeatherWarningPolygons = true;
@@ -10376,6 +10217,7 @@ private:
     bool m_displayWorldMap = false;
     bool m_syncSettingsFromServer = false;
     std::wstring m_earthquakeListMagnitudeText;
+    std::wstring m_earthquakeListTimeText;
     std::wstring m_earthquakeListPeriodText = L"24h";
     std::wstring m_weatherSystemsListPeriodText = L"24h";
     std::wstring m_weatherWarningsListPeriodText = L"24h";
@@ -10411,6 +10253,7 @@ private:
     std::unordered_map<std::wstring, WeatherSystemNotificationState> m_notifiedWeatherSystemStates;
     std::unordered_map<std::wstring, WeatherWarningNotificationState> m_notifiedWeatherWarningStates;
     std::unordered_map<std::wstring, FloodNotificationState> m_notifiedFloodStates;
+    std::unordered_set<std::wstring> m_hiddenWeatherSystemForecastIds;
     std::unordered_set<std::wstring> m_hiddenWeatherWarningPolygonIds;
     PolygonCaptureTarget m_polygonCaptureTarget = PolygonCaptureTarget::None;
     size_t m_activeIncidentRegionIndex = static_cast<size_t>(-1);

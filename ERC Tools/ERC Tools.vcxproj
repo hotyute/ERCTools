@@ -23,12 +23,14 @@
     <ClCompile Include="app_state.cpp" />
     <ClCompile Include="binary_protocol.cpp" />
     <ClCompile Include="client_update.cpp" />
+    <ClCompile Include="earthquake_data.cpp" />
     <ClCompile Include="http.cpp" />
     <ClCompile Include="login_dialog.cpp" />
     <ClCompile Include="main_window.cpp" />
     <ClCompile Include="map_overlay_ui.cpp" />
     <ClCompile Include="map_view.cpp" />
     <ClCompile Include="parsing.cpp" />
+    <ClCompile Include="time_filters.cpp" />
     <ClCompile Include="util.cpp" />
     <ClCompile Include="weather_data.cpp" />
   </ItemGroup>
@@ -38,6 +40,7 @@
     <ClInclude Include="binary_protocol.h" />
     <ClInclude Include="client_update.h" />
     <ClInclude Include="common.h" />
+    <ClInclude Include="earthquake_data.h" />
     <ClInclude Include="http.h" />
     <ClInclude Include="login_dialog.h" />
     <ClInclude Include="main_window.h" />
@@ -45,6 +48,7 @@
     <ClInclude Include="map_view.h" />
     <ClInclude Include="models.h" />
     <ClInclude Include="parsing.h" />
+    <ClInclude Include="time_filters.h" />
     <ClInclude Include="util.h" />
     <ClInclude Include="weather_data.h" />
   </ItemGroup>

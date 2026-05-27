@@ -27,6 +27,9 @@
     <ClCompile Include="client_update.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="earthquake_data.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="http.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -43,6 +46,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="parsing.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="time_filters.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="util.cpp">
@@ -68,6 +74,9 @@
     <ClInclude Include="common.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="earthquake_data.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="http.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -87,6 +96,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="parsing.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="time_filters.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="util.h">
