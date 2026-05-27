@@ -30,6 +30,7 @@
     <ClCompile Include="map_view.cpp" />
     <ClCompile Include="parsing.cpp" />
     <ClCompile Include="util.cpp" />
+    <ClCompile Include="weather_data.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="app_state.h" />
@@ -45,6 +46,7 @@
     <ClInclude Include="models.h" />
     <ClInclude Include="parsing.h" />
     <ClInclude Include="util.h" />
+    <ClInclude Include="weather_data.h" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="app.manifest" />

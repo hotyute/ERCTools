@@ -49,6 +49,7 @@ public:
     void SetChatClearCallback(ChatClearCallback cb);
     void SetChatClearEnabled(bool enabled);
     void SetAlerts(const std::vector<TrafficAlert>& alerts);
+    void SetIncidentOverlayVisible(bool visible);
     void SetNotes(const std::vector<MapNote>& notes);
     void SetChatMessages(const std::vector<ChatMessage>& messages);
     void SetOnlineUsers(const std::vector<OnlineUser>& users);
@@ -63,6 +64,7 @@ public:
     void SetWeatherSystemOverlayVisible(bool visible);
     void SetWeatherWarnings(const std::vector<WeatherWarningEvent>& warnings);
     void SetWeatherWarningOverlayVisible(bool visible);
+    void SetWeatherWarningPolygonsVisible(bool visible);
     void SetFloods(const std::vector<FloodEvent>& floods);
     void SetFloodOverlayVisible(bool visible);
     void SetAreaLabelsVisible(bool visible);

@@ -253,6 +253,16 @@ public:
         Invalidate();
     }
 
+    void SetIncidentOverlayVisible(bool visible)
+    {
+        if (m_showIncidentOverlayLabels == visible)
+            return;
+
+        m_showIncidentOverlayLabels = visible;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
     void SetNotes(const std::vector<MapNote>& notes)
     {
         if (NotesEqual(m_notes, notes))
@@ -363,6 +373,16 @@ public:
             return;
 
         m_showWeatherWarningOverlayLabels = visible;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetWeatherWarningPolygonsVisible(bool visible)
+    {
+        if (m_showWeatherWarningPolygons == visible)
+            return;
+
+        m_showWeatherWarningPolygons = visible;
         InvalidateSceneCache();
         Invalidate();
     }
@@ -2079,6 +2099,17 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.05f, 0.42f, 0.84f, 0.94f), &m_floodBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.97f, 0.84f, 0.88f), &m_roadBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.11f, 0.19f, 0.24f, 0.70f), &m_roadCasingBrush);
+        if (!m_forecastErrorStrokeStyle) {
+            D2D1_STROKE_STYLE_PROPERTIES strokeProps = D2D1::StrokeStyleProperties(
+                D2D1_CAP_STYLE_FLAT,
+                D2D1_CAP_STYLE_FLAT,
+                D2D1_CAP_STYLE_ROUND,
+                D2D1_LINE_JOIN_ROUND,
+                10.0f,
+                D2D1_DASH_STYLE_DASH,
+                0.0f);
+            g_d2dFactory->CreateStrokeStyle(&strokeProps, nullptr, 0, &m_forecastErrorStrokeStyle);
+        }
 
         if (g_dwriteFactory && !m_noteTextFormat) {
             g_dwriteFactory->CreateTextFormat(
@@ -2124,6 +2155,7 @@ private:
         m_floodBrush.Reset();
         m_roadBrush.Reset();
         m_roadCasingBrush.Reset();
+        m_forecastErrorStrokeStyle.Reset();
         m_laneBitmaps.clear();
         m_noteTextFormat.Reset();
         m_overlayUi.DiscardDeviceResources();
@@ -2506,7 +2538,11 @@ private:
             text += L" ";
             text += system.category;
         }
-        if (!system.windText.empty()) {
+        if (system.windKnots > 0.0) {
+            text += L" ";
+            text += FormatKnotsAsMph(system.windKnots);
+        }
+        else if (!system.windText.empty()) {
             text += L" ";
             text += system.windText;
         }
@@ -2529,6 +2565,33 @@ private:
         DrawMeasuredBlipLabel(view, anchor, radius, text, m_weatherSystemBrush.Get(), 150.0f, 360.0f);
     }
 
+    static std::wstring FormatKnotsAsMph(double knots)
+    {
+        const int mph = static_cast<int>(std::round(knots * 1.150779448));
+        return std::to_wstring(mph) + L" mph";
+    }
+
+    float NauticalMilesToScreenRadius(const ViewState& view, double lat, double lon, double nm) const
+    {
+        if (nm <= 0.0)
+            return 0.0f;
+
+        const double latDelta = nm / 60.0;
+        const double sampleLat = ClampValue(lat + latDelta, -kMaxMercatorLat, kMaxMercatorLat);
+        const D2D1_POINT_2F center = GeoToScreen(view, lat, lon);
+        D2D1_POINT_2F sample = GeoToScreen(view, sampleLat, lon);
+        double pixels = std::abs(static_cast<double>(sample.y - center.y));
+
+        if (pixels < 1.0) {
+            const double cosLat = std::max(0.15, std::cos(lat * 3.14159265358979323846 / 180.0));
+            const double lonDelta = nm / (60.0 * cosLat);
+            sample = GeoToScreen(view, lat, lon + lonDelta);
+            pixels = std::abs(static_cast<double>(sample.x - center.x));
+        }
+
+        return static_cast<float>(ClampValue(pixels, 4.0, 900.0));
+    }
+
     void DrawWeatherSystems(const ViewState& view)
     {
         if (!m_rt || m_weatherSystems.empty())
@@ -2541,15 +2604,35 @@ private:
             D2D1_POINT_2F p = GeoToScreen(view, system.latitude, system.longitude);
             const float radius = static_cast<float>(ClampValue(8.0 + system.windKnots * 0.08, 9.0, 22.0));
 
-            m_rt->FillEllipse(D2D1::Ellipse(p, radius, radius), m_weatherSystemBrush.Get());
-            m_rt->DrawEllipse(D2D1::Ellipse(p, radius, radius), m_borderBrush.Get(), 1.35f);
-            m_rt->DrawEllipse(D2D1::Ellipse(p, radius + 5.0f, radius + 5.0f), m_weatherSystemBrush.Get(), 1.1f);
+            D2D1_POINT_2F previous{};
+            bool havePrevious = false;
+            for (const WeatherForecastPoint& point : system.forecastTrack) {
+                if (!point.hasLocation || !IsGeoPointInView(view, point.latitude, point.longitude))
+                    continue;
+                D2D1_POINT_2F forecast = GeoToScreen(view, point.latitude, point.longitude);
+                if (havePrevious)
+                    m_rt->DrawLine(previous, forecast, m_weatherSystemBrush.Get(), 2.1f);
+                if (point.errorRadiusNm > 0.0) {
+                    const float errorRadius = NauticalMilesToScreenRadius(view, point.latitude, point.longitude, point.errorRadiusNm);
+                    if (errorRadius >= 4.0f)
+                        m_rt->DrawEllipse(D2D1::Ellipse(forecast, errorRadius, errorRadius), m_weatherSystemBrush.Get(), 1.15f, m_forecastErrorStrokeStyle.Get());
+                }
+                const float pointRadius = point.leadHours == 0 ? 5.0f : 4.0f;
+                m_rt->FillEllipse(D2D1::Ellipse(forecast, pointRadius, pointRadius), m_weatherSystemBrush.Get());
+                m_rt->DrawEllipse(D2D1::Ellipse(forecast, pointRadius + 1.5f, pointRadius + 1.5f), m_borderBrush.Get(), 0.9f);
+                previous = forecast;
+                havePrevious = true;
+            }
 
-            if (system.hasForecastLocation) {
+            if (!havePrevious && system.hasForecastLocation) {
                 D2D1_POINT_2F forecast = GeoToScreen(view, system.forecastLatitude, system.forecastLongitude);
                 m_rt->DrawLine(p, forecast, m_weatherSystemBrush.Get(), 1.4f);
                 m_rt->FillEllipse(D2D1::Ellipse(forecast, 4.5f, 4.5f), m_weatherSystemBrush.Get());
             }
+
+            m_rt->FillEllipse(D2D1::Ellipse(p, radius, radius), m_weatherSystemBrush.Get());
+            m_rt->DrawEllipse(D2D1::Ellipse(p, radius, radius), m_borderBrush.Get(), 1.35f);
+            m_rt->DrawEllipse(D2D1::Ellipse(p, radius + 5.0f, radius + 5.0f), m_weatherSystemBrush.Get(), 1.1f);
 
             DrawWeatherSystemOverlayLabel(view, system, p, radius, system.id == m_hoveredWeatherSystemId);
         }
@@ -2561,6 +2644,13 @@ private:
         if (!warning.type.empty()) {
             text += L" - ";
             text += warning.type;
+        }
+        if (!warning.validFrom.empty() || !warning.validTo.empty()) {
+            text += L"\n";
+            text += L"From ";
+            text += warning.validFrom.empty() ? L"unknown" : warning.validFrom;
+            text += L" to ";
+            text += warning.validTo.empty() ? L"unknown" : warning.validTo;
         }
         if (!warning.area.empty()) {
             text += L"\n";
@@ -2627,7 +2717,7 @@ private:
             if (!warning.hasLocation || !IsGeoPointInView(view, warning.latitude, warning.longitude))
                 continue;
 
-            if (warning.polygon.size() >= 3) {
+            if (m_showWeatherWarningPolygons && warning.polygon.size() >= 3) {
                 DrawPolygonPath(
                     view,
                     warning.polygon,
@@ -4030,6 +4120,12 @@ private:
             m_rt->FillEllipse(outer, sevBrush);
             m_rt->FillEllipse(inner, m_textBrush.Get());
             m_rt->DrawEllipse(outer, m_borderBrush.Get(), selected ? 2.5f : 1.5f);
+
+            if (m_showIncidentOverlayLabels) {
+                std::wstring label = BuildAlertSummary(m_alerts[i]);
+                if (!label.empty())
+                    DrawMeasuredBlipLabel(view, p, outerR, label, sevBrush, 150.0f, 380.0f);
+            }
         }
     }
 
@@ -5069,8 +5165,10 @@ private:
     ULONGLONG m_notificationHistoryAnimationStartMs = 0;
     bool m_notificationHistoryAnimating = false;
     bool m_showEarthquakeOverlayLabels = false;
+    bool m_showIncidentOverlayLabels = false;
     bool m_showWeatherSystemOverlayLabels = false;
     bool m_showWeatherWarningOverlayLabels = false;
+    bool m_showWeatherWarningPolygons = true;
     bool m_showFloodOverlayLabels = false;
     bool m_showAreaLabels = true;
     bool m_showRoadDepictions = false;
@@ -5128,6 +5226,7 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_floodBrush;
     ComPtr<ID2D1SolidColorBrush> m_roadBrush;
     ComPtr<ID2D1SolidColorBrush> m_roadCasingBrush;
+    ComPtr<ID2D1StrokeStyle> m_forecastErrorStrokeStyle;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
     ComPtr<ID2D1Bitmap> m_sceneBitmap;
     int m_sceneBitmapWidth = 0;
@@ -5238,6 +5337,11 @@ void MapView::SetAlerts(const std::vector<TrafficAlert>& alerts)
     m_impl->SetAlerts(alerts);
 }
 
+void MapView::SetIncidentOverlayVisible(bool visible)
+{
+    m_impl->SetIncidentOverlayVisible(visible);
+}
+
 void MapView::SetNotes(const std::vector<MapNote>& notes)
 {
     m_impl->SetNotes(notes);
@@ -5306,6 +5410,11 @@ void MapView::SetWeatherWarnings(const std::vector<WeatherWarningEvent>& warning
 void MapView::SetWeatherWarningOverlayVisible(bool visible)
 {
     m_impl->SetWeatherWarningOverlayVisible(visible);
+}
+
+void MapView::SetWeatherWarningPolygonsVisible(bool visible)
+{
+    m_impl->SetWeatherWarningPolygonsVisible(visible);
 }
 
 void MapView::SetFloods(const std::vector<FloodEvent>& floods)

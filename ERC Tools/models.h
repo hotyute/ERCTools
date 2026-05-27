@@ -58,6 +58,19 @@ struct EarthquakeEvent
     bool hasLocation = false;
 };
 
+struct WeatherForecastPoint
+{
+    std::wstring timeText;
+    std::wstring category;
+    std::wstring windText;
+    int leadHours = 0;
+    double windKnots = 0.0;
+    double errorRadiusNm = 0.0;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    bool hasLocation = false;
+};
+
 struct WeatherSystemEvent
 {
     std::wstring id;
@@ -68,6 +81,8 @@ struct WeatherSystemEvent
     std::wstring forecastCategory;
     std::wstring forecastWindText;
     std::wstring updatedText;
+    std::wstring detailPath;
+    std::vector<WeatherForecastPoint> forecastTrack;
     double windKnots = 0.0;
     double forecastWindKnots = 0.0;
     double latitude = 0.0;
