@@ -33,6 +33,8 @@
     <ClCompile Include="time_filters.cpp" />
     <ClCompile Include="util.cpp" />
     <ClCompile Include="weather_data.cpp" />
+    <ClCompile Include="weather_intensity.cpp" />
+    <ClCompile Include="win32_ui_helpers.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="app_state.h" />
@@ -51,6 +53,8 @@
     <ClInclude Include="time_filters.h" />
     <ClInclude Include="util.h" />
     <ClInclude Include="weather_data.h" />
+    <ClInclude Include="weather_intensity.h" />
+    <ClInclude Include="win32_ui_helpers.h" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="app.manifest" />

@@ -14,6 +14,7 @@
 #include "time_filters.h"
 #include "util.h"
 #include "weather_data.h"
+#include "weather_intensity.h"
 
 #ifndef EM_GETLANGOPTIONS
 #define EM_GETLANGOPTIONS (WM_USER + 121)
@@ -161,12 +162,14 @@ constexpr int IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN = 2504;
 constexpr int IDC_EARTHQUAKE_LIST_LISTVIEW = 2505;
 constexpr int IDC_EARTHQUAKE_LIST_CLOSE_BTN = 2506;
 constexpr int IDC_EARTHQUAKE_LIST_PERIOD_COMBO = 2507;
+constexpr int IDC_EARTHQUAKE_LIST_DATE_RADIO = 2508;
+constexpr int IDC_EARTHQUAKE_LIST_PERIOD_RADIO = 2509;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT = 2521;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN = 2522;
 constexpr int IDC_WEATHER_SYSTEMS_LIST_LISTVIEW = 2541;
 constexpr int IDC_WEATHER_SYSTEMS_LIST_REFRESH_BTN = 2542;
 constexpr int IDC_WEATHER_SYSTEMS_LIST_CLOSE_BTN = 2543;
-constexpr int IDC_WEATHER_SYSTEMS_LIST_PERIOD_COMBO = 2544;
+constexpr int IDC_WEATHER_SYSTEMS_LIST_FORECAST_COMBO = 2544;
 constexpr int IDC_WEATHER_SYSTEM_NOTIFICATIONS_WIND_EDIT = 2551;
 constexpr int IDC_WEATHER_SYSTEM_NOTIFICATIONS_CLOSE_BTN = 2552;
 constexpr int IDC_WEATHER_WARNINGS_LIST_LISTVIEW = 2561;
@@ -2538,8 +2541,9 @@ private:
             readBool("showRoadDepictions", m_showRoadDepictions);
             readString("earthquakeListMagnitudeText", m_earthquakeListMagnitudeText);
             readString("earthquakeListTimeText", m_earthquakeListTimeText);
+            readBool("earthquakeListUseDateFilter", m_earthquakeListUseDateFilter);
             readString("earthquakeListPeriodText", m_earthquakeListPeriodText);
-            readString("weatherSystemsListPeriodText", m_weatherSystemsListPeriodText);
+            readString("weatherSystemsListForecastText", m_weatherSystemsListForecastText);
             readString("weatherWarningsListPeriodText", m_weatherWarningsListPeriodText);
             readString("floodsListPeriodText", m_floodsListPeriodText);
             auto hiddenWeatherSystemForecastsIt = settings->find("hiddenWeatherSystemForecasts");
@@ -2810,8 +2814,9 @@ private:
             settings["showRoadDepictions"] = m_showRoadDepictions;
             settings["earthquakeListMagnitudeText"] = WideToUtf8(m_earthquakeListMagnitudeText);
             settings["earthquakeListTimeText"] = WideToUtf8(m_earthquakeListTimeText);
+            settings["earthquakeListUseDateFilter"] = m_earthquakeListUseDateFilter;
             settings["earthquakeListPeriodText"] = WideToUtf8(m_earthquakeListPeriodText);
-            settings["weatherSystemsListPeriodText"] = WideToUtf8(m_weatherSystemsListPeriodText);
+            settings["weatherSystemsListForecastText"] = WideToUtf8(m_weatherSystemsListForecastText);
             settings["weatherWarningsListPeriodText"] = WideToUtf8(m_weatherWarningsListPeriodText);
             settings["floodsListPeriodText"] = WideToUtf8(m_floodsListPeriodText);
             settings["hiddenWeatherSystemForecasts"] = json::array();
@@ -7799,19 +7804,55 @@ private:
 
     void StoreWeatherListPeriodFiltersFromControls()
     {
-        if (m_weatherSystemsListPeriodCombo)
-            m_weatherSystemsListPeriodText = Trim(GetWindowTextString(m_weatherSystemsListPeriodCombo));
         if (m_weatherWarningsListPeriodCombo)
             m_weatherWarningsListPeriodText = Trim(GetWindowTextString(m_weatherWarningsListPeriodCombo));
         if (m_floodsListPeriodCombo)
             m_floodsListPeriodText = Trim(GetWindowTextString(m_floodsListPeriodCombo));
     }
 
+    void StoreWeatherSystemsListFiltersFromControls()
+    {
+        if (m_weatherSystemsListForecastCombo)
+            m_weatherSystemsListForecastText = Trim(GetWindowTextString(m_weatherSystemsListForecastCombo));
+    }
+
+    int WeatherSystemsListMinimumForecastRank() const
+    {
+        std::wstring value = ToLower(Trim(m_weatherSystemsListForecastText));
+        if (value.empty() || value == L"all")
+            return -1;
+        return WeatherSystemCategoryRank(value);
+    }
+
+    bool WeatherSystemMatchesListForecast(const WeatherSystemEvent& system) const
+    {
+        const int minimumRank = WeatherSystemsListMinimumForecastRank();
+        if (minimumRank < 0)
+            return true;
+
+        bool sawForecast = false;
+        int bestRank = -1;
+        for (const WeatherForecastPoint& point : system.forecastTrack) {
+            if (point.leadHours <= 0)
+                continue;
+            sawForecast = true;
+            bestRank = MaxInt(bestRank, WeatherSystemCategoryRank(point.category));
+        }
+        if (!sawForecast && !system.forecastCategory.empty())
+            bestRank = WeatherSystemCategoryRank(system.forecastCategory);
+        if (bestRank < 0)
+            bestRank = WeatherSystemCategoryRank(system.category);
+        return bestRank >= minimumRank;
+    }
+
     void ApplyWeatherSystemsListFilter(bool save)
     {
-        StoreWeatherListPeriodFiltersFromControls();
+        StoreWeatherSystemsListFiltersFromControls();
         m_filteredWeatherSystems.clear();
-        m_filteredWeatherSystems = m_allWeatherSystems;
+        for (const WeatherSystemEvent& system : m_allWeatherSystems) {
+            if (WeatherSystemMatchesListForecast(system))
+                m_filteredWeatherSystems.push_back(system);
+        }
         RenderWeatherSystemsListRows();
         ApplyWeatherSystemVisibility();
         if (save)
@@ -7820,6 +7861,8 @@ private:
 
     bool WeatherWarningMatchesListPeriod(const WeatherWarningEvent& warning) const
     {
+        if (IsAllPeriodText(m_weatherWarningsListPeriodText))
+            return true;
         const int hours = PeriodHoursFromText(m_weatherWarningsListPeriodText, 24);
         if (hours >= 48)
             return true;
@@ -7865,6 +7908,8 @@ private:
 
     bool FloodMatchesListPeriod(const FloodEvent& flood) const
     {
+        if (IsAllPeriodText(m_floodsListPeriodText))
+            return true;
         long long itemMs = 0;
         std::wstring timeText = flood.timeChanged.empty() ? flood.timeRaised : flood.timeChanged;
         if (!TryParseEventTimeMs(timeText, itemMs))
@@ -8700,16 +8745,16 @@ private:
         CreateAutoLabel(parent, 0, L"Earthquakes List", 18, 18, m_headerFont);
         CreateAutoLabel(parent, 0, L"Minimum magnitude", 18, 58);
         m_earthquakeListMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 84, 120, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_MAG_EDIT), m_hInst, nullptr);
-        CreateAutoLabel(parent, 0, L"After date/time", 160, 58);
+        m_earthquakeListDateRadio = CreateWindowExW(0, L"BUTTON", L"After date/time", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 160, 58, 150, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_DATE_RADIO), m_hInst, nullptr);
         m_earthquakeListTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 160, 84, 170, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_TIME_EDIT), m_hInst, nullptr);
-        CreateAutoLabel(parent, 0, L"Period", 350, 58);
+        m_earthquakeListPeriodRadio = CreateWindowExW(0, L"BUTTON", L"Period", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 350, 58, 96, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_RADIO), m_hInst, nullptr);
         m_earthquakeListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 350, 84, 130, 120, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_COMBO), m_hInst, nullptr);
         m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 500, 80, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
         m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 628, 80, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
         HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 812, 80, 102, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
         m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 126, 920, 350, parent, ControlId(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
 
-        for (HWND h : { m_earthquakeListMagnitudeEdit, m_earthquakeListTimeEdit, m_earthquakeListPeriodCombo, m_earthquakeListRegionBtn, m_earthquakeListClearRegionBtn, closeBtn, m_earthquakeListView }) {
+        for (HWND h : { m_earthquakeListMagnitudeEdit, m_earthquakeListDateRadio, m_earthquakeListTimeEdit, m_earthquakeListPeriodRadio, m_earthquakeListPeriodCombo, m_earthquakeListRegionBtn, m_earthquakeListClearRegionBtn, closeBtn, m_earthquakeListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -8718,6 +8763,7 @@ private:
         PopulatePeriodCombo(m_earthquakeListPeriodCombo, m_earthquakeListPeriodText);
         SetWindowTextSafe(m_earthquakeListMagnitudeEdit, m_earthquakeListMagnitudeText);
         SetWindowTextSafe(m_earthquakeListTimeEdit, m_earthquakeListTimeText);
+        SyncEarthquakeListDateModeControls();
         SendMessageW(m_earthquakeListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
 
         LVCOLUMNW col{};
@@ -8747,7 +8793,7 @@ private:
             return;
 
         SendMessageW(combo, CB_RESETCONTENT, 0, 0);
-        const wchar_t* periods[] = { L"24h", L"48h", L"72h", L"120h" };
+        const wchar_t* periods[] = { L"All", L"24h", L"48h", L"72h", L"120h" };
         for (const wchar_t* period : periods)
             SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(period));
 
@@ -8758,12 +8804,43 @@ private:
         SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(index), 0);
     }
 
+    void PopulateForecastMinimumCombo(HWND combo, const std::wstring& selected)
+    {
+        if (!combo)
+            return;
+
+        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+        const wchar_t* options[] = { L"All", L"TD", L"TS", L"Cat 1", L"Cat 2", L"Cat 3", L"Cat 4", L"Cat 5" };
+        for (const wchar_t* option : options)
+            SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option));
+
+        std::wstring value = selected.empty() ? L"All" : selected;
+        LRESULT index = SendMessageW(combo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(value.c_str()));
+        if (index == CB_ERR)
+            index = 0;
+        SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(index), 0);
+    }
+
+    void SyncEarthquakeListDateModeControls()
+    {
+        if (m_earthquakeListDateRadio)
+            SendMessageW(m_earthquakeListDateRadio, BM_SETCHECK, m_earthquakeListUseDateFilter ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_earthquakeListPeriodRadio)
+            SendMessageW(m_earthquakeListPeriodRadio, BM_SETCHECK, m_earthquakeListUseDateFilter ? BST_UNCHECKED : BST_CHECKED, 0);
+        if (m_earthquakeListTimeEdit)
+            EnableWindow(m_earthquakeListTimeEdit, m_earthquakeListUseDateFilter);
+        if (m_earthquakeListPeriodCombo)
+            EnableWindow(m_earthquakeListPeriodCombo, !m_earthquakeListUseDateFilter);
+    }
+
     void StoreEarthquakeListFiltersFromControls()
     {
         if (m_earthquakeListMagnitudeEdit)
             m_earthquakeListMagnitudeText = Trim(GetWindowTextString(m_earthquakeListMagnitudeEdit));
         if (m_earthquakeListTimeEdit)
             m_earthquakeListTimeText = Trim(GetWindowTextString(m_earthquakeListTimeEdit));
+        if (m_earthquakeListDateRadio)
+            m_earthquakeListUseDateFilter = SendMessageW(m_earthquakeListDateRadio, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (m_earthquakeListPeriodCombo)
             m_earthquakeListPeriodText = Trim(GetWindowTextString(m_earthquakeListPeriodCombo));
     }
@@ -8778,10 +8855,15 @@ private:
             return false;
         }
 
-        long long afterMs = PeriodStartTimeMs(m_earthquakeListPeriodText);
-        long long dateFilterMs = 0;
-        if (!m_earthquakeListTimeText.empty() && TryParseDateTimeFilter(m_earthquakeListTimeText, dateFilterMs))
-            afterMs = dateFilterMs;
+        long long afterMs = 0;
+        if (m_earthquakeListUseDateFilter) {
+            long long dateFilterMs = 0;
+            if (!m_earthquakeListTimeText.empty() && TryParseDateTimeFilter(m_earthquakeListTimeText, dateFilterMs))
+                afterMs = dateFilterMs;
+        }
+        else {
+            afterMs = PeriodStartTimeMs(m_earthquakeListPeriodText);
+        }
         if (event.timeMs > 0 && event.timeMs < afterMs)
         {
             return false;
@@ -8881,6 +8963,11 @@ private:
         if ((id == IDC_EARTHQUAKE_LIST_MAG_EDIT || id == IDC_EARTHQUAKE_LIST_TIME_EDIT) &&
             (code == EN_CHANGE || code == EN_KILLFOCUS))
         {
+            ApplyEarthquakeListFilters();
+        }
+        if ((id == IDC_EARTHQUAKE_LIST_DATE_RADIO || id == IDC_EARTHQUAKE_LIST_PERIOD_RADIO) && code == BN_CLICKED) {
+            m_earthquakeListUseDateFilter = id == IDC_EARTHQUAKE_LIST_DATE_RADIO;
+            SyncEarthquakeListDateModeControls();
             ApplyEarthquakeListFilters();
         }
         if (id == IDC_EARTHQUAKE_LIST_PERIOD_COMBO && code == CBN_SELCHANGE) {
@@ -9081,17 +9168,17 @@ private:
     void CreateWeatherSystemsListControls(HWND parent)
     {
         CreateAutoLabel(parent, 0, L"Weather Systems List", 18, 18, m_headerFont);
-        CreateAutoLabel(parent, 0, L"Period", 18, 58);
-        m_weatherSystemsListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 80, 130, 120, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_PERIOD_COMBO), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Forecast minimum", 18, 58);
+        m_weatherSystemsListForecastCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 80, 160, 160, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_FORECAST_COMBO), m_hInst, nullptr);
         HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 626, 54, 102, 32, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_REFRESH_BTN), m_hInst, nullptr);
         HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 742, 54, 102, 32, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_CLOSE_BTN), m_hInst, nullptr);
         m_weatherSystemsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 102, 826, 320, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_LISTVIEW), m_hInst, nullptr);
 
-        for (HWND h : { m_weatherSystemsListPeriodCombo, refreshBtn, closeBtn, m_weatherSystemsListView }) {
+        for (HWND h : { m_weatherSystemsListForecastCombo, refreshBtn, closeBtn, m_weatherSystemsListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
-        PopulatePeriodCombo(m_weatherSystemsListPeriodCombo, m_weatherSystemsListPeriodText);
+        PopulateForecastMinimumCombo(m_weatherSystemsListForecastCombo, m_weatherSystemsListForecastText);
         SendMessageW(m_weatherSystemsListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_CHECKBOXES);
 
         struct ColumnDef { const wchar_t* text; int width; };
@@ -9102,10 +9189,10 @@ private:
             { L"Long", 80 },
             { L"Wind", 80 },
             { L"Cat", 70 },
-            { L"Forecast Lat", 90 },
-            { L"Forecast Long", 95 },
-            { L"Forecast Wind", 100 },
-            { L"Forecast Cat", 95 }
+            { L"Peak Lat", 90 },
+            { L"Peak Long", 95 },
+            { L"Peak Wind", 100 },
+            { L"Peak Cat", 95 }
         };
         for (int i = 0; i < static_cast<int>(_countof(columns)); ++i) {
             LVCOLUMNW col{};
@@ -9127,14 +9214,15 @@ private:
         return buffer;
     }
 
-    const WeatherForecastPoint* WeatherSystemForecastForList(const WeatherSystemEvent& system) const
+    const WeatherForecastPoint* WeatherSystemPeakForecastForList(const WeatherSystemEvent& system) const
     {
-        const int hours = PeriodHoursFromText(m_weatherSystemsListPeriodText, 24);
         const WeatherForecastPoint* best = nullptr;
         for (const WeatherForecastPoint& point : system.forecastTrack) {
-            if (!point.hasLocation || point.leadHours <= 0 || point.leadHours > hours)
+            if (!point.hasLocation || point.leadHours <= 0)
                 continue;
-            if (!best || point.leadHours > best->leadHours)
+            const int pointRank = WeatherSystemCategoryRank(point.category);
+            const int bestRank = best ? WeatherSystemCategoryRank(best->category) : -1;
+            if (!best || pointRank > bestRank || (pointRank == bestRank && point.leadHours > best->leadHours))
                 best = &point;
         }
         return best;
@@ -9162,7 +9250,7 @@ private:
 
             std::wstring lat = system.hasLocation ? FormatCoordinateForList(system.latitude, true) : L"";
             std::wstring lon = system.hasLocation ? FormatCoordinateForList(system.longitude, false) : L"";
-            const WeatherForecastPoint* forecast = WeatherSystemForecastForList(system);
+            const WeatherForecastPoint* forecast = WeatherSystemPeakForecastForList(system);
             std::wstring forecastLat;
             std::wstring forecastLon;
             std::wstring forecastWind;
@@ -9237,7 +9325,7 @@ private:
             FetchWeatherSystemsAsync(false);
             return;
         }
-        if (id == IDC_WEATHER_SYSTEMS_LIST_PERIOD_COMBO && code == CBN_SELCHANGE) {
+        if (id == IDC_WEATHER_SYSTEMS_LIST_FORECAST_COMBO && code == CBN_SELCHANGE) {
             ApplyWeatherSystemsListFilter(true);
             return;
         }
@@ -10102,7 +10190,9 @@ private:
     HWND m_incidentsListSeverityCombo = nullptr;
     HWND m_incidentsListView = nullptr;
     HWND m_earthquakeListMagnitudeEdit = nullptr;
+    HWND m_earthquakeListDateRadio = nullptr;
     HWND m_earthquakeListTimeEdit = nullptr;
+    HWND m_earthquakeListPeriodRadio = nullptr;
     HWND m_earthquakeListPeriodCombo = nullptr;
     HWND m_earthquakeListRegionBtn = nullptr;
     HWND m_earthquakeListClearRegionBtn = nullptr;
@@ -10111,7 +10201,7 @@ private:
     HWND m_weatherSystemsListWnd = nullptr;
     HWND m_weatherSystemNotificationsWnd = nullptr;
     HWND m_weatherSystemsListView = nullptr;
-    HWND m_weatherSystemsListPeriodCombo = nullptr;
+    HWND m_weatherSystemsListForecastCombo = nullptr;
     HWND m_weatherSystemNotificationWindEdit = nullptr;
     HWND m_weatherWarningsListWnd = nullptr;
     HWND m_weatherWarningsListView = nullptr;
@@ -10218,8 +10308,9 @@ private:
     bool m_syncSettingsFromServer = false;
     std::wstring m_earthquakeListMagnitudeText;
     std::wstring m_earthquakeListTimeText;
+    bool m_earthquakeListUseDateFilter = false;
     std::wstring m_earthquakeListPeriodText = L"24h";
-    std::wstring m_weatherSystemsListPeriodText = L"24h";
+    std::wstring m_weatherSystemsListForecastText = L"All";
     std::wstring m_weatherWarningsListPeriodText = L"24h";
     std::wstring m_floodsListPeriodText = L"24h";
     std::wstring m_earthquakeNotificationMagnitudeText = L"4.0";

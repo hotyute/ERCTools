@@ -146,15 +146,26 @@ bool TryParseDurationMinutes(const std::wstring& text, double& minutesOut)
 
 int PeriodHoursFromText(const std::wstring& text, int fallbackHours)
 {
+    if (IsAllPeriodText(text))
+        return 0;
+
     double minutes = 0.0;
     if (TryParseDurationMinutes(text, minutes) && minutes > 0.0)
         return std::max(1, static_cast<int>(std::round(minutes / 60.0)));
     return fallbackHours;
 }
 
+bool IsAllPeriodText(const std::wstring& text)
+{
+    std::wstring value = ToLower(Trim(text));
+    return value.empty() || value == L"all";
+}
+
 long long PeriodStartTimeMs(const std::wstring& text)
 {
     int hours = PeriodHoursFromText(text, 24);
+    if (hours <= 0)
+        return 0;
     std::time_t now = std::time(nullptr);
     return (static_cast<long long>(now) - static_cast<long long>(hours) * 60LL * 60LL) * 1000LL;
 }

@@ -8,6 +8,7 @@
 #include "map_overlay_ui.h"
 #include "parsing.h"
 #include "util.h"
+#include "weather_intensity.h"
 
 struct TileKey
 {
@@ -966,7 +967,6 @@ private:
     static WorldPoint GeoToWorld(double lat, double lon, int zoom)
     {
         lat = ClampValue(lat, -kMaxMercatorLat, kMaxMercatorLat);
-        lon = ClampValue(lon, -180.0, 180.0);
 
         double worldSize = 256.0 * static_cast<double>(1 << zoom);
         double x = (lon + 180.0) / 360.0 * worldSize;
@@ -1056,6 +1056,11 @@ private:
     D2D1_POINT_2F GeoToScreen(const ViewState& view, double lat, double lon) const
     {
         WorldPoint p = GeoToWorld(lat, lon, m_zoom);
+        const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
+        while (p.x - view.centerWorld.x > worldSize * 0.5)
+            p.x -= worldSize;
+        while (p.x - view.centerWorld.x < -worldSize * 0.5)
+            p.x += worldSize;
 
         float x = static_cast<float>((p.x - view.centerWorld.x) + view.width * 0.5);
         float y = static_cast<float>((p.y - view.centerWorld.y) + view.height * 0.5);
@@ -1101,8 +1106,8 @@ private:
 
     void NormalizeCenter()
     {
-        while (m_centerLon < -180.0) m_centerLon += 360.0;
-        while (m_centerLon > 180.0)  m_centerLon -= 360.0;
+        if (m_centerLon < -540.0 || m_centerLon > 540.0)
+            m_centerLon = NormalizeLongitude(m_centerLon);
         m_centerLat = ClampValue(m_centerLat, -kMaxMercatorLat, kMaxMercatorLat);
         m_zoom = ClampValue(m_zoom, kMinZoom, kMaxZoom);
     }
@@ -2099,6 +2104,17 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.05f, 0.42f, 0.84f, 0.94f), &m_floodBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.97f, 0.84f, 0.88f), &m_roadBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.11f, 0.19f, 0.24f, 0.70f), &m_roadCasingBrush);
+        if (!m_forecastErrorStrokeStyle) {
+            D2D1_STROKE_STYLE_PROPERTIES strokeProps = D2D1::StrokeStyleProperties(
+                D2D1_CAP_STYLE_FLAT,
+                D2D1_CAP_STYLE_FLAT,
+                D2D1_CAP_STYLE_ROUND,
+                D2D1_LINE_JOIN_ROUND,
+                10.0f,
+                D2D1_DASH_STYLE_DASH,
+                0.0f);
+            g_d2dFactory->CreateStrokeStyle(&strokeProps, nullptr, 0, &m_forecastErrorStrokeStyle);
+        }
 
         if (g_dwriteFactory && !m_noteTextFormat) {
             g_dwriteFactory->CreateTextFormat(
@@ -2144,6 +2160,7 @@ private:
         m_floodBrush.Reset();
         m_roadBrush.Reset();
         m_roadCasingBrush.Reset();
+        m_forecastErrorStrokeStyle.Reset();
         m_laneBitmaps.clear();
         m_noteTextFormat.Reset();
         m_overlayUi.DiscardDeviceResources();
@@ -2561,17 +2578,14 @@ private:
 
     ID2D1Brush* WeatherForecastBrush(const std::wstring& category) const
     {
-        std::wstring cat = ToLower(Trim(category));
-        if (cat.find(L"5") != std::wstring::npos || cat.find(L"4") != std::wstring::npos)
+        const int rank = WeatherSystemCategoryRank(category);
+        if (rank >= 5)
             return m_severeBrush.Get();
-        if (cat.find(L"3") != std::wstring::npos || cat.find(L"2") != std::wstring::npos)
+        if (rank >= 3)
             return m_moderateBrush.Get();
-        if (cat.find(L"1") != std::wstring::npos || cat.find(L"typhoon") != std::wstring::npos ||
-            cat.find(L"hurricane") != std::wstring::npos)
-        {
+        if (rank >= 2)
             return m_selectedBrush.Get();
-        }
-        if (cat == L"ts" || cat.find(L"storm") != std::wstring::npos)
+        if (rank == 1)
             return m_unknownBrush.Get();
         return m_weatherSystemBrush.Get();
     }
@@ -2585,6 +2599,49 @@ private:
             MaxValue(a.y, b.y) + margin);
         D2D1_RECT_F screen = D2D1::RectF(-margin, -margin, static_cast<float>(view.width) + margin, static_cast<float>(view.height) + margin);
         return RectsIntersect(segment, screen);
+    }
+
+    float NauticalMilesToScreenRadius(const ViewState& view, double lat, double lon, double nm) const
+    {
+        if (nm <= 0.0)
+            return 0.0f;
+
+        const double latDelta = nm / 60.0;
+        const double sampleLat = ClampValue(lat + latDelta, -kMaxMercatorLat, kMaxMercatorLat);
+        const D2D1_POINT_2F center = GeoToScreen(view, lat, lon);
+        D2D1_POINT_2F sample = GeoToScreen(view, sampleLat, lon);
+        double pixels = std::abs(static_cast<double>(sample.y - center.y));
+
+        if (pixels < 1.0) {
+            const double cosLat = std::max(0.15, std::cos(lat * kPi / 180.0));
+            const double lonDelta = nm / (60.0 * cosLat);
+            sample = GeoToScreen(view, lat, lon + lonDelta);
+            pixels = std::abs(static_cast<double>(sample.x - center.x));
+        }
+
+        return static_cast<float>(ClampValue(pixels, 4.0, 900.0));
+    }
+
+    void DrawForecastArrow(D2D1_POINT_2F from, D2D1_POINT_2F to, ID2D1Brush* brush)
+    {
+        if (!m_rt || !brush)
+            return;
+        const float dx = to.x - from.x;
+        const float dy = to.y - from.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 6.0f)
+            return;
+
+        const float ux = dx / len;
+        const float uy = dy / len;
+        const float px = -uy;
+        const float py = ux;
+        const float back = 13.0f;
+        const float half = 6.0f;
+        D2D1_POINT_2F left = D2D1::Point2F(to.x - ux * back + px * half, to.y - uy * back + py * half);
+        D2D1_POINT_2F right = D2D1::Point2F(to.x - ux * back - px * half, to.y - uy * back - py * half);
+        m_rt->DrawLine(to, left, brush, 2.2f);
+        m_rt->DrawLine(to, right, brush, 2.2f);
     }
 
     void DrawWeatherSystems(const ViewState& view)
@@ -2608,14 +2665,28 @@ private:
 
             D2D1_POINT_2F previous{};
             bool havePrevious = false;
+            D2D1_POINT_2F lastSegmentStart{};
+            D2D1_POINT_2F lastSegmentEnd{};
+            ID2D1Brush* lastSegmentBrush = nullptr;
+            bool haveLastSegment = false;
             for (const WeatherForecastPoint& point : system.forecastTrack) {
                 if (!point.hasLocation)
                     continue;
                 D2D1_POINT_2F forecast = GeoToScreen(view, point.latitude, point.longitude);
                 ID2D1Brush* forecastBrush = WeatherForecastBrush(point.category);
-                if (havePrevious && SegmentIntersectsView(previous, forecast, view))
+                if (havePrevious && SegmentIntersectsView(previous, forecast, view)) {
                     m_rt->DrawLine(previous, forecast, forecastBrush ? forecastBrush : m_weatherSystemBrush.Get(), 2.1f);
+                    lastSegmentStart = previous;
+                    lastSegmentEnd = forecast;
+                    lastSegmentBrush = forecastBrush ? forecastBrush : m_weatherSystemBrush.Get();
+                    haveLastSegment = true;
+                }
                 if (IsGeoPointInView(view, point.latitude, point.longitude)) {
+                    if (point.errorRadiusNm > 0.0) {
+                        const float errorRadius = NauticalMilesToScreenRadius(view, point.latitude, point.longitude, point.errorRadiusNm);
+                        if (errorRadius >= 4.0f)
+                            m_rt->DrawEllipse(D2D1::Ellipse(forecast, errorRadius, errorRadius), forecastBrush ? forecastBrush : m_weatherSystemBrush.Get(), 1.15f, m_forecastErrorStrokeStyle.Get());
+                    }
                     const float pointRadius = point.leadHours == 0 ? 5.0f : 4.0f;
                     m_rt->FillEllipse(D2D1::Ellipse(forecast, pointRadius, pointRadius), forecastBrush ? forecastBrush : m_weatherSystemBrush.Get());
                     m_rt->DrawEllipse(D2D1::Ellipse(forecast, pointRadius + 1.5f, pointRadius + 1.5f), m_borderBrush.Get(), 0.9f);
@@ -2623,6 +2694,8 @@ private:
                 previous = forecast;
                 havePrevious = true;
             }
+            if (haveLastSegment)
+                DrawForecastArrow(lastSegmentStart, lastSegmentEnd, lastSegmentBrush);
 
             if (!havePrevious && currentInView && system.hasForecastLocation && IsGeoPointInView(view, system.forecastLatitude, system.forecastLongitude)) {
                 D2D1_POINT_2F p = GeoToScreen(view, system.latitude, system.longitude);
@@ -2630,6 +2703,7 @@ private:
                 ID2D1Brush* forecastBrush = WeatherForecastBrush(system.forecastCategory);
                 m_rt->DrawLine(p, forecast, forecastBrush ? forecastBrush : m_weatherSystemBrush.Get(), 1.4f);
                 m_rt->FillEllipse(D2D1::Ellipse(forecast, 4.5f, 4.5f), forecastBrush ? forecastBrush : m_weatherSystemBrush.Get());
+                DrawForecastArrow(p, forecast, forecastBrush ? forecastBrush : m_weatherSystemBrush.Get());
             }
 
             if (!currentInView)
@@ -5234,6 +5308,7 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_floodBrush;
     ComPtr<ID2D1SolidColorBrush> m_roadBrush;
     ComPtr<ID2D1SolidColorBrush> m_roadCasingBrush;
+    ComPtr<ID2D1StrokeStyle> m_forecastErrorStrokeStyle;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
     ComPtr<ID2D1Bitmap> m_sceneBitmap;
     int m_sceneBitmapWidth = 0;

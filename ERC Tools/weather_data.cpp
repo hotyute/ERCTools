@@ -139,6 +139,107 @@ static int ParseLeadHours(const std::wstring& text)
     return 0;
 }
 
+struct ForecastImageArea
+{
+    double x = 0.0;
+    double y = 0.0;
+    double radiusPx = 0.0;
+};
+
+static std::vector<ForecastImageArea> ExtractForecastErrorImageAreas(const std::wstring& html)
+{
+    std::vector<ForecastImageArea> areas;
+    std::wregex areaRe(LR"(<\s*area\b[^>]*>)", std::regex_constants::icase);
+    std::wregex coordsRe(LR"re(coords\s*=\s*(?:"([^"]+)"|'([^']+)'|([^>\s]+)))re", std::regex_constants::icase);
+    for (std::wsregex_iterator it(html.begin(), html.end(), areaRe), end; it != end; ++it) {
+        std::wstring tag = (*it)[0].str();
+        if (ToLower(tag).find(L"forecast error") == std::wstring::npos)
+            continue;
+
+        std::wsmatch m;
+        if (!std::regex_search(tag, m, coordsRe))
+            continue;
+
+        std::wstring coords;
+        for (size_t i = 1; i < m.size(); ++i) {
+            if (m[i].matched) {
+                coords = m[i].str();
+                break;
+            }
+        }
+
+        std::vector<double> values;
+        std::wregex numberRe(LR"((-?\d+(?:\.\d+)?))");
+        for (std::wsregex_iterator nit(coords.begin(), coords.end(), numberRe), nend; nit != nend; ++nit) {
+            wchar_t* tail = nullptr;
+            double value = std::wcstod((*nit)[1].str().c_str(), &tail);
+            if (std::isfinite(value))
+                values.push_back(value);
+        }
+
+        if (values.size() >= 3)
+            areas.push_back({ values[0], values[1], values[2] });
+    }
+    return areas;
+}
+
+static double GreatCircleDistanceNm(double latA, double lonA, double latB, double lonB)
+{
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kEarthRadiusNm = 3440.065;
+    const double phi1 = latA * kPi / 180.0;
+    const double phi2 = latB * kPi / 180.0;
+    const double dPhi = (latB - latA) * kPi / 180.0;
+    const double dLambda = (lonB - lonA) * kPi / 180.0;
+    const double s1 = std::sin(dPhi * 0.5);
+    const double s2 = std::sin(dLambda * 0.5);
+    const double a = s1 * s1 + std::cos(phi1) * std::cos(phi2) * s2 * s2;
+    const double c = 2.0 * std::atan2(std::sqrt(a), std::sqrt(MaxValue(0.0, 1.0 - a)));
+    return kEarthRadiusNm * c;
+}
+
+static void ApplyForecastErrorRadii(std::vector<WeatherForecastPoint>& track, const std::wstring& html)
+{
+    if (track.empty())
+        return;
+
+    std::vector<ForecastImageArea> areas = ExtractForecastErrorImageAreas(html);
+    const size_t count = MinValue(track.size(), areas.size());
+    if (count == 0)
+        return;
+
+    std::vector<double> nmPerPixelSamples;
+    for (size_t i = 1; i < count; ++i) {
+        if (!track[i - 1].hasLocation || !track[i].hasLocation)
+            continue;
+        const double dx = areas[i].x - areas[i - 1].x;
+        const double dy = areas[i].y - areas[i - 1].y;
+        const double pixelDistance = std::sqrt(dx * dx + dy * dy);
+        if (pixelDistance < 1.0)
+            continue;
+        const double nmDistance = GreatCircleDistanceNm(
+            track[i - 1].latitude,
+            track[i - 1].longitude,
+            track[i].latitude,
+            track[i].longitude);
+        if (nmDistance > 1.0)
+            nmPerPixelSamples.push_back(nmDistance / pixelDistance);
+    }
+
+    double nmPerPixel = 1.5;
+    if (!nmPerPixelSamples.empty()) {
+        std::sort(nmPerPixelSamples.begin(), nmPerPixelSamples.end());
+        nmPerPixel = nmPerPixelSamples[nmPerPixelSamples.size() / 2];
+    }
+    nmPerPixel = ClampValue(nmPerPixel, 0.25, 12.0);
+
+    for (size_t i = 0; i < count; ++i) {
+        const double radiusNm = areas[i].radiusPx * nmPerPixel;
+        if (std::isfinite(radiusNm) && radiusNm > 0.0)
+            track[i].errorRadiusNm = radiusNm;
+    }
+}
+
 static std::wstring ExtractWeatherSystemsStatusText(const std::wstring& htmlText)
 {
     std::wstring text = StripTemplateHtmlTags(htmlText);
@@ -278,6 +379,7 @@ std::vector<WeatherForecastPoint> ParseWeatherSystemForecastTrack(const std::str
             std::abs(a.longitude - b.longitude) < 0.001;
         }), track.end());
 
+    ApplyForecastErrorRadii(track, html);
     return track;
 }
 
