@@ -200,6 +200,7 @@ constexpr int IDC_TEMPLATES_EDITOR_SAVE = 2625;
 constexpr int IDC_TEMPLATES_EDITOR_DELETE = 2626;
 constexpr int IDC_TEMPLATES_EDITOR_CLOSE = 2627;
 constexpr int IDC_TEMPLATES_EDITOR_TITLE = 2628;
+constexpr int IDC_TEMPLATES_EDITOR_WEATHER_TYPE = 2629;
 constexpr int IDC_ACCOUNT_CREATOR_USERNAME = 2641;
 constexpr int IDC_ACCOUNT_CREATOR_DISPLAY_NAME = 2642;
 constexpr int IDC_ACCOUNT_CREATOR_PASSWORD = 2643;
@@ -384,7 +385,9 @@ enum class TemplateContext
 {
     Roads,
     Earthquakes,
-    WeatherSystems
+    WeatherSystems,
+    WeatherWarnings,
+    Floods
 };
 
 enum class PolygonCaptureTarget
@@ -1703,6 +1706,8 @@ private:
         EnsureDefaultReportTemplates();
         EnsureDefaultEarthquakeReportTemplates();
         EnsureDefaultWeatherSystemReportTemplates();
+        EnsureDefaultWeatherWarningReportTemplates();
+        EnsureDefaultFloodReportTemplates();
         ModernizeReportTemplates();
         CreateMainMenu();
 
@@ -2523,6 +2528,48 @@ private:
                         m_weatherSystemReportTemplates.push_back(std::move(reportTemplate));
                 }
             }
+            auto weatherWarningTemplatesIt = settings->find("weatherWarningReportTemplates");
+            if (weatherWarningTemplatesIt != settings->end() && weatherWarningTemplatesIt->is_array()) {
+                m_weatherWarningReportTemplatesConfigured = true;
+                m_weatherWarningReportTemplates.clear();
+                for (const json& item : *weatherWarningTemplatesIt) {
+                    if (!item.is_object())
+                        continue;
+                    ReportTemplate reportTemplate;
+                    auto nameIt = item.find("name");
+                    if (nameIt != item.end())
+                        reportTemplate.name = JsonValueToText(*nameIt);
+                    auto titleIt = item.find("title");
+                    if (titleIt != item.end())
+                        reportTemplate.title = JsonValueToText(*titleIt);
+                    auto bodyIt = item.find("body");
+                    if (bodyIt != item.end())
+                        reportTemplate.body = JsonValueToText(*bodyIt);
+                    if (!reportTemplate.name.empty() || !reportTemplate.title.empty() || !reportTemplate.body.empty())
+                        m_weatherWarningReportTemplates.push_back(std::move(reportTemplate));
+                }
+            }
+            auto floodTemplatesIt = settings->find("floodReportTemplates");
+            if (floodTemplatesIt != settings->end() && floodTemplatesIt->is_array()) {
+                m_floodReportTemplatesConfigured = true;
+                m_floodReportTemplates.clear();
+                for (const json& item : *floodTemplatesIt) {
+                    if (!item.is_object())
+                        continue;
+                    ReportTemplate reportTemplate;
+                    auto nameIt = item.find("name");
+                    if (nameIt != item.end())
+                        reportTemplate.name = JsonValueToText(*nameIt);
+                    auto titleIt = item.find("title");
+                    if (titleIt != item.end())
+                        reportTemplate.title = JsonValueToText(*titleIt);
+                    auto bodyIt = item.find("body");
+                    if (bodyIt != item.end())
+                        reportTemplate.body = JsonValueToText(*bodyIt);
+                    if (!reportTemplate.name.empty() || !reportTemplate.title.empty() || !reportTemplate.body.empty())
+                        m_floodReportTemplates.push_back(std::move(reportTemplate));
+                }
+            }
 
             readBool("showEarthquakes", m_showEarthquakes);
             readBool("showEarthquakeOverlayLabels", m_showEarthquakeOverlayLabels);
@@ -2645,12 +2692,42 @@ private:
         m_weatherSystemReportTemplatesConfigured = true;
     }
 
+    void EnsureDefaultWeatherWarningReportTemplates()
+    {
+        if (!m_weatherWarningReportTemplates.empty() || m_weatherWarningReportTemplatesConfigured)
+            return;
+
+        ReportTemplate reportTemplate;
+        reportTemplate.name = L"Weather warning report";
+        reportTemplate.title = L"WEATHER WARNING - $COLOUR $TYPE - $AREA.";
+        reportTemplate.body = L"$DATE: WEATHER WARNING REPORTS: A $COLOUR $TYPE warning is in force for $AREA from $FROM to $TO. Headline: $HEADLINE. Details: $DETAIL. Coordinates: %LATITUDE, %LONGITUDE.";
+        m_weatherWarningReportTemplates.push_back(std::move(reportTemplate));
+        m_weatherWarningReportTemplatesConfigured = true;
+    }
+
+    void EnsureDefaultFloodReportTemplates()
+    {
+        if (!m_floodReportTemplates.empty() || m_floodReportTemplatesConfigured)
+            return;
+
+        ReportTemplate reportTemplate;
+        reportTemplate.name = L"Flood report";
+        reportTemplate.title = L"FLOOD - $SEVERITY - $AREA.";
+        reportTemplate.body = L"$DATE: FLOOD REPORTS: $SEVERITY for $AREA in $REGION. Source: $RIVER_OR_SEA. Message: $MESSAGE. Updated: $UPDATED. Coordinates: %LATITUDE, %LONGITUDE.";
+        m_floodReportTemplates.push_back(std::move(reportTemplate));
+        m_floodReportTemplatesConfigured = true;
+    }
+
     std::vector<ReportTemplate>& TemplatesForContext(TemplateContext context)
     {
         if (context == TemplateContext::Earthquakes)
             return m_earthquakeReportTemplates;
         if (context == TemplateContext::WeatherSystems)
             return m_weatherSystemReportTemplates;
+        if (context == TemplateContext::WeatherWarnings)
+            return m_weatherWarningReportTemplates;
+        if (context == TemplateContext::Floods)
+            return m_floodReportTemplates;
         return m_reportTemplates;
     }
 
@@ -2660,6 +2737,10 @@ private:
             return m_earthquakeReportTemplates;
         if (context == TemplateContext::WeatherSystems)
             return m_weatherSystemReportTemplates;
+        if (context == TemplateContext::WeatherWarnings)
+            return m_weatherWarningReportTemplates;
+        if (context == TemplateContext::Floods)
+            return m_floodReportTemplates;
         return m_reportTemplates;
     }
 
@@ -2669,6 +2750,10 @@ private:
             return m_earthquakeReportTemplatesConfigured;
         if (context == TemplateContext::WeatherSystems)
             return m_weatherSystemReportTemplatesConfigured;
+        if (context == TemplateContext::WeatherWarnings)
+            return m_weatherWarningReportTemplatesConfigured;
+        if (context == TemplateContext::Floods)
+            return m_floodReportTemplatesConfigured;
         return m_reportTemplatesConfigured;
     }
 
@@ -2678,6 +2763,10 @@ private:
             return L"$DATE: EARTHQUAKE REPORTS: An earthquake of magnitude $MAGNITUDE was recorded near $PLACE at $TIME. Coordinates: %LATITUDE, %LONGITUDE. Depth: %DEPTH km.";
         if (context == TemplateContext::WeatherSystems)
             return L"$DATE: WEATHER SYSTEM REPORTS: $SYSTEM is active in the $BASIN basin as a $CATEGORY with winds of $WIND. Current position: %LATITUDE, %LONGITUDE.";
+        if (context == TemplateContext::WeatherWarnings)
+            return L"$DATE: WEATHER WARNING REPORTS: A $COLOUR $TYPE warning is in force for $AREA from $FROM to $TO. Headline: $HEADLINE. Details: $DETAIL. Coordinates: %LATITUDE, %LONGITUDE.";
+        if (context == TemplateContext::Floods)
+            return L"$DATE: FLOOD REPORTS: $SEVERITY for $AREA in $REGION. Source: $RIVER_OR_SEA. Message: $MESSAGE. Updated: $UPDATED. Coordinates: %LATITUDE, %LONGITUDE.";
         return L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION %JUNCTIONS_WITH_DATA with %LANECLOSURES closed. Allow extra time for your journey.";
     }
 
@@ -2687,6 +2776,10 @@ private:
             return L"EARTHQUAKE - M$MAGNITUDE - $PLACE.";
         if (context == TemplateContext::WeatherSystems)
             return L"WEATHER SYSTEM - $SYSTEM - $CATEGORY - $BASIN.";
+        if (context == TemplateContext::WeatherWarnings)
+            return L"WEATHER WARNING - $COLOUR $TYPE - $AREA.";
+        if (context == TemplateContext::Floods)
+            return L"FLOOD - $SEVERITY - $AREA.";
         return L"UK - ENGLAND - $TITLE_SHORT - $ROAD $DIRECTION %JUNCTION_RANGE.";
     }
 
@@ -2696,6 +2789,10 @@ private:
             EnsureDefaultEarthquakeReportTemplates();
         else if (context == TemplateContext::WeatherSystems)
             EnsureDefaultWeatherSystemReportTemplates();
+        else if (context == TemplateContext::WeatherWarnings)
+            EnsureDefaultWeatherWarningReportTemplates();
+        else if (context == TemplateContext::Floods)
+            EnsureDefaultFloodReportTemplates();
         else
             EnsureDefaultReportTemplates();
     }
@@ -2717,6 +2814,14 @@ private:
         for (ReportTemplate& reportTemplate : m_weatherSystemReportTemplates) {
             if (Trim(reportTemplate.title).empty())
                 reportTemplate.title = DefaultTemplateTitleForContext(TemplateContext::WeatherSystems);
+        }
+        for (ReportTemplate& reportTemplate : m_weatherWarningReportTemplates) {
+            if (Trim(reportTemplate.title).empty())
+                reportTemplate.title = DefaultTemplateTitleForContext(TemplateContext::WeatherWarnings);
+        }
+        for (ReportTemplate& reportTemplate : m_floodReportTemplates) {
+            if (Trim(reportTemplate.title).empty())
+                reportTemplate.title = DefaultTemplateTitleForContext(TemplateContext::Floods);
         }
     }
 
@@ -2796,6 +2901,22 @@ private:
                 item["title"] = WideToUtf8(reportTemplate.title);
                 item["body"] = WideToUtf8(reportTemplate.body);
                 settings["weatherSystemReportTemplates"].push_back(std::move(item));
+            }
+            settings["weatherWarningReportTemplates"] = json::array();
+            for (const ReportTemplate& reportTemplate : m_weatherWarningReportTemplates) {
+                json item = json::object();
+                item["name"] = WideToUtf8(reportTemplate.name);
+                item["title"] = WideToUtf8(reportTemplate.title);
+                item["body"] = WideToUtf8(reportTemplate.body);
+                settings["weatherWarningReportTemplates"].push_back(std::move(item));
+            }
+            settings["floodReportTemplates"] = json::array();
+            for (const ReportTemplate& reportTemplate : m_floodReportTemplates) {
+                json item = json::object();
+                item["name"] = WideToUtf8(reportTemplate.name);
+                item["title"] = WideToUtf8(reportTemplate.title);
+                item["body"] = WideToUtf8(reportTemplate.body);
+                settings["floodReportTemplates"].push_back(std::move(item));
             }
             settings["showEarthquakes"] = m_showEarthquakes;
             settings["showEarthquakeOverlayLabels"] = m_showEarthquakeOverlayLabels;
@@ -2927,6 +3048,8 @@ private:
         EnsureDefaultReportTemplates();
         EnsureDefaultEarthquakeReportTemplates();
         EnsureDefaultWeatherSystemReportTemplates();
+        EnsureDefaultWeatherWarningReportTemplates();
+        EnsureDefaultFloodReportTemplates();
         ModernizeReportTemplates();
 
         ApplyRefreshTimer();
@@ -5870,6 +5993,36 @@ private:
         return nullptr;
     }
 
+    const WeatherWarningEvent* FindSelectedWeatherWarning() const
+    {
+        if (m_weatherWarningsListView) {
+            int selected = static_cast<int>(SendMessageW(m_weatherWarningsListView, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED));
+            if (selected >= 0 && selected < static_cast<int>(m_filteredWeatherWarnings.size()))
+                return &m_filteredWeatherWarnings[static_cast<size_t>(selected)];
+        }
+
+        if (!m_filteredWeatherWarnings.empty())
+            return &m_filteredWeatherWarnings.front();
+        if (!m_allWeatherWarnings.empty())
+            return &m_allWeatherWarnings.front();
+        return nullptr;
+    }
+
+    const FloodEvent* FindSelectedFlood() const
+    {
+        if (m_floodsListView) {
+            int selected = static_cast<int>(SendMessageW(m_floodsListView, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED));
+            if (selected >= 0 && selected < static_cast<int>(m_filteredFloods.size()))
+                return &m_filteredFloods[static_cast<size_t>(selected)];
+        }
+
+        if (!m_filteredFloods.empty())
+            return &m_filteredFloods.front();
+        if (!m_allFloods.empty())
+            return &m_allFloods.front();
+        return nullptr;
+    }
+
     static std::wstring CurrentDateText()
     {
         std::time_t now = std::time(nullptr);
@@ -6599,6 +6752,53 @@ private:
         return variables;
     }
 
+    std::vector<std::pair<std::wstring, std::wstring>> BuildWeatherWarningTemplateVariables(const WeatherWarningEvent& warning) const
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> variables;
+        wchar_t latitude[48]{};
+        wchar_t longitude[48]{};
+        if (warning.hasLocation) {
+            swprintf_s(latitude, L"%.5f", warning.latitude);
+            swprintf_s(longitude, L"%.5f", warning.longitude);
+        }
+
+        SetTemplateVariable(variables, L"$DATE", CurrentDateText());
+        SetTemplateVariable(variables, L"$COLOUR", warning.colour.empty() ? L"Weather" : warning.colour);
+        SetTemplateVariable(variables, L"$TYPE", warning.type.empty() ? L"warning" : warning.type);
+        SetTemplateVariable(variables, L"$AREA", warning.area.empty() ? L"affected area" : warning.area);
+        SetTemplateVariable(variables, L"$FROM", warning.validFrom.empty() ? L"unknown" : warning.validFrom);
+        SetTemplateVariable(variables, L"$TO", warning.validTo.empty() ? L"unknown" : warning.validTo);
+        SetTemplateVariable(variables, L"$ISSUED", warning.issuedText);
+        SetTemplateVariable(variables, L"$HEADLINE", warning.headline);
+        SetTemplateVariable(variables, L"$DETAIL", CompactTemplateWhitespace(warning.detail));
+        SetTemplateVariable(variables, L"%LATITUDE", latitude);
+        SetTemplateVariable(variables, L"%LONGITUDE", longitude);
+        return variables;
+    }
+
+    std::vector<std::pair<std::wstring, std::wstring>> BuildFloodTemplateVariables(const FloodEvent& flood) const
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> variables;
+        wchar_t latitude[48]{};
+        wchar_t longitude[48]{};
+        if (flood.hasLocation) {
+            swprintf_s(latitude, L"%.5f", flood.latitude);
+            swprintf_s(longitude, L"%.5f", flood.longitude);
+        }
+
+        SetTemplateVariable(variables, L"$DATE", CurrentDateText());
+        SetTemplateVariable(variables, L"$SEVERITY", flood.severity.empty() ? L"Flood alert" : flood.severity);
+        SetTemplateVariable(variables, L"$AREA", flood.area.empty() ? L"affected area" : flood.area);
+        SetTemplateVariable(variables, L"$REGION", flood.region);
+        SetTemplateVariable(variables, L"$RIVER_OR_SEA", flood.riverOrSea);
+        SetTemplateVariable(variables, L"$MESSAGE", CompactTemplateWhitespace(flood.message));
+        SetTemplateVariable(variables, L"$RAISED", flood.timeRaised);
+        SetTemplateVariable(variables, L"$UPDATED", flood.timeChanged);
+        SetTemplateVariable(variables, L"%LATITUDE", latitude);
+        SetTemplateVariable(variables, L"%LONGITUDE", longitude);
+        return variables;
+    }
+
     std::wstring FormatTemplateVariablesForEdit() const
     {
         std::wstring text;
@@ -6807,9 +7007,108 @@ private:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
+    void ClearTemplateWizardSourceIds()
+    {
+        m_templateWizardAlertId.clear();
+        m_templateWizardEarthquakeId.clear();
+        m_templateWizardWeatherSystemId.clear();
+        m_templateWizardWeatherWarningId.clear();
+        m_templateWizardFloodId.clear();
+    }
+
+    bool TemplateWizardWeatherKindStep() const
+    {
+        return m_templateWizardWeatherChooser && m_templateWizardStep == 0;
+    }
+
+    size_t TemplateWizardTemplateChoiceStepIndex() const
+    {
+        return m_templateWizardWeatherChooser ? 1 : 0;
+    }
+
+    size_t TemplateWizardVariablesStepIndex() const
+    {
+        return m_templateWizardWeatherChooser ? 2 : 1;
+    }
+
+    size_t TemplateWizardReviewStepIndex() const
+    {
+        return m_templateWizardWeatherChooser ? 3 : 2;
+    }
+
+    bool TemplateWizardTemplateChoiceStep() const
+    {
+        return m_templateWizardStep == TemplateWizardTemplateChoiceStepIndex();
+    }
+
+    bool TemplateWizardVariablesStep() const
+    {
+        return m_templateWizardStep == TemplateWizardVariablesStepIndex();
+    }
+
+    bool TemplateWizardReviewStep() const
+    {
+        return m_templateWizardStep == TemplateWizardReviewStepIndex();
+    }
+
+    static TemplateContext WeatherTemplateContextFromIndex(int index)
+    {
+        if (index == 1)
+            return TemplateContext::WeatherWarnings;
+        if (index == 2)
+            return TemplateContext::Floods;
+        return TemplateContext::WeatherSystems;
+    }
+
+    bool PrepareWeatherTemplateWizardForContext(TemplateContext context)
+    {
+        m_templateWizardContext = context;
+        EnsureDefaultTemplatesForContext(context);
+        if (TemplatesForContext(context).empty()) {
+            MessageBoxW(m_hwnd, L"No templates are configured. Open Weather > Edit Templates to add one.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+            return false;
+        }
+
+        ClearTemplateWizardSourceIds();
+        if (context == TemplateContext::WeatherSystems) {
+            const WeatherSystemEvent* system = FindSelectedWeatherSystem();
+            if (!system) {
+                MessageBoxW(m_hwnd, L"Select a weather system in the Weather Systems List first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+                return false;
+            }
+            m_templateWizardWeatherSystemId = WeatherSystemStableKey(*system);
+            m_templateWizardVariables = BuildWeatherSystemTemplateVariables(*system);
+        }
+        else if (context == TemplateContext::WeatherWarnings) {
+            const WeatherWarningEvent* warning = FindSelectedWeatherWarning();
+            if (!warning) {
+                MessageBoxW(m_hwnd, L"Select a weather warning in the Weather Warnings list first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+                return false;
+            }
+            m_templateWizardWeatherWarningId = WeatherWarningStableKey(*warning);
+            m_templateWizardVariables = BuildWeatherWarningTemplateVariables(*warning);
+        }
+        else if (context == TemplateContext::Floods) {
+            const FloodEvent* flood = FindSelectedFlood();
+            if (!flood) {
+                MessageBoxW(m_hwnd, L"Select a flood in the Floods list first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+                return false;
+            }
+            m_templateWizardFloodId = FloodStableKey(*flood);
+            m_templateWizardVariables = BuildFloodTemplateVariables(*flood);
+        }
+        else {
+            return false;
+        }
+
+        m_templateWizardTemplateIndex = 0;
+        return true;
+    }
+
     void ShowTemplatesWizardWindow()
     {
         m_templateWizardContext = TemplateContext::Roads;
+        m_templateWizardWeatherChooser = false;
         EnsureDefaultTemplatesForContext(m_templateWizardContext);
         const auto& templates = TemplatesForContext(m_templateWizardContext);
         if (templates.empty()) {
@@ -6826,6 +7125,8 @@ private:
         m_templateWizardAlertId = alert->id;
         m_templateWizardEarthquakeId.clear();
         m_templateWizardWeatherSystemId.clear();
+        m_templateWizardWeatherWarningId.clear();
+        m_templateWizardFloodId.clear();
         m_templateWizardStep = 0;
         m_templateWizardTemplateIndex = 0;
         m_templateWizardVariables = BuildTemplateVariables(*alert);
@@ -6836,6 +7137,7 @@ private:
     void ShowEarthquakeTemplatesWizardWindow()
     {
         m_templateWizardContext = TemplateContext::Earthquakes;
+        m_templateWizardWeatherChooser = false;
         EnsureDefaultTemplatesForContext(m_templateWizardContext);
         const auto& templates = TemplatesForContext(m_templateWizardContext);
         if (templates.empty()) {
@@ -6852,6 +7154,8 @@ private:
         m_templateWizardAlertId.clear();
         m_templateWizardEarthquakeId = EarthquakeStableKey(*event);
         m_templateWizardWeatherSystemId.clear();
+        m_templateWizardWeatherWarningId.clear();
+        m_templateWizardFloodId.clear();
         m_templateWizardStep = 0;
         m_templateWizardTemplateIndex = 0;
         m_templateWizardVariables = BuildEarthquakeTemplateVariables(*event);
@@ -6862,27 +7166,13 @@ private:
     void ShowWeatherSystemsTemplatesWizardWindow()
     {
         m_templateWizardContext = TemplateContext::WeatherSystems;
-        EnsureDefaultTemplatesForContext(m_templateWizardContext);
-        const auto& templates = TemplatesForContext(m_templateWizardContext);
-        if (templates.empty()) {
-            MessageBoxW(m_hwnd, L"No templates are configured. Open Weather > Edit Templates to add one.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
-            return;
-        }
-
-        const WeatherSystemEvent* system = FindSelectedWeatherSystem();
-        if (!system) {
-            MessageBoxW(m_hwnd, L"Select a weather system in the Weather Systems List first, then open the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
-            return;
-        }
-
-        m_templateWizardAlertId.clear();
-        m_templateWizardEarthquakeId.clear();
-        m_templateWizardWeatherSystemId = WeatherSystemStableKey(*system);
+        m_templateWizardWeatherChooser = true;
+        ClearTemplateWizardSourceIds();
         m_templateWizardStep = 0;
         m_templateWizardTemplateIndex = 0;
-        m_templateWizardVariables = BuildWeatherSystemTemplateVariables(*system);
+        m_templateWizardVariables.clear();
 
-        ShowTemplatesWizardWindowShell(L"Weather System Templates Wizard");
+        ShowTemplatesWizardWindowShell(L"Weather Templates Wizard");
     }
 
     void ShowTemplatesWizardWindowShell(const wchar_t* title)
@@ -6909,7 +7199,7 @@ private:
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 820,
-                460,
+                560,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -6930,23 +7220,24 @@ private:
     {
         CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_TITLE, L"Templates Wizard", 18, 18, m_headerFont);
         m_templateWizardDesc = CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_DESC, L"", 18, 54, nullptr, 700);
-        m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 92, 684, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
-        m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 92, 684, 220, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
+        m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
+        m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
         m_templateWizardTitlePreviewLabel = CreateAutoLabel(parent, 0, L"Title", 18, 92);
         m_templateWizardTitlePreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY, 18, 118, 684, 26, parent, ControlId(IDC_TEMPLATES_WIZARD_TITLE_PREVIEW), m_hInst, nullptr);
         m_templateWizardBodyPreviewLabel = CreateAutoLabel(parent, 0, L"Template", 18, 158);
         m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 184, 684, 128, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
-        m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 122, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
-        m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 232, 344, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
-        m_templateWizardCopyTitleBtn = CreateWindowExW(0, L"BUTTON", L"Copy Title", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 342, 344, 104, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_TITLE), m_hInst, nullptr);
-        m_templateWizardCopyBtn = CreateWindowExW(0, L"BUTTON", L"Copy Template", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 454, 344, 124, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY), m_hInst, nullptr);
-        m_templateWizardCopyLocationBtn = CreateWindowExW(0, L"BUTTON", L"Copy Coords", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 586, 344, 118, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_LOCATION), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 712, 344, 68, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_CLOSE), m_hInst, nullptr);
+        m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 122, 432, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
+        m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 232, 432, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
+        m_templateWizardCopyTitleBtn = CreateWindowExW(0, L"BUTTON", L"Copy Title", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 342, 432, 104, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_TITLE), m_hInst, nullptr);
+        m_templateWizardCopyBtn = CreateWindowExW(0, L"BUTTON", L"Copy Template", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 454, 432, 124, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY), m_hInst, nullptr);
+        m_templateWizardCopyLocationBtn = CreateWindowExW(0, L"BUTTON", L"Copy Coords", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 586, 432, 118, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_LOCATION), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 712, 432, 68, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_CLOSE), m_hInst, nullptr);
 
         for (HWND h : { m_templateWizardDesc, m_templateWizardList, m_templateWizardVariablesEdit, m_templateWizardTitlePreviewLabel, m_templateWizardTitlePreviewEdit, m_templateWizardBodyPreviewLabel, m_templateWizardPreviewEdit, m_templateWizardPrevBtn, m_templateWizardNextBtn, m_templateWizardCopyTitleBtn, m_templateWizardCopyBtn, m_templateWizardCopyLocationBtn, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
+        EnableNativeSpellCheck(m_templateWizardVariablesEdit);
 
         PopulateTemplatesWizardList();
         RenderTemplatesWizardStep();
@@ -6957,8 +7248,16 @@ private:
     {
         if (!m_templateWizardList)
             return;
-        const auto& templates = TemplatesForContext(m_templateWizardContext);
         SendMessageW(m_templateWizardList, LB_RESETCONTENT, 0, 0);
+        if (TemplateWizardWeatherKindStep()) {
+            SendMessageW(m_templateWizardList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Weather Systems"));
+            SendMessageW(m_templateWizardList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Weather Warnings"));
+            SendMessageW(m_templateWizardList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Floods"));
+            SendMessageW(m_templateWizardList, LB_SETCURSEL, 0, 0);
+            return;
+        }
+
+        const auto& templates = TemplatesForContext(m_templateWizardContext);
         for (const ReportTemplate& reportTemplate : templates)
             SendMessageW(m_templateWizardList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(reportTemplate.name.c_str()));
         if (!templates.empty()) {
@@ -6967,16 +7266,44 @@ private:
         }
     }
 
+    void RefreshTemplatesWizardPreview()
+    {
+        const auto& templates = TemplatesForContext(m_templateWizardContext);
+        if (templates.empty())
+            return;
+
+        m_templateWizardTemplateIndex = MinValue<size_t>(m_templateWizardTemplateIndex, templates.size() - 1);
+        SetWindowTextSafe(m_templateWizardTitlePreviewEdit, RenderReportTemplateTitle(templates[m_templateWizardTemplateIndex]));
+        SetWindowTextSafe(m_templateWizardPreviewEdit, RenderReportTemplate(templates[m_templateWizardTemplateIndex]));
+    }
+
     void RenderTemplatesWizardStep()
     {
         if (!m_templatesWizardWnd)
             return;
 
-        const bool chooseStep = m_templateWizardStep == 0;
-        const bool variableStep = m_templateWizardStep == 1;
-        const bool reviewStep = m_templateWizardStep == 2;
-        ShowWindow(m_templateWizardList, chooseStep ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardVariablesEdit, variableStep ? SW_SHOW : SW_HIDE);
+        const bool weatherKindStep = TemplateWizardWeatherKindStep();
+        const bool chooseStep = TemplateWizardTemplateChoiceStep();
+        const bool variableStep = TemplateWizardVariablesStep();
+        const bool reviewStep = TemplateWizardReviewStep();
+        MoveWindow(m_templateWizardList, 18, 92, 684, 300, TRUE);
+        if (reviewStep) {
+            MoveWindow(m_templateWizardVariablesEdit, 18, 92, 684, 100, TRUE);
+            MoveWindow(m_templateWizardTitlePreviewLabel, 18, 206, 160, 22, TRUE);
+            MoveWindow(m_templateWizardTitlePreviewEdit, 18, 232, 684, 26, TRUE);
+            MoveWindow(m_templateWizardBodyPreviewLabel, 18, 274, 160, 22, TRUE);
+            MoveWindow(m_templateWizardPreviewEdit, 18, 300, 684, 92, TRUE);
+        }
+        else {
+            MoveWindow(m_templateWizardVariablesEdit, 18, 92, 684, 300, TRUE);
+            MoveWindow(m_templateWizardTitlePreviewLabel, 18, 92, 160, 22, TRUE);
+            MoveWindow(m_templateWizardTitlePreviewEdit, 18, 118, 684, 26, TRUE);
+            MoveWindow(m_templateWizardBodyPreviewLabel, 18, 158, 160, 22, TRUE);
+            MoveWindow(m_templateWizardPreviewEdit, 18, 184, 684, 128, TRUE);
+        }
+
+        ShowWindow(m_templateWizardList, (weatherKindStep || chooseStep) ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardVariablesEdit, (variableStep || reviewStep) ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardTitlePreviewLabel, reviewStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardTitlePreviewEdit, reviewStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardBodyPreviewLabel, reviewStep ? SW_SHOW : SW_HIDE);
@@ -6988,24 +7315,27 @@ private:
         EnableWindow(m_templateWizardPrevBtn, m_templateWizardStep > 0);
         SetWindowTextSafe(m_templateWizardNextBtn, L"Next");
 
-        if (chooseStep) {
+        if (weatherKindStep) {
+            SetWindowTextSafe(m_templateWizardDesc, L"Choose which weather product this template should cover.");
+        }
+        else if (chooseStep) {
             const wchar_t* description = L"Choose the report template to use for the selected incident.";
             if (m_templateWizardContext == TemplateContext::Earthquakes)
                 description = L"Choose the report template to use for the selected earthquake.";
             else if (m_templateWizardContext == TemplateContext::WeatherSystems)
                 description = L"Choose the report template to use for the selected weather system.";
+            else if (m_templateWizardContext == TemplateContext::WeatherWarnings)
+                description = L"Choose the report template to use for the selected weather warning.";
+            else if (m_templateWizardContext == TemplateContext::Floods)
+                description = L"Choose the report template to use for the selected flood.";
             SetWindowTextSafe(m_templateWizardDesc, description);
         }
         else if (variableStep)
-            SetWindowTextSafe(m_templateWizardDesc, L"Review the generated variables. They are locked here so the final report remains traceable to the selected event.");
+            SetWindowTextSafe(m_templateWizardDesc, L"Review the generated variables. Editable values use spell check and can also be fine-tuned on the final page.");
         else {
-            SetWindowTextSafe(m_templateWizardDesc, L"Review the completed title and template, then copy whichever section you need.");
-            const auto& templates = TemplatesForContext(m_templateWizardContext);
-            if (!templates.empty()) {
-                m_templateWizardTemplateIndex = MinValue<size_t>(m_templateWizardTemplateIndex, templates.size() - 1);
-                SetWindowTextSafe(m_templateWizardTitlePreviewEdit, RenderReportTemplateTitle(templates[m_templateWizardTemplateIndex]));
-                SetWindowTextSafe(m_templateWizardPreviewEdit, RenderReportTemplate(templates[m_templateWizardTemplateIndex]));
-            }
+            SetWindowTextSafe(m_templateWizardDesc, L"Fine-tune the variable values. The completed title and template update as you type.");
+            LoadTemplateVariablesFromEdit();
+            RefreshTemplatesWizardPreview();
         }
 
         AutoFitWindowToChildren(m_templatesWizardWnd);
@@ -7017,7 +7347,14 @@ private:
             ShowWindow(m_templatesWizardWnd, SW_HIDE);
             return;
         }
+        if (id == IDC_TEMPLATES_WIZARD_VARIABLES && code == EN_CHANGE && TemplateWizardReviewStep()) {
+            LoadTemplateVariablesFromEdit();
+            RefreshTemplatesWizardPreview();
+            return;
+        }
         if (id == IDC_TEMPLATES_WIZARD_LIST && code == LBN_SELCHANGE) {
+            if (TemplateWizardWeatherKindStep())
+                return;
             int selected = static_cast<int>(SendMessageW(m_templateWizardList, LB_GETCURSEL, 0, 0));
             const auto& templates = TemplatesForContext(m_templateWizardContext);
             if (selected >= 0 && selected < static_cast<int>(templates.size()))
@@ -7025,22 +7362,35 @@ private:
             return;
         }
         if (id == IDC_TEMPLATES_WIZARD_PREV && code == BN_CLICKED) {
-            if (m_templateWizardStep > 0)
+            if (m_templateWizardStep > 0) {
                 --m_templateWizardStep;
+                PopulateTemplatesWizardList();
+            }
             RenderTemplatesWizardStep();
             return;
         }
         if (id == IDC_TEMPLATES_WIZARD_NEXT && code == BN_CLICKED) {
-            if (m_templateWizardStep == 0) {
+            if (TemplateWizardWeatherKindStep()) {
+                int selected = static_cast<int>(SendMessageW(m_templateWizardList, LB_GETCURSEL, 0, 0));
+                if (selected < 0)
+                    selected = 0;
+                if (!PrepareWeatherTemplateWizardForContext(WeatherTemplateContextFromIndex(selected)))
+                    return;
+                m_templateWizardStep = TemplateWizardTemplateChoiceStepIndex();
+                PopulateTemplatesWizardList();
+                SetWindowTextSafe(m_templateWizardVariablesEdit, FormatTemplateVariablesForEdit());
+            }
+            else if (TemplateWizardTemplateChoiceStep()) {
                 int selected = static_cast<int>(SendMessageW(m_templateWizardList, LB_GETCURSEL, 0, 0));
                 const auto& templates = TemplatesForContext(m_templateWizardContext);
                 if (selected >= 0 && selected < static_cast<int>(templates.size()))
                     m_templateWizardTemplateIndex = static_cast<size_t>(selected);
                 SetWindowTextSafe(m_templateWizardVariablesEdit, FormatTemplateVariablesForEdit());
-                m_templateWizardStep = 1;
+                m_templateWizardStep = TemplateWizardVariablesStepIndex();
             }
-            else if (m_templateWizardStep == 1) {
-                m_templateWizardStep = 2;
+            else if (TemplateWizardVariablesStep()) {
+                LoadTemplateVariablesFromEdit();
+                m_templateWizardStep = TemplateWizardReviewStepIndex();
             }
             else {
                 ShowWindow(m_templatesWizardWnd, SW_HIDE);
@@ -7049,6 +7399,8 @@ private:
             return;
         }
         if (id == IDC_TEMPLATES_WIZARD_COPY && code == BN_CLICKED) {
+            LoadTemplateVariablesFromEdit();
+            RefreshTemplatesWizardPreview();
             std::wstring text = GetWindowTextString(m_templateWizardPreviewEdit);
             if (CopyTextToClipboard(text, m_templatesWizardWnd))
                 SetStatusText(L"Template message copied to clipboard.");
@@ -7057,6 +7409,8 @@ private:
             return;
         }
         if (id == IDC_TEMPLATES_WIZARD_COPY_TITLE && code == BN_CLICKED) {
+            LoadTemplateVariablesFromEdit();
+            RefreshTemplatesWizardPreview();
             std::wstring text = GetWindowTextString(m_templateWizardTitlePreviewEdit);
             if (CopyTextToClipboard(text, m_templatesWizardWnd))
                 SetStatusText(L"Template title copied to clipboard.");
@@ -7065,6 +7419,7 @@ private:
             return;
         }
         if (id == IDC_TEMPLATES_WIZARD_COPY_LOCATION && code == BN_CLICKED) {
+            LoadTemplateVariablesFromEdit();
             std::wstring latitude = TemplateVariableValue(L"%LATITUDE");
             std::wstring longitude = TemplateVariableValue(L"%LONGITUDE");
             std::wstring coords;
@@ -7119,6 +7474,7 @@ private:
     void ShowTemplatesEditorWindow()
     {
         m_templateEditorContext = TemplateContext::Roads;
+        m_templateEditorWeatherMode = false;
         EnsureDefaultTemplatesForContext(m_templateEditorContext);
         ShowTemplatesEditorWindowShell(L"Edit Road Templates");
     }
@@ -7126,6 +7482,7 @@ private:
     void ShowEarthquakeTemplatesEditorWindow()
     {
         m_templateEditorContext = TemplateContext::Earthquakes;
+        m_templateEditorWeatherMode = false;
         EnsureDefaultTemplatesForContext(m_templateEditorContext);
         ShowTemplatesEditorWindowShell(L"Edit Earthquake Templates");
     }
@@ -7133,8 +7490,11 @@ private:
     void ShowWeatherSystemsTemplatesEditorWindow()
     {
         m_templateEditorContext = TemplateContext::WeatherSystems;
-        EnsureDefaultTemplatesForContext(m_templateEditorContext);
-        ShowTemplatesEditorWindowShell(L"Edit Weather System Templates");
+        m_templateEditorWeatherMode = true;
+        EnsureDefaultWeatherSystemReportTemplates();
+        EnsureDefaultWeatherWarningReportTemplates();
+        EnsureDefaultFloodReportTemplates();
+        ShowTemplatesEditorWindowShell(L"Edit Weather Templates");
     }
 
     void ShowTemplatesEditorWindowShell(const wchar_t* title)
@@ -7171,6 +7531,7 @@ private:
             SetWindowTextSafe(m_templatesEditorWnd, title);
         }
 
+        SyncTemplateEditorWeatherControls();
         SyncTemplatesEditorList();
         ShowWindow(m_templatesEditorWnd, SW_SHOW);
         SetForegroundWindow(m_templatesEditorWnd);
@@ -7179,6 +7540,11 @@ private:
     void CreateTemplatesEditorControls(HWND parent)
     {
         CreateAutoLabel(parent, 0, L"Edit Templates", 18, 18, m_headerFont);
+        m_templateEditorWeatherTypeLabel = CreateAutoLabel(parent, 0, L"Weather type", 422, 24);
+        m_templateEditorWeatherTypeCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 526, 20, 176, 120, parent, ControlId(IDC_TEMPLATES_EDITOR_WEATHER_TYPE), m_hInst, nullptr);
+        SendMessageW(m_templateEditorWeatherTypeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Weather Systems"));
+        SendMessageW(m_templateEditorWeatherTypeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Weather Warnings"));
+        SendMessageW(m_templateEditorWeatherTypeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Floods"));
         m_templateEditorList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 64, 214, 340, parent, ControlId(IDC_TEMPLATES_EDITOR_LIST), m_hInst, nullptr);
         CreateAutoLabel(parent, 0, L"Name", 252, 64);
         m_templateEditorNameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 252, 90, 450, 26, parent, ControlId(IDC_TEMPLATES_EDITOR_NAME), m_hInst, nullptr);
@@ -7191,7 +7557,7 @@ private:
         HWND deleteBtn = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 348, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_DELETE), m_hInst, nullptr);
         HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 614, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_CLOSE), m_hInst, nullptr);
 
-        for (HWND h : { m_templateEditorList, m_templateEditorNameEdit, m_templateEditorTitleEdit, m_templateEditorBodyEdit, newBtn, saveBtn, deleteBtn, closeBtn }) {
+        for (HWND h : { m_templateEditorWeatherTypeLabel, m_templateEditorWeatherTypeCombo, m_templateEditorList, m_templateEditorNameEdit, m_templateEditorTitleEdit, m_templateEditorBodyEdit, newBtn, saveBtn, deleteBtn, closeBtn }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -7199,8 +7565,27 @@ private:
         EnableNativeSpellCheck(m_templateEditorTitleEdit);
         EnableNativeSpellCheck(m_templateEditorBodyEdit);
 
+        SyncTemplateEditorWeatherControls();
         SyncTemplatesEditorList();
         AutoFitWindowToChildren(parent);
+    }
+
+    void SyncTemplateEditorWeatherControls()
+    {
+        if (!m_templateEditorWeatherTypeCombo)
+            return;
+
+        ShowWindow(m_templateEditorWeatherTypeLabel, m_templateEditorWeatherMode ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateEditorWeatherTypeCombo, m_templateEditorWeatherMode ? SW_SHOW : SW_HIDE);
+        if (!m_templateEditorWeatherMode)
+            return;
+
+        int selected = 0;
+        if (m_templateEditorContext == TemplateContext::WeatherWarnings)
+            selected = 1;
+        else if (m_templateEditorContext == TemplateContext::Floods)
+            selected = 2;
+        SendMessageW(m_templateEditorWeatherTypeCombo, CB_SETCURSEL, static_cast<WPARAM>(selected), 0);
     }
 
     int SelectedTemplateEditorIndex() const
@@ -7255,6 +7640,13 @@ private:
         }
         if (id == IDC_TEMPLATES_EDITOR_LIST && code == LBN_SELCHANGE) {
             LoadSelectedTemplateIntoEditor();
+            return;
+        }
+        if (id == IDC_TEMPLATES_EDITOR_WEATHER_TYPE && code == CBN_SELCHANGE) {
+            int selected = static_cast<int>(SendMessageW(m_templateEditorWeatherTypeCombo, CB_GETCURSEL, 0, 0));
+            m_templateEditorContext = WeatherTemplateContextFromIndex(selected);
+            EnsureDefaultTemplatesForContext(m_templateEditorContext);
+            SyncTemplatesEditorList();
             return;
         }
         if (code != BN_CLICKED)
@@ -10221,6 +10613,8 @@ private:
     HWND m_templateWizardCopyTitleBtn = nullptr;
     HWND m_templateWizardCopyBtn = nullptr;
     HWND m_templateWizardCopyLocationBtn = nullptr;
+    HWND m_templateEditorWeatherTypeLabel = nullptr;
+    HWND m_templateEditorWeatherTypeCombo = nullptr;
     HWND m_templateEditorList = nullptr;
     HWND m_templateEditorNameEdit = nullptr;
     HWND m_templateEditorTitleEdit = nullptr;
@@ -10247,6 +10641,8 @@ private:
     std::vector<ReportTemplate> m_reportTemplates;
     std::vector<ReportTemplate> m_earthquakeReportTemplates;
     std::vector<ReportTemplate> m_weatherSystemReportTemplates;
+    std::vector<ReportTemplate> m_weatherWarningReportTemplates;
+    std::vector<ReportTemplate> m_floodReportTemplates;
     std::vector<std::pair<std::wstring, std::wstring>> m_templateWizardVariables;
     std::vector<EarthquakeEvent> m_allEarthquakes;
     std::vector<EarthquakeEvent> m_filteredEarthquakes;
@@ -10262,10 +10658,14 @@ private:
     std::wstring m_templateWizardAlertId;
     std::wstring m_templateWizardEarthquakeId;
     std::wstring m_templateWizardWeatherSystemId;
+    std::wstring m_templateWizardWeatherWarningId;
+    std::wstring m_templateWizardFloodId;
     size_t m_templateWizardStep = 0;
     size_t m_templateWizardTemplateIndex = 0;
     TemplateContext m_templateWizardContext = TemplateContext::Roads;
     TemplateContext m_templateEditorContext = TemplateContext::Roads;
+    bool m_templateWizardWeatherChooser = false;
+    bool m_templateEditorWeatherMode = false;
     bool m_programmaticSelection = false;
     bool m_syncingControls = false;
     bool m_isSidePanelVisible = true;
@@ -10339,6 +10739,8 @@ private:
     bool m_reportTemplatesConfigured = false;
     bool m_earthquakeReportTemplatesConfigured = false;
     bool m_weatherSystemReportTemplatesConfigured = false;
+    bool m_weatherWarningReportTemplatesConfigured = false;
+    bool m_floodReportTemplatesConfigured = false;
     std::unordered_map<std::wstring, IncidentNotificationState> m_notifiedIncidentStates;
     std::unordered_map<std::wstring, EarthquakeNotificationState> m_notifiedEarthquakeStates;
     std::unordered_map<std::wstring, WeatherSystemNotificationState> m_notifiedWeatherSystemStates;

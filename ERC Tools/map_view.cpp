@@ -2099,6 +2099,7 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.88f, 0.42f, 0.02f, 0.95f), &m_draftStrokeBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.10f, 0.16f, 0.86f), &m_earthquakeBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.02f, 0.48f, 0.64f, 0.92f), &m_weatherSystemBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.88f, 0.92f, 0.92f, 0.78f), &m_forecastRingBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.98f, 0.80f, 0.10f, 0.96f), &m_weatherWarningBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.98f, 0.80f, 0.10f, 0.18f), &m_weatherWarningFillBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.05f, 0.42f, 0.84f, 0.94f), &m_floodBrush);
@@ -2155,6 +2156,7 @@ private:
         m_draftStrokeBrush.Reset();
         m_earthquakeBrush.Reset();
         m_weatherSystemBrush.Reset();
+        m_forecastRingBrush.Reset();
         m_weatherWarningBrush.Reset();
         m_weatherWarningFillBrush.Reset();
         m_floodBrush.Reset();
@@ -2685,7 +2687,7 @@ private:
                     if (point.errorRadiusNm > 0.0) {
                         const float errorRadius = NauticalMilesToScreenRadius(view, point.latitude, point.longitude, point.errorRadiusNm);
                         if (errorRadius >= 4.0f)
-                            m_rt->DrawEllipse(D2D1::Ellipse(forecast, errorRadius, errorRadius), forecastBrush ? forecastBrush : m_weatherSystemBrush.Get(), 1.15f, m_forecastErrorStrokeStyle.Get());
+                            m_rt->DrawEllipse(D2D1::Ellipse(forecast, errorRadius, errorRadius), m_forecastRingBrush ? m_forecastRingBrush.Get() : m_borderBrush.Get(), 1.15f, m_forecastErrorStrokeStyle.Get());
                     }
                     const float pointRadius = point.leadHours == 0 ? 5.0f : 4.0f;
                     m_rt->FillEllipse(D2D1::Ellipse(forecast, pointRadius, pointRadius), forecastBrush ? forecastBrush : m_weatherSystemBrush.Get());
@@ -5303,6 +5305,7 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_draftStrokeBrush;
     ComPtr<ID2D1SolidColorBrush> m_earthquakeBrush;
     ComPtr<ID2D1SolidColorBrush> m_weatherSystemBrush;
+    ComPtr<ID2D1SolidColorBrush> m_forecastRingBrush;
     ComPtr<ID2D1SolidColorBrush> m_weatherWarningBrush;
     ComPtr<ID2D1SolidColorBrush> m_weatherWarningFillBrush;
     ComPtr<ID2D1SolidColorBrush> m_floodBrush;
