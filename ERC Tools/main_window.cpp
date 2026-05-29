@@ -7221,11 +7221,11 @@ private:
         CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_TITLE, L"Templates Wizard", 18, 18, m_headerFont);
         m_templateWizardDesc = CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_DESC, L"", 18, 54, nullptr, 700);
         m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
-        m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
+        m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
         m_templateWizardTitlePreviewLabel = CreateAutoLabel(parent, 0, L"Title", 18, 92);
-        m_templateWizardTitlePreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY, 18, 118, 684, 26, parent, ControlId(IDC_TEMPLATES_WIZARD_TITLE_PREVIEW), m_hInst, nullptr);
+        m_templateWizardTitlePreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 118, 684, 26, parent, ControlId(IDC_TEMPLATES_WIZARD_TITLE_PREVIEW), m_hInst, nullptr);
         m_templateWizardBodyPreviewLabel = CreateAutoLabel(parent, 0, L"Template", 18, 158);
-        m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 184, 684, 128, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
+        m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 18, 184, 684, 208, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
         m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 122, 432, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
         m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 232, 432, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
         m_templateWizardCopyTitleBtn = CreateWindowExW(0, L"BUTTON", L"Copy Title", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 342, 432, 104, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_TITLE), m_hInst, nullptr);
@@ -7237,7 +7237,8 @@ private:
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
-        EnableNativeSpellCheck(m_templateWizardVariablesEdit);
+        EnableNativeSpellCheck(m_templateWizardTitlePreviewEdit);
+        EnableNativeSpellCheck(m_templateWizardPreviewEdit);
 
         PopulateTemplatesWizardList();
         RenderTemplatesWizardStep();
@@ -7288,11 +7289,10 @@ private:
         const bool reviewStep = TemplateWizardReviewStep();
         MoveWindow(m_templateWizardList, 18, 92, 684, 300, TRUE);
         if (reviewStep) {
-            MoveWindow(m_templateWizardVariablesEdit, 18, 92, 684, 100, TRUE);
-            MoveWindow(m_templateWizardTitlePreviewLabel, 18, 206, 160, 22, TRUE);
-            MoveWindow(m_templateWizardTitlePreviewEdit, 18, 232, 684, 26, TRUE);
-            MoveWindow(m_templateWizardBodyPreviewLabel, 18, 274, 160, 22, TRUE);
-            MoveWindow(m_templateWizardPreviewEdit, 18, 300, 684, 92, TRUE);
+            MoveWindow(m_templateWizardTitlePreviewLabel, 18, 92, 160, 22, TRUE);
+            MoveWindow(m_templateWizardTitlePreviewEdit, 18, 118, 684, 26, TRUE);
+            MoveWindow(m_templateWizardBodyPreviewLabel, 18, 158, 160, 22, TRUE);
+            MoveWindow(m_templateWizardPreviewEdit, 18, 184, 684, 208, TRUE);
         }
         else {
             MoveWindow(m_templateWizardVariablesEdit, 18, 92, 684, 300, TRUE);
@@ -7303,7 +7303,7 @@ private:
         }
 
         ShowWindow(m_templateWizardList, (weatherKindStep || chooseStep) ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardVariablesEdit, (variableStep || reviewStep) ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardVariablesEdit, variableStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardTitlePreviewLabel, reviewStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardTitlePreviewEdit, reviewStep ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardBodyPreviewLabel, reviewStep ? SW_SHOW : SW_HIDE);
@@ -7331,10 +7331,9 @@ private:
             SetWindowTextSafe(m_templateWizardDesc, description);
         }
         else if (variableStep)
-            SetWindowTextSafe(m_templateWizardDesc, L"Review the generated variables. Editable values use spell check and can also be fine-tuned on the final page.");
+            SetWindowTextSafe(m_templateWizardDesc, L"Review the generated variables. They are locked here so the source data remains traceable.");
         else {
-            SetWindowTextSafe(m_templateWizardDesc, L"Fine-tune the variable values. The completed title and template update as you type.");
-            LoadTemplateVariablesFromEdit();
+            SetWindowTextSafe(m_templateWizardDesc, L"Edit the completed title and template as needed, then copy whichever section you need.");
             RefreshTemplatesWizardPreview();
         }
 
@@ -7345,11 +7344,6 @@ private:
     {
         if (id == IDC_TEMPLATES_WIZARD_CLOSE && code == BN_CLICKED) {
             ShowWindow(m_templatesWizardWnd, SW_HIDE);
-            return;
-        }
-        if (id == IDC_TEMPLATES_WIZARD_VARIABLES && code == EN_CHANGE && TemplateWizardReviewStep()) {
-            LoadTemplateVariablesFromEdit();
-            RefreshTemplatesWizardPreview();
             return;
         }
         if (id == IDC_TEMPLATES_WIZARD_LIST && code == LBN_SELCHANGE) {
@@ -7399,8 +7393,6 @@ private:
             return;
         }
         if (id == IDC_TEMPLATES_WIZARD_COPY && code == BN_CLICKED) {
-            LoadTemplateVariablesFromEdit();
-            RefreshTemplatesWizardPreview();
             std::wstring text = GetWindowTextString(m_templateWizardPreviewEdit);
             if (CopyTextToClipboard(text, m_templatesWizardWnd))
                 SetStatusText(L"Template message copied to clipboard.");
@@ -7409,8 +7401,6 @@ private:
             return;
         }
         if (id == IDC_TEMPLATES_WIZARD_COPY_TITLE && code == BN_CLICKED) {
-            LoadTemplateVariablesFromEdit();
-            RefreshTemplatesWizardPreview();
             std::wstring text = GetWindowTextString(m_templateWizardTitlePreviewEdit);
             if (CopyTextToClipboard(text, m_templatesWizardWnd))
                 SetStatusText(L"Template title copied to clipboard.");
@@ -8222,18 +8212,13 @@ private:
         if (minimumRank < 0)
             return true;
 
-        bool sawForecast = false;
-        int bestRank = -1;
+        int bestRank = WeatherSystemCategoryRank(system.category);
+        bestRank = MaxInt(bestRank, WeatherSystemCategoryRank(system.forecastCategory));
         for (const WeatherForecastPoint& point : system.forecastTrack) {
             if (point.leadHours <= 0)
                 continue;
-            sawForecast = true;
             bestRank = MaxInt(bestRank, WeatherSystemCategoryRank(point.category));
         }
-        if (!sawForecast && !system.forecastCategory.empty())
-            bestRank = WeatherSystemCategoryRank(system.forecastCategory);
-        if (bestRank < 0)
-            bestRank = WeatherSystemCategoryRank(system.category);
         return bestRank >= minimumRank;
     }
 
@@ -8247,6 +8232,8 @@ private:
         }
         RenderWeatherSystemsListRows();
         ApplyWeatherSystemVisibility();
+        if (m_weatherSystemsListWnd && IsWindowVisible(m_weatherSystemsListWnd))
+            SetStatusText(L"Showing " + std::to_wstring(m_filteredWeatherSystems.size()) + L" weather system(s).");
         if (save)
             SaveSettings();
     }

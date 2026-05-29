@@ -2099,7 +2099,7 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.88f, 0.42f, 0.02f, 0.95f), &m_draftStrokeBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.10f, 0.16f, 0.86f), &m_earthquakeBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.02f, 0.48f, 0.64f, 0.92f), &m_weatherSystemBrush);
-        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.88f, 0.92f, 0.92f, 0.78f), &m_forecastRingBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.02f, 0.06f, 0.09f, 0.82f), &m_forecastRingBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.98f, 0.80f, 0.10f, 0.96f), &m_weatherWarningBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.98f, 0.80f, 0.10f, 0.18f), &m_weatherWarningFillBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.05f, 0.42f, 0.84f, 0.94f), &m_floodBrush);
@@ -2638,12 +2638,16 @@ private:
         const float uy = dy / len;
         const float px = -uy;
         const float py = ux;
-        const float back = 13.0f;
-        const float half = 6.0f;
+        const float back = 22.0f;
+        const float half = 10.0f;
         D2D1_POINT_2F left = D2D1::Point2F(to.x - ux * back + px * half, to.y - uy * back + py * half);
         D2D1_POINT_2F right = D2D1::Point2F(to.x - ux * back - px * half, to.y - uy * back - py * half);
-        m_rt->DrawLine(to, left, brush, 2.2f);
-        m_rt->DrawLine(to, right, brush, 2.2f);
+        if (m_forecastRingBrush) {
+            m_rt->DrawLine(to, left, m_forecastRingBrush.Get(), 5.0f);
+            m_rt->DrawLine(to, right, m_forecastRingBrush.Get(), 5.0f);
+        }
+        m_rt->DrawLine(to, left, brush, 3.2f);
+        m_rt->DrawLine(to, right, brush, 3.2f);
     }
 
     void DrawWeatherSystems(const ViewState& view)
@@ -2686,8 +2690,10 @@ private:
                 if (IsGeoPointInView(view, point.latitude, point.longitude)) {
                     if (point.errorRadiusNm > 0.0) {
                         const float errorRadius = NauticalMilesToScreenRadius(view, point.latitude, point.longitude, point.errorRadiusNm);
-                        if (errorRadius >= 4.0f)
-                            m_rt->DrawEllipse(D2D1::Ellipse(forecast, errorRadius, errorRadius), m_forecastRingBrush ? m_forecastRingBrush.Get() : m_borderBrush.Get(), 1.15f, m_forecastErrorStrokeStyle.Get());
+                        if (errorRadius >= 4.0f) {
+                            m_rt->DrawEllipse(D2D1::Ellipse(forecast, errorRadius, errorRadius), m_forecastRingBrush ? m_forecastRingBrush.Get() : m_borderBrush.Get(), 4.2f, m_forecastErrorStrokeStyle.Get());
+                            m_rt->DrawEllipse(D2D1::Ellipse(forecast, errorRadius, errorRadius), forecastBrush ? forecastBrush : m_weatherSystemBrush.Get(), 2.4f, m_forecastErrorStrokeStyle.Get());
+                        }
                     }
                     const float pointRadius = point.leadHours == 0 ? 5.0f : 4.0f;
                     m_rt->FillEllipse(D2D1::Ellipse(forecast, pointRadius, pointRadius), forecastBrush ? forecastBrush : m_weatherSystemBrush.Get());
