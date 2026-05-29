@@ -16,6 +16,11 @@
 #include "weather_data.h"
 #include "weather_intensity.h"
 
+#include <richedit.h>
+
+#ifndef MSFTEDIT_CLASS
+#define MSFTEDIT_CLASS L"RICHEDIT50W"
+#endif
 #ifndef EM_GETLANGOPTIONS
 #define EM_GETLANGOPTIONS (WM_USER + 121)
 #endif
@@ -390,6 +395,18 @@ enum class TemplateContext
     Floods
 };
 
+struct TemplateEditableRange
+{
+    LONG start = 0;
+    LONG end = 0;
+};
+
+struct TemplateRenderedText
+{
+    std::wstring text;
+    std::vector<TemplateEditableRange> editableRanges;
+};
+
 enum class PolygonCaptureTarget
 {
     None,
@@ -471,6 +488,11 @@ static int MinInt(int a, int b)
 static LONG MaxLong(LONG a, LONG b)
 {
     return a > b ? a : b;
+}
+
+static LONG MinLong(LONG a, LONG b)
+{
+    return a < b ? a : b;
 }
 
 static HMENU ControlId(int id)
@@ -570,6 +592,12 @@ static void ApplyModernEditChrome(HWND hwnd)
     if (!hwnd)
         return;
     SendMessageW(hwnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 8));
+}
+
+static bool EnsureRichEditLoaded()
+{
+    static HMODULE module = LoadLibraryW(L"Msftedit.dll");
+    return module != nullptr;
 }
 
 static SIZE MeasureControlText(HWND hwnd, int wrapWidth = 0)
@@ -870,21 +898,135 @@ static void AutoLayoutButtonRows(HWND hwnd)
     }
 }
 
-static BOOL CALLBACK AutoFitChildEnumProc(HWND child, LPARAM param)
+static RECT VisualChildRect(HWND child)
 {
-    RECT childRect{};
-    if ((GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE) == 0 || !GetWindowRect(child, &childRect))
-        return TRUE;
+    RECT rect{};
+    if (!child || !GetWindowRect(child, &rect))
+        return rect;
 
     HWND parent = GetParent(child);
-    POINT topLeft{ childRect.left, childRect.top };
-    POINT bottomRight{ childRect.right, childRect.bottom };
-    ScreenToClient(parent, &topLeft);
-    ScreenToClient(parent, &bottomRight);
+    MapWindowPoints(HWND_DESKTOP, parent, reinterpret_cast<POINT*>(&rect), 2);
 
-    RECT* bounds = reinterpret_cast<RECT*>(param);
-    bounds->right = MaxLong(bounds->right, bottomRight.x);
-    bounds->bottom = MaxLong(bounds->bottom, bottomRight.y);
+    if (IsClassName(child, L"COMBOBOX")) {
+        const int collapsedHeight = 26;
+        rect.bottom = MinLong(rect.bottom, rect.top + collapsedHeight);
+    }
+    return rect;
+}
+
+static int HorizontalOverlapWidth(const RECT& a, const RECT& b)
+{
+    return MaxInt(0, MinLong(a.right, b.right) - MaxLong(a.left, b.left));
+}
+
+static void OffsetDirectChild(HWND child, int dy)
+{
+    RECT rect = VisualChildRect(child);
+    SetWindowPos(
+        child,
+        nullptr,
+        rect.left,
+        rect.top + dy,
+        0,
+        0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static std::vector<HWND> DirectVisibleChildren(HWND parent)
+{
+    std::vector<HWND> children;
+    for (HWND child = GetWindow(parent, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+        if ((GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE) != 0)
+            children.push_back(child);
+    }
+    return children;
+}
+
+static bool IsAutoLayoutTextLabel(HWND child)
+{
+    if (!IsClassName(child, L"STATIC"))
+        return false;
+    DWORD style = static_cast<DWORD>(GetWindowLongPtrW(child, GWL_STYLE));
+    return IsTextStaticStyle(style);
+}
+
+static void ShiftColumnFrom(HWND parent, const RECT& columnRect, int minTop, int dy)
+{
+    if (dy <= 0)
+        return;
+
+    std::vector<HWND> children = DirectVisibleChildren(parent);
+    for (HWND child : children) {
+        RECT rect = VisualChildRect(child);
+        if (rect.top >= minTop && HorizontalOverlapWidth(rect, columnRect) > 0)
+            OffsetDirectChild(child, dy);
+    }
+}
+
+static void ResolveLabelControlOverlaps(HWND hwnd)
+{
+    if (!hwnd)
+        return;
+
+    constexpr int kLabelControlGap = 6;
+    for (int pass = 0; pass < 8; ++pass) {
+        bool moved = false;
+        std::vector<HWND> children = DirectVisibleChildren(hwnd);
+        std::sort(children.begin(), children.end(), [](HWND a, HWND b) {
+            RECT ra = VisualChildRect(a);
+            RECT rb = VisualChildRect(b);
+            if (ra.top != rb.top)
+                return ra.top < rb.top;
+            return ra.left < rb.left;
+            });
+
+        for (HWND label : children) {
+            if (!IsAutoLayoutTextLabel(label))
+                continue;
+
+            RECT labelRect = VisualChildRect(label);
+            const int minimumTop = labelRect.bottom + kLabelControlGap;
+            for (HWND child : children) {
+                if (child == label || IsAutoLayoutTextLabel(child))
+                    continue;
+
+                RECT childRect = VisualChildRect(child);
+                if (childRect.top < labelRect.top || childRect.top >= minimumTop)
+                    continue;
+                if (HorizontalOverlapWidth(labelRect, childRect) <= 0)
+                    continue;
+
+                const int dy = minimumTop - childRect.top;
+                ShiftColumnFrom(hwnd, childRect, childRect.top, dy);
+                moved = true;
+                break;
+            }
+            if (moved)
+                break;
+        }
+        if (!moved)
+            break;
+    }
+}
+
+struct AutoFitBoundsState
+{
+    HWND parent = nullptr;
+    RECT bounds{ 0, 0, 0, 0 };
+};
+
+static BOOL CALLBACK AutoFitChildEnumProc(HWND child, LPARAM param)
+{
+    auto* state = reinterpret_cast<AutoFitBoundsState*>(param);
+    if (!state || GetParent(child) != state->parent)
+        return TRUE;
+    if ((GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE) == 0)
+        return TRUE;
+
+    RECT childRect = VisualChildRect(child);
+
+    state->bounds.right = MaxLong(state->bounds.right, childRect.right);
+    state->bounds.bottom = MaxLong(state->bounds.bottom, childRect.bottom);
     return TRUE;
 }
 
@@ -894,15 +1036,17 @@ static void AutoFitWindowToChildren(HWND hwnd, int padding = 28)
         return;
 
     AutoSizeTextControls(hwnd);
+    ResolveLabelControlOverlaps(hwnd);
     AutoLayoutButtonRows(hwnd);
 
-    RECT childBounds{ 0, 0, 0, 0 };
-    EnumChildWindows(hwnd, AutoFitChildEnumProc, reinterpret_cast<LPARAM>(&childBounds));
-    if (childBounds.right <= 0 || childBounds.bottom <= 0)
+    AutoFitBoundsState boundsState;
+    boundsState.parent = hwnd;
+    EnumChildWindows(hwnd, AutoFitChildEnumProc, reinterpret_cast<LPARAM>(&boundsState));
+    if (boundsState.bounds.right <= 0 || boundsState.bounds.bottom <= 0)
         return;
 
-    int desiredClientW = MaxInt(260, childBounds.right + padding);
-    int desiredClientH = MaxInt(160, childBounds.bottom + padding);
+    int desiredClientW = MaxInt(260, boundsState.bounds.right + padding);
+    int desiredClientH = MaxInt(160, boundsState.bounds.bottom + padding);
 
     RECT windowRect{ 0, 0, desiredClientW, desiredClientH };
     DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
@@ -6929,6 +7073,56 @@ private:
         return upperCase ? ToUpperText(output) : output;
     }
 
+    std::vector<std::wstring> TemplateVariableValuesInOrder(const std::wstring& templateText, bool upperCase) const
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> variables = m_templateWizardVariables;
+        std::sort(variables.begin(), variables.end(), [](const auto& a, const auto& b) {
+            return a.first.size() > b.first.size();
+            });
+
+        std::vector<std::wstring> values;
+        size_t pos = 0;
+        while (pos < templateText.size()) {
+            const auto it = std::find_if(variables.begin(), variables.end(), [&](const auto& item) {
+                return !item.first.empty() &&
+                    pos + item.first.size() <= templateText.size() &&
+                    templateText.compare(pos, item.first.size(), item.first) == 0;
+                });
+            if (it == variables.end()) {
+                ++pos;
+                continue;
+            }
+
+            std::wstring value = upperCase ? ToUpperText(CompactTemplateWhitespace(it->second)) : it->second;
+            if (!value.empty())
+                values.push_back(std::move(value));
+            pos += it->first.size();
+        }
+        return values;
+    }
+
+    TemplateRenderedText RenderTemplateTextWithEditableValues(const std::wstring& templateText, bool fixArticles, bool upperCase) const
+    {
+        TemplateRenderedText rendered;
+        rendered.text = RenderTemplateText(templateText, fixArticles, upperCase);
+
+        size_t cursor = 0;
+        for (const std::wstring& value : TemplateVariableValuesInOrder(templateText, upperCase)) {
+            size_t pos = rendered.text.find(value, cursor);
+            if (pos == std::wstring::npos)
+                pos = rendered.text.find(value);
+            if (pos == std::wstring::npos)
+                continue;
+
+            rendered.editableRanges.push_back({
+                static_cast<LONG>(pos),
+                static_cast<LONG>(pos + value.size())
+                });
+            cursor = pos + value.size();
+        }
+        return rendered;
+    }
+
     std::wstring RenderReportTemplateTitle(const ReportTemplate& reportTemplate) const
     {
         std::wstring titleTemplate = Trim(reportTemplate.title).empty()
@@ -6937,9 +7131,22 @@ private:
         return RenderTemplateText(titleTemplate, false, true);
     }
 
+    TemplateRenderedText RenderReportTemplateTitleWithEditableValues(const ReportTemplate& reportTemplate) const
+    {
+        std::wstring titleTemplate = Trim(reportTemplate.title).empty()
+            ? DefaultTemplateTitleForContext(m_templateWizardContext)
+            : reportTemplate.title;
+        return RenderTemplateTextWithEditableValues(titleTemplate, false, true);
+    }
+
     std::wstring RenderReportTemplate(const ReportTemplate& reportTemplate) const
     {
         return RenderTemplateText(reportTemplate.body, true, false);
+    }
+
+    TemplateRenderedText RenderReportTemplateWithEditableValues(const ReportTemplate& reportTemplate) const
+    {
+        return RenderTemplateTextWithEditableValues(reportTemplate.body, true, false);
     }
 
     bool CopyTextToClipboard(const std::wstring& text, HWND owner)
@@ -6993,6 +7200,8 @@ private:
         case WM_COMMAND:
             OnTemplatesWizardCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_NOTIFY:
+            return OnTemplatesWizardNotify(reinterpret_cast<NMHDR*>(lParam));
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
         case WM_CTLCOLOREDIT:
@@ -7005,6 +7214,19 @@ private:
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT OnTemplatesWizardNotify(NMHDR* nmh)
+    {
+        if (!nmh)
+            return 0;
+        if ((nmh->hwndFrom == m_templateWizardTitlePreviewEdit ||
+            nmh->hwndFrom == m_templateWizardPreviewEdit) &&
+            nmh->code == EN_PROTECTED)
+        {
+            return 1;
+        }
+        return 0;
     }
 
     void ClearTemplateWizardSourceIds()
@@ -7218,14 +7440,15 @@ private:
 
     void CreateTemplatesWizardControls(HWND parent)
     {
+        const wchar_t* previewClass = EnsureRichEditLoaded() ? MSFTEDIT_CLASS : L"EDIT";
         CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_TITLE, L"Templates Wizard", 18, 18, m_headerFont);
         m_templateWizardDesc = CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_DESC, L"", 18, 54, nullptr, 700);
         m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
         m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
         m_templateWizardTitlePreviewLabel = CreateAutoLabel(parent, 0, L"Title", 18, 92);
-        m_templateWizardTitlePreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 118, 684, 26, parent, ControlId(IDC_TEMPLATES_WIZARD_TITLE_PREVIEW), m_hInst, nullptr);
+        m_templateWizardTitlePreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, previewClass, L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NOHIDESEL, 18, 118, 684, 26, parent, ControlId(IDC_TEMPLATES_WIZARD_TITLE_PREVIEW), m_hInst, nullptr);
         m_templateWizardBodyPreviewLabel = CreateAutoLabel(parent, 0, L"Template", 18, 158);
-        m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 18, 184, 684, 208, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
+        m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, previewClass, L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL | WS_VSCROLL, 18, 184, 684, 208, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
         m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 122, 432, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
         m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 232, 432, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
         m_templateWizardCopyTitleBtn = CreateWindowExW(0, L"BUTTON", L"Copy Title", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 342, 432, 104, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_TITLE), m_hInst, nullptr);
@@ -7274,8 +7497,59 @@ private:
             return;
 
         m_templateWizardTemplateIndex = MinValue<size_t>(m_templateWizardTemplateIndex, templates.size() - 1);
-        SetWindowTextSafe(m_templateWizardTitlePreviewEdit, RenderReportTemplateTitle(templates[m_templateWizardTemplateIndex]));
-        SetWindowTextSafe(m_templateWizardPreviewEdit, RenderReportTemplate(templates[m_templateWizardTemplateIndex]));
+        SetProtectedTemplateText(m_templateWizardTitlePreviewEdit, RenderReportTemplateTitleWithEditableValues(templates[m_templateWizardTemplateIndex]));
+        SetProtectedTemplateText(m_templateWizardPreviewEdit, RenderReportTemplateWithEditableValues(templates[m_templateWizardTemplateIndex]));
+    }
+
+    static bool IsRichEditControl(HWND hwnd)
+    {
+        wchar_t className[64]{};
+        if (!GetClassNameW(hwnd, className, static_cast<int>(_countof(className))))
+            return false;
+        std::wstring name = ToLower(className);
+        return name.find(L"richedit") != std::wstring::npos;
+    }
+
+    static void SetRichEditSelection(HWND hwnd, LONG start, LONG end)
+    {
+        CHARRANGE range{ start, end };
+        SendMessageW(hwnd, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
+    }
+
+    void SetProtectedTemplateText(HWND hwnd, const TemplateRenderedText& rendered)
+    {
+        if (!hwnd)
+            return;
+
+        SetWindowTextSafe(hwnd, rendered.text);
+        if (!IsRichEditControl(hwnd))
+            return;
+
+        DWORD mask = static_cast<DWORD>(SendMessageW(hwnd, EM_GETEVENTMASK, 0, 0));
+        SendMessageW(hwnd, EM_SETEVENTMASK, 0, mask | ENM_PROTECTED);
+        SendMessageW(hwnd, EM_SETBKGNDCOLOR, 0, kUiSurface);
+
+        CHARFORMAT2W format{};
+        format.cbSize = sizeof(format);
+        format.dwMask = CFM_PROTECTED | CFM_COLOR;
+        format.dwEffects = CFE_PROTECTED;
+        format.crTextColor = kUiText;
+        SetRichEditSelection(hwnd, 0, -1);
+        SendMessageW(hwnd, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&format));
+
+        for (const TemplateEditableRange& range : rendered.editableRanges) {
+            if (range.end <= range.start)
+                continue;
+            format.dwEffects = 0;
+            format.crTextColor = RGB(0, 72, 145);
+            SetRichEditSelection(hwnd, range.start, range.end);
+            SendMessageW(hwnd, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&format));
+        }
+
+        if (!rendered.editableRanges.empty())
+            SetRichEditSelection(hwnd, rendered.editableRanges.front().start, rendered.editableRanges.front().end);
+        else
+            SetRichEditSelection(hwnd, 0, 0);
     }
 
     void RenderTemplatesWizardStep()
@@ -7333,7 +7607,7 @@ private:
         else if (variableStep)
             SetWindowTextSafe(m_templateWizardDesc, L"Review the generated variables. They are locked here so the source data remains traceable.");
         else {
-            SetWindowTextSafe(m_templateWizardDesc, L"Edit the completed title and template as needed, then copy whichever section you need.");
+            SetWindowTextSafe(m_templateWizardDesc, L"Edit the highlighted generated values in the title and template, then copy whichever section you need.");
             RefreshTemplatesWizardPreview();
         }
 
