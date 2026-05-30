@@ -92,6 +92,7 @@ constexpr float kOverlayToggleSize = 28.0f;
 constexpr float kNotificationScrollStep = 56.0f;
 constexpr float kNoteBubbleWidth = 204.0f;
 constexpr float kNoteBubbleHeight = 64.0f;
+constexpr float kNoteBubbleMaxHeight = 154.0f;
 constexpr float kNoteEditorWidth = 300.0f;
 constexpr float kNoteEditorMinHeight = 144.0f;
 
@@ -1412,6 +1413,26 @@ private:
         return ClampRectToView(rect, view);
     }
 
+    std::wstring NoteDisplayText(const MapNote& note) const
+    {
+        std::wstring text = note.text;
+        if (!note.author.empty())
+            text = note.author + L": " + text;
+        if (text.size() > 220)
+            text = text.substr(0, 217) + L"...";
+        return text;
+    }
+
+    float NoteBubbleHeightForText(const std::wstring& text) const
+    {
+        if (!m_noteTextFormat || text.empty())
+            return kNoteBubbleHeight;
+
+        const float contentW = MaxValue(1.0f, kNoteBubbleWidth - 44.0f);
+        const float textH = MaxValue(18.0f, MeasureMapTextHeight(text, m_noteTextFormat.Get(), contentW));
+        return ClampValue(textH + 24.0f, kNoteBubbleHeight, kNoteBubbleMaxHeight);
+    }
+
     D2D1_RECT_F BuildAddNoteButtonRect() const
     {
         return D2D1::RectF(244.0f, 18.0f, 336.0f, 50.0f);
@@ -1630,7 +1651,8 @@ private:
                 continue;
 
             D2D1_POINT_2F anchor = GeoToScreen(view, note.latitude, note.longitude);
-            D2D1_RECT_F rect = BuildNoteBubbleRect(view, anchor, kNoteBubbleWidth, kNoteBubbleHeight);
+            const std::wstring text = NoteDisplayText(note);
+            D2D1_RECT_F rect = BuildNoteBubbleRect(view, anchor, kNoteBubbleWidth, NoteBubbleHeightForText(text));
             if (PointInRect(x, y, BuildNoteCloseRect(rect))) {
                 result.hit = true;
                 result.close = true;
@@ -1854,6 +1876,18 @@ private:
             return;
         }
 
+        if (m_draggingNotificationHistoryContent && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
+            const float maxScroll = layout.hasHistory ? MaxNotificationHistoryScroll(layout.historyRect) : 0.0f;
+            const float dy = static_cast<float>(y - m_lastMouse.y);
+            if (dy != 0.0f && maxScroll > 0.0f) {
+                m_notificationHistoryScroll = ClampValue(m_notificationHistoryScroll - dy, 0.0f, maxScroll);
+                m_lastMouse = POINT{ x, y };
+                Invalidate();
+            }
+            return;
+        }
+
         if (m_draggingPolygonPoint && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
             if (m_draggingPolygonIndex < m_notificationPolygons.size() &&
                 m_draggingPolygonPointIndex < m_notificationPolygons[m_draggingPolygonIndex].points.size())
@@ -1948,6 +1982,16 @@ private:
         if (m_draggingNotificationHistoryScrollbar) {
             m_draggingNotificationHistoryScrollbar = false;
             m_notificationHistoryScrollbarDragOffset = 0.0f;
+            m_notificationUiMouseDown = false;
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            Invalidate();
+            return;
+        }
+
+        if (m_draggingNotificationHistoryContent) {
+            m_draggingNotificationHistoryContent = false;
             m_notificationUiMouseDown = false;
             m_dragging = false;
             m_interactivePan = false;
@@ -3816,6 +3860,15 @@ private:
             return true;
         }
 
+        if (contentH > viewportH && PointInRect(x, y, contentRect)) {
+            m_draggingNotificationHistoryContent = true;
+            m_notificationUiMouseDown = true;
+            m_lastMouse = POINT{ x, y };
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            return true;
+        }
+
         ClearOverlayInputFocus();
         return false;
     }
@@ -4429,13 +4482,8 @@ private:
             if (p.x < -80.0f || p.y < -80.0f || p.x > width + 80.0f || p.y > height + 80.0f)
                 continue;
 
-            std::wstring text = note.text;
-            if (!note.author.empty())
-                text = note.author + L": " + text;
-            if (text.size() > 120)
-                text = text.substr(0, 117) + L"...";
-
-            D2D1_RECT_F bubbleRect = BuildNoteBubbleRect(view, p, kNoteBubbleWidth, kNoteBubbleHeight);
+            const std::wstring text = NoteDisplayText(note);
+            D2D1_RECT_F bubbleRect = BuildNoteBubbleRect(view, p, kNoteBubbleWidth, NoteBubbleHeightForText(text));
             D2D1_RECT_F textRect = D2D1::RectF(bubbleRect.left + 14.0f, bubbleRect.top + 10.0f, bubbleRect.right - 30.0f, bubbleRect.bottom - 8.0f);
             D2D1_ROUNDED_RECT bubble = D2D1::RoundedRect(bubbleRect, 10.0f, 10.0f);
             m_rt->FillRoundedRectangle(bubble, m_panelBrush.Get());
@@ -5264,6 +5312,7 @@ private:
     bool m_showRoadDepictions = false;
     bool m_displayWorldMap = false;
     bool m_draggingNotificationHistoryScrollbar = false;
+    bool m_draggingNotificationHistoryContent = false;
     bool m_responderChatCollapsed = false;
     bool m_responderChatInputFocused = false;
     bool m_canClearResponderChat = false;

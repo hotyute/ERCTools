@@ -300,7 +300,7 @@ static bool ExchangeFrame(
         sock = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
         if (sock == INVALID_SOCKET)
             continue;
-        DWORD timeout = 8000;
+        DWORD timeout = 2500;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
         BOOL noDelay = TRUE;

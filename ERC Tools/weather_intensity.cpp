@@ -33,6 +33,30 @@ int WeatherSystemCategoryRank(const std::wstring& category)
     return -1;
 }
 
+int WeatherSystemWindCategoryRank(double windKnots)
+{
+    if (windKnots <= 0.0)
+        return -1;
+    if (windKnots >= 137.0)
+        return 6;
+    if (windKnots >= 113.0)
+        return 5;
+    if (windKnots >= 96.0)
+        return 4;
+    if (windKnots >= 83.0)
+        return 3;
+    if (windKnots >= 64.0)
+        return 2;
+    if (windKnots >= 34.0)
+        return 1;
+    return 0;
+}
+
+int WeatherSystemEffectiveCategoryRank(const std::wstring& category, double windKnots)
+{
+    return std::max(WeatherSystemCategoryRank(category), WeatherSystemWindCategoryRank(windKnots));
+}
+
 std::wstring WeatherSystemCategoryRankName(int rank)
 {
     switch (rank) {

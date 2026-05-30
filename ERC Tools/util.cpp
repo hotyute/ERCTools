@@ -176,7 +176,10 @@ std::wstring GetWindowTextString(HWND hWnd)
 
 void SetWindowTextSafe(HWND hWnd, const std::wstring& text)
 {
+    if (!hWnd)
+        return;
     SetWindowTextW(hWnd, text.c_str());
+    RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
 }
 
 std::wstring TimeTToText(std::time_t t)

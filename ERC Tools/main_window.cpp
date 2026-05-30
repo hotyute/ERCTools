@@ -240,6 +240,7 @@ constexpr UINT_PTR kServerPollTimerId = 2;
 constexpr UINT_PTR kInAppNotificationTimerId = 3;
 constexpr UINT_PTR kEarthquakeRefreshTimerId = 4;
 constexpr UINT_PTR kWeatherSystemsRefreshTimerId = 5;
+constexpr UINT kServerPollIntervalMs = 2000;
 constexpr const wchar_t* kWeatherSystemsSourceUrl = L"https://www.tropicalstormrisk.com/tracker/dynamic/main.html";
 constexpr const wchar_t* kWeatherWarningsSourceUrl = L"https://weather.metoffice.gov.uk/warnings-and-advice/uk-warnings";
 constexpr const wchar_t* kFloodsSourceUrl = L"https://environment.data.gov.uk/flood-monitoring/id/floods?_view=full";
@@ -1922,7 +1923,7 @@ private:
         SetStatusText(L"Ready.");
         ApplyRefreshTimer();
         if (IsOnlineMode())
-            SetTimer(m_hwnd, kServerPollTimerId, 8 * 1000, nullptr);
+            SetTimer(m_hwnd, kServerPollTimerId, kServerPollIntervalMs, nullptr);
         SetTimer(m_hwnd, kEarthquakeRefreshTimerId, 10 * 60 * 1000, nullptr);
         SetTimer(m_hwnd, kWeatherSystemsRefreshTimerId, 10 * 60 * 1000, nullptr);
 
@@ -7327,6 +7328,10 @@ private:
 
         PopulateTemplatesWizardList();
         SetWindowTextSafe(m_templateWizardVariablesEdit, FormatTemplateVariablesForEdit());
+        m_templateWizardTitleEditableRanges.clear();
+        m_templateWizardBodyEditableRanges.clear();
+        SetProtectedTemplateText(m_templateWizardTitlePreviewEdit, {});
+        SetProtectedTemplateText(m_templateWizardPreviewEdit, {});
         RenderTemplatesWizardStep();
         ShowWindow(m_templatesWizardWnd, SW_SHOW);
         SetForegroundWindow(m_templatesWizardWnd);
@@ -7420,14 +7425,20 @@ private:
         else if (hwnd == m_templateWizardPreviewEdit)
             m_templateWizardBodyEditableRanges = rendered.editableRanges;
 
+        const bool richEdit = IsRichEditControl(hwnd);
+        DWORD mask = 0;
+        if (richEdit) {
+            mask = static_cast<DWORD>(SendMessageW(hwnd, EM_GETEVENTMASK, 0, 0));
+            SendMessageW(hwnd, EM_SETEVENTMASK, 0, 0);
+            SendMessageW(hwnd, EM_SETREADONLY, FALSE, 0);
+        }
+
         SetWindowTextSafe(hwnd, rendered.text);
-        if (!IsRichEditControl(hwnd))
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+        if (!richEdit)
             return;
 
-        DWORD mask = static_cast<DWORD>(SendMessageW(hwnd, EM_GETEVENTMASK, 0, 0));
-        SendMessageW(hwnd, EM_SETEVENTMASK, 0, 0);
         SendMessageW(hwnd, EM_SETBKGNDCOLOR, 0, kUiSurface);
-        SendMessageW(hwnd, EM_SETREADONLY, FALSE, 0);
 
         CHARFORMAT2W format{};
         format.cbSize = sizeof(format);
@@ -8386,12 +8397,12 @@ private:
         if (minimumRank < 0)
             return true;
 
-        int bestRank = WeatherSystemCategoryRank(system.category);
-        bestRank = MaxInt(bestRank, WeatherSystemCategoryRank(system.forecastCategory));
+        int bestRank = WeatherSystemEffectiveCategoryRank(system.category, system.windKnots);
+        bestRank = MaxInt(bestRank, WeatherSystemEffectiveCategoryRank(system.forecastCategory, system.forecastWindKnots));
         for (const WeatherForecastPoint& point : system.forecastTrack) {
             if (point.leadHours <= 0)
                 continue;
-            bestRank = MaxInt(bestRank, WeatherSystemCategoryRank(point.category));
+            bestRank = MaxInt(bestRank, WeatherSystemEffectiveCategoryRank(point.category, point.windKnots));
         }
         return bestRank >= minimumRank;
     }
@@ -9725,7 +9736,7 @@ private:
         m_weatherSystemsListForecastCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 84, 160, 160, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_FORECAST_COMBO), m_hInst, nullptr);
         HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 626, 54, 102, 32, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_REFRESH_BTN), m_hInst, nullptr);
         HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 742, 54, 102, 32, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_weatherSystemsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 116, 826, 320, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_LISTVIEW), m_hInst, nullptr);
+        m_weatherSystemsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 132, 826, 320, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_LISTVIEW), m_hInst, nullptr);
 
         for (HWND h : { m_weatherSystemsListForecastCombo, refreshBtn, closeBtn, m_weatherSystemsListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -9773,12 +9784,21 @@ private:
         for (const WeatherForecastPoint& point : system.forecastTrack) {
             if (!point.hasLocation || point.leadHours <= 0)
                 continue;
-            const int pointRank = WeatherSystemCategoryRank(point.category);
-            const int bestRank = best ? WeatherSystemCategoryRank(best->category) : -1;
+            const int pointRank = WeatherSystemEffectiveCategoryRank(point.category, point.windKnots);
+            const int bestRank = best ? WeatherSystemEffectiveCategoryRank(best->category, best->windKnots) : -1;
             if (!best || pointRank > bestRank || (pointRank == bestRank && point.leadHours > best->leadHours))
                 best = &point;
         }
         return best;
+    }
+
+    static std::wstring DisplayWeatherSystemCategory(const std::wstring& category, double windKnots)
+    {
+        const int categoryRank = WeatherSystemCategoryRank(category);
+        const int effectiveRank = WeatherSystemEffectiveCategoryRank(category, windKnots);
+        if (effectiveRank > categoryRank)
+            return WeatherSystemCategoryRankName(effectiveRank);
+        return category;
     }
 
     void RenderWeatherSystemsListRows()
@@ -9812,20 +9832,20 @@ private:
                 forecastLat = FormatCoordinateForList(forecast->latitude, true);
                 forecastLon = FormatCoordinateForList(forecast->longitude, false);
                 forecastWind = forecast->windText;
-                forecastCategory = forecast->category;
+                forecastCategory = DisplayWeatherSystemCategory(forecast->category, forecast->windKnots);
             }
             else if (system.hasForecastLocation) {
                 forecastLat = FormatCoordinateForList(system.forecastLatitude, true);
                 forecastLon = FormatCoordinateForList(system.forecastLongitude, false);
                 forecastWind = system.forecastWindText;
-                forecastCategory = system.forecastCategory;
+                forecastCategory = DisplayWeatherSystemCategory(system.forecastCategory, system.forecastWindKnots);
             }
             const std::wstring values[] = {
                 system.basin,
                 lat,
                 lon,
                 system.windText,
-                system.category,
+                DisplayWeatherSystemCategory(system.category, system.windKnots),
                 forecastLat,
                 forecastLon,
                 forecastWind,
@@ -9962,10 +9982,10 @@ private:
     {
         CreateAutoLabel(parent, 0, L"Weather Warnings", 18, 18, m_headerFont);
         CreateAutoLabel(parent, 0, L"Period", 18, 58);
-        m_weatherWarningsListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 80, 130, 120, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_PERIOD_COMBO), m_hInst, nullptr);
+        m_weatherWarningsListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 84, 130, 120, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_PERIOD_COMBO), m_hInst, nullptr);
         HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 626, 54, 102, 32, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_REFRESH_BTN), m_hInst, nullptr);
         HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 742, 54, 102, 32, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_weatherWarningsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 102, 826, 300, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_LISTVIEW), m_hInst, nullptr);
+        m_weatherWarningsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 132, 826, 300, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_LISTVIEW), m_hInst, nullptr);
 
         for (HWND h : { m_weatherWarningsListPeriodCombo, refreshBtn, closeBtn, m_weatherWarningsListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -10151,10 +10171,10 @@ private:
     {
         CreateAutoLabel(parent, 0, L"Floods", 18, 18, m_headerFont);
         CreateAutoLabel(parent, 0, L"Period", 18, 58);
-        m_floodsListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 80, 130, 120, parent, ControlId(IDC_FLOODS_LIST_PERIOD_COMBO), m_hInst, nullptr);
+        m_floodsListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 84, 130, 120, parent, ControlId(IDC_FLOODS_LIST_PERIOD_COMBO), m_hInst, nullptr);
         HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 626, 54, 102, 32, parent, ControlId(IDC_FLOODS_LIST_REFRESH_BTN), m_hInst, nullptr);
         HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 742, 54, 102, 32, parent, ControlId(IDC_FLOODS_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_floodsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 102, 826, 300, parent, ControlId(IDC_FLOODS_LIST_LISTVIEW), m_hInst, nullptr);
+        m_floodsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 132, 826, 300, parent, ControlId(IDC_FLOODS_LIST_LISTVIEW), m_hInst, nullptr);
 
         for (HWND h : { m_floodsListPeriodCombo, refreshBtn, closeBtn, m_floodsListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
