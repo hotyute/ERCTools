@@ -300,7 +300,7 @@ static bool ExchangeFrame(
         sock = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
         if (sock == INVALID_SOCKET)
             continue;
-        DWORD timeout = 2500;
+        DWORD timeout = opcode == kOpPoll ? 30000 : 2500;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
         BOOL noDelay = TRUE;
@@ -474,11 +474,12 @@ bool BinaryLogout(const std::wstring& serverBaseUrl, const ClientSession& sessio
     return FinishCall(kOpLogout, request, resultOut, payload, serverBaseUrl);
 }
 
-bool BinaryPollCollaboration(const std::wstring& serverBaseUrl, const ClientSession& session, BinaryPollResult& resultOut)
+bool BinaryPollCollaboration(const std::wstring& serverBaseUrl, const ClientSession& session, uint32_t knownVersion, BinaryPollResult& resultOut)
 {
     resultOut = {};
     BinaryWriter request;
     WriteSessionToken(request, session);
+    request.U32(knownVersion);
 
     BinaryCallResult call;
     std::vector<BYTE> payload;
@@ -536,6 +537,10 @@ bool BinaryPollCollaboration(const std::wstring& serverBaseUrl, const ClientSess
         }
         resultOut.users.push_back(std::move(user));
     }
+
+    uint32_t version = 0;
+    if (reader.U32(version))
+        resultOut.version = version;
 
     static_cast<BinaryCallResult&>(resultOut) = call;
     return true;

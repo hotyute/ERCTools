@@ -32,6 +32,7 @@ struct BinaryPollResult : BinaryCallResult
     std::vector<ChatMessage> chat;
     std::vector<MapNote> notes;
     std::vector<OnlineUser> users;
+    uint32_t version = 0;
 };
 
 bool BinaryLogin(
@@ -43,7 +44,7 @@ bool BinaryLogin(
     BinaryLoginResult& resultOut);
 
 bool BinaryLogout(const std::wstring& serverBaseUrl, const ClientSession& session, const std::wstring& reason, BinaryCallResult& resultOut);
-bool BinaryPollCollaboration(const std::wstring& serverBaseUrl, const ClientSession& session, BinaryPollResult& resultOut);
+bool BinaryPollCollaboration(const std::wstring& serverBaseUrl, const ClientSession& session, uint32_t knownVersion, BinaryPollResult& resultOut);
 bool BinarySendChat(const std::wstring& serverBaseUrl, const ClientSession& session, const std::wstring& text, BinaryCallResult& resultOut);
 bool BinaryClearChat(const std::wstring& serverBaseUrl, const ClientSession& session, BinaryCallResult& resultOut);
 bool BinaryCreateNote(const std::wstring& serverBaseUrl, const ClientSession& session, const MapNote& note, MapNote& serverNoteOut, BinaryCallResult& resultOut);

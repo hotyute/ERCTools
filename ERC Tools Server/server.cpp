@@ -1274,6 +1274,7 @@ public:
                 std::wstring error;
                 if (!m_database.DeleteSession(WideToUtf8(token), error))
                     return BinaryError(opcode, error.rfind(L"Missing bearer token", 0) == 0 ? 401 : 500, IsDatabaseErrorMessage(error) ? "database_error" : "logout_failed", error);
+                NotifyCollaborationChanged();
                 if (!reason.empty())
                     std::wcout << L"Client session ended: " << reason << L"\n";
                 return BinaryOk(opcode);
@@ -1286,7 +1287,7 @@ public:
 
             switch (opcode) {
             case kBinaryPoll:
-                return HandleBinaryPoll(opcode);
+                return HandleBinaryPoll(opcode, reader);
             case kBinarySendChat:
                 return HandleBinarySendChat(opcode, reader, user);
             case kBinaryClearChat:
@@ -1431,6 +1432,28 @@ private:
         writer.Text(JsonTextField(item, { "lastSeen", "last_seen", "timestamp" }));
     }
 
+    uint32_t CollaborationVersion() const
+    {
+        return m_collaborationVersion.load(std::memory_order_acquire);
+    }
+
+    void NotifyCollaborationChanged()
+    {
+        m_collaborationVersion.fetch_add(1, std::memory_order_acq_rel);
+        m_collaborationChanged.notify_all();
+    }
+
+    void WaitForCollaborationChange(uint32_t knownVersion)
+    {
+        if (knownVersion == 0 || knownVersion != CollaborationVersion())
+            return;
+
+        std::unique_lock<std::mutex> lock(m_collaborationMutex);
+        m_collaborationChanged.wait_for(lock, std::chrono::seconds(25), [&]() {
+            return knownVersion != CollaborationVersion();
+            });
+    }
+
     BinaryResponse HandleBinaryLogin(BinaryReader& reader)
     {
         std::wstring username;
@@ -1464,6 +1487,7 @@ private:
                 return BinaryError(kBinaryLogin, 401, "pod_in_use", error);
             return BinaryError(kBinaryLogin, IsDatabaseErrorMessage(error) ? 500 : 500, IsDatabaseErrorMessage(error) ? "database_error" : "session_create_failed", error);
         }
+        NotifyCollaborationChanged();
 
         BinaryWriter writer;
         writer.Text(token);
@@ -1474,8 +1498,12 @@ private:
         return BinaryOk(kBinaryLogin, writer);
     }
 
-    BinaryResponse HandleBinaryPoll(uint16_t opcode)
+    BinaryResponse HandleBinaryPoll(uint16_t opcode, BinaryReader& reader)
     {
+        uint32_t knownVersion = 0;
+        reader.U32(knownVersion);
+        WaitForCollaborationChange(knownVersion);
+
         std::wstring error;
         json chat = m_database.ChatMessages(error);
         if (!error.empty())
@@ -1507,6 +1535,7 @@ private:
             for (const auto& item : users)
                 WriteOnlineUserJson(writer, item);
         }
+        writer.U32(CollaborationVersion());
         return BinaryOk(opcode, writer);
     }
 
@@ -1522,6 +1551,7 @@ private:
         std::wstring error;
         if (!m_database.AddChatMessage(user, text, error))
             return BinaryError(opcode, 500, "database_error", error);
+        NotifyCollaborationChanged();
         return BinaryOk(opcode);
     }
 
@@ -1533,6 +1563,7 @@ private:
         std::wstring error;
         if (!m_database.ClearChatMessages(error))
             return BinaryError(opcode, 500, "database_error", error);
+        NotifyCollaborationChanged();
         return BinaryOk(opcode);
     }
 
@@ -1584,6 +1615,7 @@ private:
         std::wstring error;
         if (!m_database.AddNote(user, body, note, error))
             return BinaryError(opcode, 500, "database_error", error);
+        NotifyCollaborationChanged();
 
         BinaryWriter writer;
         WriteNoteJson(writer, note);
@@ -1608,6 +1640,7 @@ private:
         std::wstring error;
         if (!m_database.UpdateNote(user, id, body, error))
             return BinaryError(opcode, 500, "database_error", error);
+        NotifyCollaborationChanged();
         return BinaryOk(opcode);
     }
 
@@ -1620,6 +1653,7 @@ private:
         std::wstring error;
         if (!m_database.DeleteNote(user, id, error))
             return BinaryError(opcode, 500, "database_error", error);
+        NotifyCollaborationChanged();
         return BinaryOk(opcode);
     }
 
@@ -1729,6 +1763,7 @@ private:
                 return ErrorResponse(401, error, "pod_in_use");
             return ErrorResponse(500, error, IsDatabaseErrorMessage(error) ? "database_error" : "session_create_failed");
         }
+        NotifyCollaborationChanged();
 
         return JsonResponse(200, {
             { "ok", true },
@@ -1758,6 +1793,7 @@ private:
         std::wstring error;
         if (!m_database.DeleteSession(BearerToken(req), error))
             return ErrorResponse(error.rfind(L"Missing bearer token", 0) == 0 ? 401 : 500, error, error.rfind(L"Missing bearer token", 0) == 0 ? "missing_token" : "database_error");
+        NotifyCollaborationChanged();
         if (!reason.empty())
             std::wcout << L"Client session ended: " << reason << L"\n";
         return JsonResponse(200, { { "ok", true } });
@@ -1823,6 +1859,7 @@ private:
         std::wstring error;
         if (!m_database.AddChatMessage(user, text, error))
             return ErrorResponse(500, error);
+        NotifyCollaborationChanged();
         return JsonResponse(201, { { "ok", true } });
     }
 
@@ -1834,6 +1871,7 @@ private:
         std::wstring error;
         if (!m_database.ClearChatMessages(error))
             return ErrorResponse(500, error, "database_error");
+        NotifyCollaborationChanged();
         return JsonResponse(200, { { "ok", true } });
     }
 
@@ -1853,6 +1891,7 @@ private:
         std::wstring error;
         if (!m_database.AddNote(user, body, note, error))
             return ErrorResponse(500, error);
+        NotifyCollaborationChanged();
         return JsonResponse(201, { { "ok", true }, { "note", note } });
     }
 
@@ -1863,6 +1902,7 @@ private:
         std::wstring error;
         if (!m_database.UpdateNote(user, id, body, error))
             return ErrorResponse(500, error);
+        NotifyCollaborationChanged();
         return JsonResponse(200, { { "ok", true } });
     }
 
@@ -1872,6 +1912,7 @@ private:
         std::wstring error;
         if (!m_database.DeleteNote(user, id, error))
             return ErrorResponse(500, error);
+        NotifyCollaborationChanged();
         return JsonResponse(200, { { "ok", true } });
     }
 
@@ -2029,6 +2070,9 @@ private:
         return L"";
     }
 
+    std::mutex m_collaborationMutex;
+    std::condition_variable m_collaborationChanged;
+    std::atomic<uint32_t> m_collaborationVersion{ 1 };
     ServerConfig m_config;
     Database m_database;
 };
@@ -2294,8 +2338,10 @@ int wmain(int argc, wchar_t** argv)
         return 1;
     }
 
-    if (config.workerThreads <= 0)
-        config.workerThreads = std::max(4u, std::thread::hardware_concurrency());
+    if (config.workerThreads <= 0) {
+        unsigned int hw = std::thread::hardware_concurrency();
+        config.workerThreads = static_cast<int>(std::max(16u, hw > 0 ? hw * 2u : 16u));
+    }
 
     ErcServer server(config);
     BlockingSocketQueue queue;

@@ -320,6 +320,7 @@ struct ServerResult
     bool chatOk = false;
     bool notesOk = false;
     bool usersOk = false;
+    uint32_t collaborationVersion = 0;
     std::wstring error;
     std::vector<ChatMessage> chat;
     std::vector<MapNote> notes;
@@ -4111,15 +4112,17 @@ private:
         HWND hwnd = m_hwnd;
         std::wstring authHeaders = BearerAuthHeader(m_session);
         ClientSession session = m_session;
-        ScheduleBackgroundTask([hwnd, server, authHeaders, session]() {
+        uint32_t knownVersion = m_collaborationVersion;
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session, knownVersion]() {
             auto* result = new ServerResult{};
             result->action = ServerAction::Poll;
 
             BinaryPollResult binary;
-            if (BinaryPollCollaboration(server, session, binary)) {
+            if (BinaryPollCollaboration(server, session, knownVersion, binary)) {
                 result->chat = std::move(binary.chat);
                 result->notes = std::move(binary.notes);
                 result->users = std::move(binary.users);
+                result->collaborationVersion = binary.version;
                 result->chatOk = true;
                 result->notesOk = true;
                 result->usersOk = true;
@@ -4592,11 +4595,15 @@ private:
 
     void OnServerReady(ServerResult* result)
     {
-        m_serverRequestInProgress.store(false);
         if (!result)
             return;
+        if (result->action == ServerAction::Poll)
+            m_serverRequestInProgress.store(false);
 
         if (result->action == ServerAction::Poll && result->ok) {
+            if (result->collaborationVersion > 0)
+                m_collaborationVersion = result->collaborationVersion;
+
             if (result->chatOk) {
                 m_chatMessages = std::move(result->chat);
                 RenderChatHistory();
@@ -4615,6 +4622,9 @@ private:
                 m_onlineUsers = std::move(result->users);
                 RenderOnlineUsers();
             }
+
+            if (result->collaborationVersion > 0)
+                PollServerAsync();
         }
         else if (result->action == ServerAction::SendChat) {
             SetStatusText(result->ok ? L"Chat message sent." : L"Chat send failed; kept locally.");
@@ -10907,6 +10917,7 @@ private:
     bool m_hasLoadedAlerts = false;
     std::wstring m_refreshIntervalText = L"300s";
     UINT m_refreshIntervalMs = 5 * 60 * 1000;
+    uint32_t m_collaborationVersion = 0;
     std::atomic_bool m_serverRequestInProgress{ false };
     std::atomic_bool m_earthquakeFetchInProgress{ false };
     std::atomic_bool m_weatherWarningsFetchInProgress{ false };
