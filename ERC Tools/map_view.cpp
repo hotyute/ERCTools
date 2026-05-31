@@ -121,6 +121,7 @@ constexpr float kNoteEditorMinHeight = 144.0f;
 // Boundary rendering.
 constexpr double kBoundaryDrawMarginPixels = 512.0;
 constexpr int kFullBoundaryMaxZoom = 7;
+constexpr int kWorldGeometryFillMaxZoom = 13;
 constexpr double kWorldLodDetailToleranceDegrees = 0.012;
 constexpr double kWorldLodMidToleranceDegrees = 0.035;
 constexpr double kWorldLodFarToleranceDegrees = 0.09;
@@ -742,6 +743,15 @@ public:
         Invalidate();
     }
 
+    void ResetView()
+    {
+        m_centerLat = kDefaultCenterLat;
+        m_centerLon = kDefaultCenterLon;
+        m_zoom = kDefaultZoom;
+        NormalizeCenter();
+        Invalidate();
+    }
+
     void FitToAlerts()
     {
         std::vector<GeoPoint> pts;
@@ -993,6 +1003,8 @@ private:
                 m_rt->Resize(D2D1::SizeU(w, h));
                 InvalidateSceneCache();
             }
+            ClampToolbarPanelOffsets(BuildViewState());
+            ClampUsersPanelOffsets(BuildViewState());
             return 0;
 
         case WM_PAINT:
@@ -1017,6 +1029,8 @@ private:
 
         case WM_LBUTTONDOWN:
             SetFocus(m_hwnd);
+            m_hoverPoint = POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            m_leftButtonDown = true;
             if (HandleUsersPanelPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             if (HandleResponderChatPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
@@ -1052,6 +1066,8 @@ private:
 
         case WM_MOUSELEAVE:
             m_trackingMouseLeave = false;
+            m_hoverPoint = POINT{ -10000, -10000 };
+            m_leftButtonDown = false;
             if (!m_hoveredAlertId.empty() || !m_hoveredEarthquakeId.empty() || !m_hoveredWeatherSystemId.empty() ||
                 !m_hoveredWeatherWarningId.empty() || !m_hoveredFloodId.empty()) {
                 m_hoveredAlertId.clear();
@@ -1064,6 +1080,8 @@ private:
             return 0;
 
         case WM_LBUTTONUP:
+            m_hoverPoint = POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            m_leftButtonDown = false;
             OnLeftButtonUp(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;
 
@@ -1592,29 +1610,53 @@ private:
 
     D2D1_RECT_F BuildAddNoteButtonRect() const
     {
-        return D2D1::RectF(244.0f, 18.0f, 336.0f, 50.0f);
+        const D2D1_RECT_F panel = BuildToolbarPanelRect();
+        const float buttonW = 120.0f;
+        const float buttonH = 32.0f;
+        return D2D1::RectF(panel.left + 142.0f, panel.top + 86.0f, panel.left + 142.0f + buttonW, panel.top + 86.0f + buttonH);
     }
 
     D2D1_RECT_F BuildResetViewButtonRect() const
     {
-        return D2D1::RectF(132.0f, 18.0f, 232.0f, 50.0f);
+        const D2D1_RECT_F panel = BuildToolbarPanelRect();
+        const float buttonW = 120.0f;
+        const float buttonH = 32.0f;
+        return D2D1::RectF(panel.left + 142.0f, panel.top + 44.0f, panel.left + 142.0f + buttonW, panel.top + 44.0f + buttonH);
+    }
+
+    D2D1_RECT_F BuildFitAlertsButtonRect() const
+    {
+        const D2D1_RECT_F panel = BuildToolbarPanelRect();
+        const float buttonW = 120.0f;
+        const float buttonH = 32.0f;
+        return D2D1::RectF(panel.left + 12.0f, panel.top + 86.0f, panel.left + 12.0f + buttonW, panel.top + 86.0f + buttonH);
     }
 
     D2D1_RECT_F BuildAddNotePromptRect() const
     {
-        return D2D1::RectF(346.0f, 18.0f, 548.0f, 50.0f);
+        const D2D1_RECT_F panel = BuildToolbarPanelRect();
+        return D2D1::RectF(panel.left, panel.bottom + 8.0f, panel.right, panel.bottom + 40.0f);
     }
 
     D2D1_RECT_F BuildRefreshButtonRect() const
     {
-        return D2D1::RectF(18.0f, 18.0f, 120.0f, 50.0f);
+        const D2D1_RECT_F panel = BuildToolbarPanelRect();
+        const float buttonW = 120.0f;
+        const float buttonH = 32.0f;
+        return D2D1::RectF(panel.left + 12.0f, panel.top + 44.0f, panel.left + 12.0f + buttonW, panel.top + 44.0f + buttonH);
     }
 
     D2D1_RECT_F BuildToolbarPanelRect() const
     {
-        const D2D1_RECT_F refresh = BuildRefreshButtonRect();
-        const D2D1_RECT_F add = BuildAddNoteButtonRect();
-        return D2D1::RectF(refresh.left - 10.0f, refresh.top - 10.0f, add.right + 10.0f, refresh.bottom + 10.0f);
+        const float left = 18.0f + m_toolbarPanelOffsetX;
+        const float top = 18.0f + m_toolbarPanelOffsetY;
+        return D2D1::RectF(left, top, left + 274.0f, top + 130.0f);
+    }
+
+    D2D1_RECT_F BuildToolbarDragRect() const
+    {
+        const D2D1_RECT_F panel = BuildToolbarPanelRect();
+        return D2D1::RectF(panel.left + 12.0f, panel.top, panel.right - 12.0f, panel.top + 38.0f);
     }
 
     void SetOverlayInputFocus(OverlayInputFocus focus)
@@ -1860,15 +1902,32 @@ private:
 
         if (m_showToolbarPanel) {
             const D2D1_RECT_F addButton = BuildAddNoteButtonRect();
+            const D2D1_RECT_F fitButton = BuildFitAlertsButtonRect();
             const D2D1_RECT_F resetButton = BuildResetViewButtonRect();
             const D2D1_RECT_F refreshButton = BuildRefreshButtonRect();
+            if (PointInRect(x, y, BuildToolbarDragRect())) {
+                ClearOverlayInputFocus();
+                SetCapture(m_hwnd);
+                m_draggingToolbarPanel = true;
+                m_notificationUiMouseDown = true;
+                m_lastMouse = POINT{ x, y };
+                Invalidate();
+                return true;
+            }
+
             if (PointInRect(x, y, refreshButton)) {
                 if (m_onRefresh)
                     m_onRefresh();
+                Invalidate();
                 return true;
             }
 
             if (PointInRect(x, y, resetButton)) {
+                ResetView();
+                return true;
+            }
+
+            if (PointInRect(x, y, fitButton)) {
                 FitToAlerts();
                 return true;
             }
@@ -2025,6 +2084,33 @@ private:
 
     void OnMouseMove(int x, int y, UINT buttons)
     {
+        const POINT oldHover = m_hoverPoint;
+        const bool oldHoverOverlay = HitAnyOverlayInterface(oldHover.x, oldHover.y);
+        m_hoverPoint = POINT{ x, y };
+
+        if (!m_trackingMouseLeave) {
+            TRACKMOUSEEVENT tme{};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = m_hwnd;
+            if (TrackMouseEvent(&tme))
+                m_trackingMouseLeave = true;
+        }
+
+        if (m_draggingToolbarPanel && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            POINT pt{ x, y };
+            const int dx = pt.x - m_lastMouse.x;
+            const int dy = pt.y - m_lastMouse.y;
+            if (dx != 0 || dy != 0) {
+                m_toolbarPanelOffsetX += static_cast<float>(dx);
+                m_toolbarPanelOffsetY += static_cast<float>(dy);
+                ClampToolbarPanelOffsets(BuildViewState());
+                m_lastMouse = pt;
+                Invalidate();
+            }
+            return;
+        }
+
         if (m_draggingUsersPanel && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
             POINT pt{ x, y };
             const int dx = pt.x - m_lastMouse.x;
@@ -2070,7 +2156,11 @@ private:
             return;
         }
 
-        if (m_notificationUiMouseDown || HitUsersPanelInterface(x, y) || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
+        const bool hoverOverlay = HitAnyOverlayInterface(x, y);
+        if ((oldHoverOverlay || hoverOverlay) && (oldHover.x != x || oldHover.y != y))
+            Invalidate();
+
+        if (m_notificationUiMouseDown || hoverOverlay) {
             if (!m_hoveredAlertId.empty() || !m_hoveredEarthquakeId.empty() || !m_hoveredWeatherSystemId.empty() ||
                 !m_hoveredWeatherWarningId.empty() || !m_hoveredFloodId.empty()) {
                 m_hoveredAlertId.clear();
@@ -2081,15 +2171,6 @@ private:
                 Invalidate();
             }
             return;
-        }
-
-        if (!m_trackingMouseLeave) {
-            TRACKMOUSEEVENT tme{};
-            tme.cbSize = sizeof(tme);
-            tme.dwFlags = TME_LEAVE;
-            tme.hwndTrack = m_hwnd;
-            if (TrackMouseEvent(&tme))
-                m_trackingMouseLeave = true;
         }
 
         std::wstring hoveredId = HitTestAlert(x, y);
@@ -2136,6 +2217,16 @@ private:
     {
         if (GetCapture() == m_hwnd)
             ReleaseCapture();
+
+        if (m_draggingToolbarPanel) {
+            m_draggingToolbarPanel = false;
+            m_notificationUiMouseDown = false;
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            Invalidate();
+            return;
+        }
 
         if (m_draggingUsersPanel) {
             m_draggingUsersPanel = false;
@@ -3153,6 +3244,35 @@ private:
         return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
     }
 
+    bool IsOverlayHot(const D2D1_RECT_F& rect) const
+    {
+        return PointInRect(m_hoverPoint.x, m_hoverPoint.y, rect);
+    }
+
+    bool IsOverlayPressed(const D2D1_RECT_F& rect) const
+    {
+        return m_leftButtonDown && IsOverlayHot(rect);
+    }
+
+    OverlayButton MakeOverlayButton(const std::wstring& text, const D2D1_RECT_F& rect, bool enabled = true) const
+    {
+        OverlayButton button;
+        button.text = text;
+        button.bounds = rect;
+        button.enabled = enabled;
+        button.hot = enabled && IsOverlayHot(rect);
+        button.pressed = enabled && IsOverlayPressed(rect);
+        return button;
+    }
+
+    bool HitAnyOverlayInterface(int x, int y) const
+    {
+        return HitUsersPanelInterface(x, y) ||
+            HitResponderChatInterface(x, y) ||
+            HitNotificationInterface(x, y) ||
+            HitNoteInterface(x, y);
+    }
+
     struct ResponderChatLayout
     {
         D2D1_RECT_F panelRect{};
@@ -3283,6 +3403,26 @@ private:
         m_usersPanelOffsetY = openTop - baseTop;
     }
 
+    void ClampToolbarPanelOffsets(const ViewState& view)
+    {
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float panelW = 274.0f;
+        const float panelH = 130.0f;
+        const float baseLeft = 18.0f;
+        const float baseTop = 18.0f;
+        const float left = ClampValue(
+            baseLeft + m_toolbarPanelOffsetX,
+            kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - panelW));
+        const float top = ClampValue(
+            baseTop + m_toolbarPanelOffsetY,
+            kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, height - kOverlayUiMargin - panelH));
+        m_toolbarPanelOffsetX = left - baseLeft;
+        m_toolbarPanelOffsetY = top - baseTop;
+    }
+
     static std::wstring ChatPositionKey(std::wstring position)
     {
         position = ToLower(Trim(position));
@@ -3399,7 +3539,7 @@ private:
         if (!layout.hasPanel)
             return;
 
-        const OverlayButton toggleButton{ 0, m_usersPanelCollapsed ? L">" : L"<", layout.toggleRect, true, false, false };
+        const OverlayButton toggleButton = MakeOverlayButton(m_usersPanelCollapsed ? L">" : L"<", layout.toggleRect);
         if (layout.progress <= 0.04f) {
             m_overlayUi.DrawButton(toggleButton);
             return;
@@ -3675,7 +3815,7 @@ private:
             return;
 
         const ResponderChatLayout layout = BuildResponderChatLayout(view);
-        const OverlayButton toggleButton{ 0, m_responderChatCollapsed ? L"^" : L"v", layout.toggleRect, true, false, false };
+        const OverlayButton toggleButton = MakeOverlayButton(m_responderChatCollapsed ? L"^" : L"v", layout.toggleRect);
         if (layout.progress <= 0.04f) {
             m_overlayUi.DrawButton(toggleButton);
             return;
@@ -3697,7 +3837,7 @@ private:
             layout.panelRect.top + kOverlayUiPadding + 22.0f);
         m_overlayUi.DrawLabel(L"Responders Chat", m_overlayUi.TitleFormat(), titleRect);
         if (m_canClearResponderChat)
-            m_overlayUi.DrawButton(OverlayButton{ 0, L"Clear", layout.clearRect, !m_chatMessages.empty(), false, false });
+            m_overlayUi.DrawButton(MakeOverlayButton(L"Clear", layout.clearRect, !m_chatMessages.empty()));
 
         std::wstring countText = m_chatMessages.empty()
             ? L"No responder messages yet"
@@ -3738,10 +3878,7 @@ private:
         input.focused = m_responderChatInputFocused;
         m_overlayUi.DrawTextBox(input);
 
-        OverlayButton sendButton;
-        sendButton.text = L"Send";
-        sendButton.bounds = layout.sendRect;
-        sendButton.enabled = !Trim(m_responderChatDraft).empty();
+        OverlayButton sendButton = MakeOverlayButton(L"Send", layout.sendRect, !Trim(m_responderChatDraft).empty());
         m_overlayUi.DrawButton(sendButton);
     }
 
@@ -4249,7 +4386,7 @@ private:
             return;
 
         const D2D1_RECT_F rect = layout.historyRect;
-        const OverlayButton toggleButton{ 0, m_notificationHistoryCollapsed ? L"<" : L">", layout.historyToggleRect, true, false, false };
+        const OverlayButton toggleButton = MakeOverlayButton(m_notificationHistoryCollapsed ? L"<" : L">", layout.historyToggleRect);
         if (layout.historyProgress <= 0.04f) {
             m_overlayUi.DrawButton(toggleButton);
             return;
@@ -4269,7 +4406,7 @@ private:
             rect.right - kOverlayUiPadding - 78.0f,
             rect.top + kOverlayUiPadding + 22.0f);
         m_overlayUi.DrawLabel(L"Notification History", m_overlayUi.TitleFormat(), titleRect);
-        m_overlayUi.DrawButton(OverlayButton{ 0, L"Clear", NotificationHistoryClearRect(rect), !m_notificationHistory.empty(), false, false });
+        m_overlayUi.DrawButton(MakeOverlayButton(L"Clear", NotificationHistoryClearRect(rect), !m_notificationHistory.empty()));
 
         std::wstring countText = m_notificationHistory.empty()
             ? L"No notifications yet"
@@ -4344,10 +4481,7 @@ private:
             m_notificationContextMenuRect.top + 6.0f,
             m_notificationContextMenuRect.right - 6.0f,
             m_notificationContextMenuRect.bottom - 6.0f);
-        OverlayButton deleteButton;
-        deleteButton.text = L"Delete";
-        deleteButton.bounds = buttonRect;
-        deleteButton.enabled = m_notificationContextMenuIndex < m_notificationHistory.size();
+        OverlayButton deleteButton = MakeOverlayButton(L"Delete", buttonRect, m_notificationContextMenuIndex < m_notificationHistory.size());
         m_overlayUi.DrawButton(deleteButton);
     }
 
@@ -4775,9 +4909,7 @@ private:
         m_overlayUi.DrawLabel(title, m_overlayUi.TitleFormat(), titleRect);
 
         D2D1_RECT_F closeRect = BuildNoteCloseRect(rect);
-        OverlayButton closeButton;
-        closeButton.text = L"x";
-        closeButton.bounds = closeRect;
+        OverlayButton closeButton = MakeOverlayButton(L"x", closeRect);
         m_overlayUi.DrawButton(closeButton);
 
         OverlayTextBox textBox;
@@ -4796,14 +4928,10 @@ private:
                 1.4f);
         }
 
-        OverlayButton saveButton;
-        saveButton.text = L"Save";
-        saveButton.bounds = D2D1::RectF(rect.right - 156.0f, rect.bottom - 42.0f, rect.right - 84.0f, rect.bottom - 12.0f);
+        OverlayButton saveButton = MakeOverlayButton(L"Save", D2D1::RectF(rect.right - 156.0f, rect.bottom - 42.0f, rect.right - 84.0f, rect.bottom - 12.0f));
         m_overlayUi.DrawButton(saveButton);
 
-        OverlayButton cancelButton;
-        cancelButton.text = L"Cancel";
-        cancelButton.bounds = D2D1::RectF(rect.right - 78.0f, rect.bottom - 42.0f, rect.right - 12.0f, rect.bottom - 12.0f);
+        OverlayButton cancelButton = MakeOverlayButton(L"Cancel", D2D1::RectF(rect.right - 78.0f, rect.bottom - 42.0f, rect.right - 12.0f, rect.bottom - 12.0f));
         m_overlayUi.DrawButton(cancelButton);
     }
 
@@ -4812,22 +4940,19 @@ private:
         if (!m_rt || !m_showToolbarPanel)
             return;
 
-        m_overlayUi.DrawGlassPanel(BuildToolbarPanelRect(), 10.0f);
+        const D2D1_RECT_F panel = BuildToolbarPanelRect();
+        m_overlayUi.DrawGlassPanel(panel, 10.0f);
+        m_overlayUi.DrawLabel(
+            L"Map Controls",
+            m_overlayUi.TitleFormat(),
+            D2D1::RectF(panel.left + 12.0f, panel.top + 11.0f, panel.right - 12.0f, panel.top + 34.0f));
 
-        OverlayButton refreshButton;
-        refreshButton.text = L"Refresh";
-        refreshButton.bounds = BuildRefreshButtonRect();
-        m_overlayUi.DrawButton(refreshButton);
+        m_overlayUi.DrawButton(MakeOverlayButton(L"Refresh", BuildRefreshButtonRect()));
+        m_overlayUi.DrawButton(MakeOverlayButton(L"Reset View", BuildResetViewButtonRect()));
+        m_overlayUi.DrawButton(MakeOverlayButton(L"Fit Alerts", BuildFitAlertsButtonRect()));
 
-        OverlayButton resetButton;
-        resetButton.text = L"Reset View";
-        resetButton.bounds = BuildResetViewButtonRect();
-        m_overlayUi.DrawButton(resetButton);
-
-        OverlayButton addButton;
-        addButton.text = m_addNoteMode ? L"Adding" : L"+ Note";
-        addButton.bounds = BuildAddNoteButtonRect();
-        addButton.hot = m_addNoteMode;
+        OverlayButton addButton = MakeOverlayButton(m_addNoteMode ? L"Adding" : L"+ Note", BuildAddNoteButtonRect());
+        addButton.hot = addButton.hot || m_addNoteMode;
         m_overlayUi.DrawButton(addButton);
 
         if (m_addNoteMode) {
@@ -5554,7 +5679,7 @@ private:
             return;
         }
 
-        const bool fillBoundary = m_zoom <= kFullBoundaryMaxZoom;
+        const bool fillBoundary = m_zoom <= kWorldGeometryFillMaxZoom;
         struct VisibleWorldRing
         {
             BoundaryRing* ring = nullptr;
@@ -5632,9 +5757,11 @@ private:
 
     POINT m_mouseDown{};
     POINT m_lastMouse{};
+    POINT m_hoverPoint{ -10000, -10000 };
     bool m_dragging = false;
     bool m_interactivePan = false;
     bool m_notificationUiMouseDown = false;
+    bool m_leftButtonDown = false;
     bool m_addNoteMode = false;
     bool m_polygonCaptureActive = false;
     bool m_draggingPolygonPoint = false;
@@ -5706,6 +5833,9 @@ private:
     bool m_draggingUsersPanel = false;
     float m_usersPanelOffsetX = 0.0f;
     float m_usersPanelOffsetY = 0.0f;
+    bool m_draggingToolbarPanel = false;
+    float m_toolbarPanelOffsetX = 0.0f;
+    float m_toolbarPanelOffsetY = 0.0f;
     float m_notificationHistoryScroll = 0.0f;
     float m_notificationHistoryScrollbarDragOffset = 0.0f;
     D2D1_RECT_F m_lastActiveNotificationRect{};

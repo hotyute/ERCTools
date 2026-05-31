@@ -178,19 +178,34 @@ void MapOverlayUiRenderer::DrawButton(const OverlayButton& button)
     if (!m_boundRenderTarget || !ValidRect(button.bounds))
         return;
 
-    ID2D1SolidColorBrush* fill = button.hot ? m_buttonHotBrush.Get() : m_buttonBrush.Get();
+    const bool interactiveHot = button.enabled && button.hot;
+    const bool interactivePressed = button.enabled && button.pressed;
+    ID2D1SolidColorBrush* fill = interactiveHot ? m_buttonHotBrush.Get() : m_buttonBrush.Get();
     ID2D1SolidColorBrush* text = button.enabled ? m_textBrush.Get() : m_mutedTextBrush.Get();
-    if (button.pressed)
+    ID2D1SolidColorBrush* border = interactiveHot ? m_accentBrush.Get() : m_borderBrush.Get();
+    float borderWidth = interactiveHot ? 1.35f : 1.0f;
+    if (interactivePressed) {
         fill = m_panelStrongBrush.Get();
+        border = m_accentBrush.Get();
+        borderWidth = 1.6f;
+    }
 
-    const D2D1_ROUNDED_RECT rounded = D2D1::RoundedRect(button.bounds, 7.0f, 7.0f);
+    D2D1_RECT_F buttonRect = button.bounds;
+    if (interactivePressed) {
+        buttonRect.left += 1.0f;
+        buttonRect.top += 1.0f;
+        buttonRect.right += 1.0f;
+        buttonRect.bottom += 1.0f;
+    }
+
+    const D2D1_ROUNDED_RECT rounded = D2D1::RoundedRect(buttonRect, 7.0f, 7.0f);
     m_boundRenderTarget->FillRoundedRectangle(rounded, fill);
-    m_boundRenderTarget->DrawRoundedRectangle(rounded, m_borderBrush.Get(), 1.0f);
+    m_boundRenderTarget->DrawRoundedRectangle(rounded, border, borderWidth);
 
     if (m_controlFormat) {
         m_controlFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         m_controlFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        DrawLabel(button.text, m_controlFormat.Get(), button.bounds, text);
+        DrawLabel(button.text, m_controlFormat.Get(), buttonRect, text);
         m_controlFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         m_controlFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     }
