@@ -93,6 +93,7 @@ struct BoundaryRenderSource
 constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
 constexpr int kMaxFallbackTileZoomDelta = 5;
+constexpr int kMaxInteractiveTileRequestsPerFrame = 2;
 constexpr int kAlertFocusZoom = 9;
 
 // Interaction timing.
@@ -1074,6 +1075,7 @@ private:
                 m_hoveredWeatherSystemId.clear();
                 m_hoveredWeatherWarningId.clear();
                 m_hoveredFloodId.clear();
+                InvalidateSceneCache();
                 Invalidate();
             }
             return 0;
@@ -1127,8 +1129,8 @@ private:
             break;
 
         case WM_APP_TILE_READY:
-            if (!m_interactivePan)
-                InvalidateRect(m_hwnd, nullptr, FALSE);
+            m_sceneCacheDirty = true;
+            InvalidateRect(m_hwnd, nullptr, FALSE);
             return 0;
 
         case WM_DESTROY:
@@ -1297,6 +1299,8 @@ private:
     void InvalidateSceneCache()
     {
         m_sceneBitmap.Reset();
+        m_sceneBitmapBack.Reset();
+        m_sceneCacheDirty = false;
         m_sceneBitmapWidth = 0;
         m_sceneBitmapHeight = 0;
     }
@@ -2168,6 +2172,7 @@ private:
                 m_hoveredWeatherSystemId.clear();
                 m_hoveredWeatherWarningId.clear();
                 m_hoveredFloodId.clear();
+                InvalidateSceneCache();
                 Invalidate();
             }
             return;
@@ -2189,6 +2194,7 @@ private:
             m_hoveredWeatherSystemId = std::move(hoveredWeatherSystemId);
             m_hoveredWeatherWarningId = std::move(hoveredWeatherWarningId);
             m_hoveredFloodId = std::move(hoveredFloodId);
+            InvalidateSceneCache();
             Invalidate();
         }
 
@@ -4742,6 +4748,10 @@ private:
                     if (!interactive) {
                         RequestTile(key);
                     }
+                    else if (m_interactiveTileRequestsThisFrame < kMaxInteractiveTileRequestsPerFrame) {
+                        RequestTile(key);
+                        ++m_interactiveTileRequestsThisFrame;
+                    }
 
                     if (!drewFallback)
                         m_rt->FillRectangle(dest, m_placeholderBrush.Get());
@@ -5018,7 +5028,7 @@ private:
     }
 
 
-    void UpdateSceneCache(const ViewState& view)
+    void UpdateSceneCache(const ViewState& view, bool avoidCurrentBitmapSource = false)
     {
         if (!m_rt)
             return;
@@ -5027,13 +5037,15 @@ private:
         if (pixelSize.width == 0 || pixelSize.height == 0)
             return;
 
-        if (!m_sceneBitmap ||
+        ComPtr<ID2D1Bitmap>& targetBitmap = avoidCurrentBitmapSource ? m_sceneBitmapBack : m_sceneBitmap;
+
+        if (!targetBitmap ||
             m_sceneBitmapWidth != static_cast<int>(pixelSize.width) ||
             m_sceneBitmapHeight != static_cast<int>(pixelSize.height))
         {
-            m_sceneBitmap.Reset();
+            targetBitmap.Reset();
             D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(m_rt->GetPixelFormat());
-            if (FAILED(m_rt->CreateBitmap(pixelSize, nullptr, 0, &props, &m_sceneBitmap)))
+            if (FAILED(m_rt->CreateBitmap(pixelSize, nullptr, 0, &props, &targetBitmap)))
                 return;
 
             m_sceneBitmapWidth = static_cast<int>(pixelSize.width);
@@ -5042,13 +5054,52 @@ private:
 
         D2D1_POINT_2U destPoint = D2D1::Point2U(0, 0);
         D2D1_RECT_U srcRect = D2D1::RectU(0, 0, pixelSize.width, pixelSize.height);
-        if (FAILED(m_sceneBitmap->CopyFromRenderTarget(&destPoint, m_rt.Get(), &srcRect))) {
+        if (FAILED(targetBitmap->CopyFromRenderTarget(&destPoint, m_rt.Get(), &srcRect))) {
             InvalidateSceneCache();
             return;
         }
 
+        if (avoidCurrentBitmapSource)
+            m_sceneBitmap.Swap(m_sceneBitmapBack);
+
+        m_sceneCacheDirty = false;
         m_sceneBitmapZoom = m_zoom;
         m_sceneBitmapCenterWorld = view.centerWorld;
+    }
+
+    bool IsSceneCacheCurrent(const ViewState& view, bool allowDirty = false) const
+    {
+        if (!m_rt || !m_sceneBitmap || m_sceneBitmapWidth <= 0 || m_sceneBitmapHeight <= 0)
+            return false;
+        if (m_sceneCacheDirty && !allowDirty)
+            return false;
+
+        const D2D1_SIZE_U pixelSize = m_rt->GetPixelSize();
+        if (m_sceneBitmapWidth != static_cast<int>(pixelSize.width) ||
+            m_sceneBitmapHeight != static_cast<int>(pixelSize.height) ||
+            m_zoom != m_sceneBitmapZoom)
+        {
+            return false;
+        }
+
+        const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
+        double dx = m_sceneBitmapCenterWorld.x - view.centerWorld.x;
+        if (dx > worldSize * 0.5)
+            dx -= worldSize;
+        else if (dx < -worldSize * 0.5)
+            dx += worldSize;
+
+        const double dy = m_sceneBitmapCenterWorld.y - view.centerWorld.y;
+        return std::abs(dx) < 0.5 && std::abs(dy) < 0.5;
+    }
+
+    bool IsOverlayUiDragActive() const
+    {
+        return m_notificationUiMouseDown ||
+            m_draggingToolbarPanel ||
+            m_draggingUsersPanel ||
+            m_draggingNotificationHistoryScrollbar ||
+            m_draggingNotificationHistoryContent;
     }
 
     bool DrawCachedScene(const ViewState& view, D2D1_RECT_F* destOut = nullptr)
@@ -5148,6 +5199,33 @@ private:
             DrawTilesInClip(strip);
     }
 
+    void DrawSceneOverlaysInClip(const D2D1_RECT_F& clip, const ViewState& overlayView, const ViewState& boundaryView)
+    {
+        if (!m_rt || clip.right <= clip.left || clip.bottom <= clip.top)
+            return;
+
+        const bool hadClip = m_hasOverlayClip;
+        const D2D1_RECT_F previousClip = m_overlayClip;
+        m_hasOverlayClip = true;
+        m_overlayClip = clip;
+
+        m_rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        DrawSceneOverlays(overlayView, boundaryView);
+        m_rt->PopAxisAlignedClip();
+
+        m_hasOverlayClip = hadClip;
+        m_overlayClip = previousClip;
+    }
+
+    void DrawExposedCachedSceneEdges(const std::vector<D2D1_RECT_F>& strips, const ViewState& overlayView, const ViewState& boundaryView)
+    {
+        // The cached scene is only the previous viewport. Draw full overlays just
+        // into newly exposed strips so panning reveals boundary/fill/markers ahead
+        // of the cursor without paying to redraw the whole map each frame.
+        for (const D2D1_RECT_F& strip : strips)
+            DrawSceneOverlaysInClip(strip, overlayView, boundaryView);
+    }
+
     void OnPaint()
     {
         PAINTSTRUCT ps{};
@@ -5159,17 +5237,25 @@ private:
             m_rt->Clear(D2D1::ColorF(kMapWaterR, kMapWaterG, kMapWaterB, 1.0f));
 
             const bool interactive = m_interactivePan;
+            m_interactiveTileRequestsThisFrame = 0;
             const ViewState view = BuildViewState();
             const ViewState overlayView = BuildViewState(220.0);
             const ViewState boundaryView = BuildViewState(kBoundaryDrawMarginPixels);
             bool drewCachedScene = false;
             D2D1_RECT_F cachedSceneDest{};
+            const bool allowStaleSceneForOverlayDrag = IsOverlayUiDragActive();
 
-            if (interactive && m_sceneBitmap && m_zoom == m_sceneBitmapZoom) {
+            if (!interactive && IsSceneCacheCurrent(view, allowStaleSceneForOverlayDrag)) {
+                drewCachedScene = DrawCachedScene(view, &cachedSceneDest);
+            }
+            else if (interactive && m_sceneBitmap && m_zoom == m_sceneBitmapZoom) {
                 drewCachedScene = DrawCachedScene(view, &cachedSceneDest);
                 if (drewCachedScene) {
                     const std::vector<D2D1_RECT_F> exposedStrips = BuildExposedSceneStrips(view, cachedSceneDest);
                     DrawExposedCachedSceneTiles(exposedStrips);
+                    DrawExposedCachedSceneEdges(exposedStrips, overlayView, boundaryView);
+                    m_rt->Flush();
+                    UpdateSceneCache(view, true);
                 }
             }
 
@@ -5736,6 +5822,7 @@ private:
     size_t m_draggingPolygonIndex = static_cast<size_t>(-1);
     size_t m_draggingPolygonPointIndex = static_cast<size_t>(-1);
     bool m_trackingMouseLeave = false;
+    int m_interactiveTileRequestsThisFrame = 0;
     std::wstring m_hoveredAlertId;
     std::wstring m_hoveredEarthquakeId;
     std::wstring m_hoveredWeatherSystemId;
@@ -5842,6 +5929,8 @@ private:
     ComPtr<ID2D1StrokeStyle> m_forecastErrorStrokeStyle;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
     ComPtr<ID2D1Bitmap> m_sceneBitmap;
+    ComPtr<ID2D1Bitmap> m_sceneBitmapBack;
+    bool m_sceneCacheDirty = false;
     int m_sceneBitmapWidth = 0;
     int m_sceneBitmapHeight = 0;
     int m_sceneBitmapZoom = kDefaultZoom;
