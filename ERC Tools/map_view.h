@@ -21,6 +21,7 @@ public:
     using RefreshCallback = std::function<void()>;
     using NotificationHistoryClearCallback = std::function<void()>;
     using NotificationHistoryActivateCallback = std::function<void(const AppNotification&)>;
+    using NotificationHistoryDeleteCallback = std::function<void(size_t index)>;
     using ChatSendCallback = std::function<void(const std::wstring& text)>;
     using ChatClearCallback = std::function<void()>;
 
@@ -45,6 +46,7 @@ public:
     void SetRefreshCallback(RefreshCallback cb);
     void SetNotificationHistoryClearCallback(NotificationHistoryClearCallback cb);
     void SetNotificationHistoryActivateCallback(NotificationHistoryActivateCallback cb);
+    void SetNotificationHistoryDeleteCallback(NotificationHistoryDeleteCallback cb);
     void SetChatSendCallback(ChatSendCallback cb);
     void SetChatClearCallback(ChatClearCallback cb);
     void SetChatClearEnabled(bool enabled);
@@ -70,6 +72,7 @@ public:
     void SetAreaLabelsVisible(bool visible);
     void SetRoadDepictionsVisible(bool visible);
     void SetDisplayWorldMap(bool visible);
+    void SetFpsCounterVisible(bool visible);
     void SetActiveNotification(const AppNotification& notification);
     void ClearActiveNotification();
     void SetNotificationHistory(const std::vector<AppNotification>& notifications);

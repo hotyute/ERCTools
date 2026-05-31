@@ -55,6 +55,18 @@ struct BoundarySegment
     double maxLon = 0.0;
 };
 
+struct BoundaryLod
+{
+    std::vector<GeoPoint> points;
+    std::vector<BoundarySegment> segmentsByMinLat;
+    ComPtr<ID2D1PathGeometry> fillGeometry;
+    int fillGeometryZoom = -1;
+    double minLat = 0.0;
+    double maxLat = 0.0;
+    double minLon = 0.0;
+    double maxLon = 0.0;
+};
+
 struct BoundaryRing
 {
     std::vector<GeoPoint> points;
@@ -65,6 +77,7 @@ struct BoundaryRing
     double maxLat = 0.0;
     double minLon = 0.0;
     double maxLon = 0.0;
+    std::vector<BoundaryLod> worldLods;
 };
 
 // Tile/cache tuning.
@@ -99,6 +112,10 @@ constexpr float kNoteEditorMinHeight = 144.0f;
 // Boundary rendering.
 constexpr double kBoundaryDrawMarginPixels = 512.0;
 constexpr int kFullBoundaryMaxZoom = 7;
+constexpr double kWorldLodMidToleranceDegrees = 0.035;
+constexpr double kWorldLodFarToleranceDegrees = 0.09;
+constexpr double kWorldLodGlobalToleranceDegrees = 0.22;
+constexpr UINT kNotificationContextDeleteId = 1;
 
 std::atomic<int> g_activeTileDownloads{ 0 };
 
@@ -147,6 +164,7 @@ public:
     using RefreshCallback = std::function<void()>;
     using NotificationHistoryClearCallback = std::function<void()>;
     using NotificationHistoryActivateCallback = std::function<void(const AppNotification&)>;
+    using NotificationHistoryDeleteCallback = std::function<void(size_t index)>;
     using ChatSendCallback = std::function<void(const std::wstring& text)>;
     using ChatClearCallback = std::function<void()>;
 
@@ -227,6 +245,11 @@ public:
     void SetNotificationHistoryActivateCallback(NotificationHistoryActivateCallback cb)
     {
         m_onNotificationHistoryActivate = std::move(cb);
+    }
+
+    void SetNotificationHistoryDeleteCallback(NotificationHistoryDeleteCallback cb)
+    {
+        m_onNotificationHistoryDelete = std::move(cb);
     }
 
     void SetChatSendCallback(ChatSendCallback cb)
@@ -433,6 +456,17 @@ public:
 
         m_displayWorldMap = visible;
         InvalidateSceneCache();
+        Invalidate();
+    }
+
+    void SetFpsCounterVisible(bool visible)
+    {
+        if (m_showFpsCounter == visible)
+            return;
+
+        m_showFpsCounter = visible;
+        m_fpsFrameCount = 0;
+        m_fpsLastSampleMs = GetTickCount64();
         Invalidate();
     }
 
@@ -687,10 +721,100 @@ public:
         Invalidate();
     }
 
+    static bool SameGeoPoint(const GeoPoint& a, const GeoPoint& b)
+    {
+        return std::abs(a.lat - b.lat) < 1e-10 && std::abs(a.lon - b.lon) < 1e-10;
+    }
+
+    static void RebuildBoundarySegments(const std::vector<GeoPoint>& points, std::vector<BoundarySegment>& segments)
+    {
+        segments.clear();
+        if (points.size() < 2)
+            return;
+
+        segments.reserve(points.size());
+        for (size_t i = 0; i < points.size(); ++i) {
+            BoundarySegment segment;
+            segment.a = points[i];
+            segment.b = points[(i + 1) % points.size()];
+            if (SameGeoPoint(segment.a, segment.b))
+                continue;
+            segment.minLat = MinValue(segment.a.lat, segment.b.lat);
+            segment.maxLat = MaxValue(segment.a.lat, segment.b.lat);
+            segment.minLon = MinValue(segment.a.lon, segment.b.lon);
+            segment.maxLon = MaxValue(segment.a.lon, segment.b.lon);
+            segments.push_back(segment);
+        }
+
+        std::sort(segments.begin(), segments.end(), [](const auto& a, const auto& b) {
+            return a.minLat < b.minLat;
+            });
+    }
+
+    static void SetBoundaryBounds(const std::vector<GeoPoint>& points, double& minLat, double& maxLat, double& minLon, double& maxLon)
+    {
+        if (points.empty()) {
+            minLat = maxLat = minLon = maxLon = 0.0;
+            return;
+        }
+
+        minLat = maxLat = points.front().lat;
+        minLon = maxLon = points.front().lon;
+        for (const GeoPoint& pt : points) {
+            minLat = MinValue(minLat, pt.lat);
+            maxLat = MaxValue(maxLat, pt.lat);
+            minLon = MinValue(minLon, pt.lon);
+            maxLon = MaxValue(maxLon, pt.lon);
+        }
+    }
+
+    static std::vector<GeoPoint> SimplifyBoundaryRingPoints(const std::vector<GeoPoint>& source, double toleranceDegrees)
+    {
+        if (source.size() < 18 || toleranceDegrees <= 0.0)
+            return source;
+
+        std::vector<GeoPoint> input = source;
+        if (input.size() > 1 && SameGeoPoint(input.front(), input.back()))
+            input.pop_back();
+        if (input.size() < 18)
+            return source;
+
+        const double toleranceSq = toleranceDegrees * toleranceDegrees;
+        std::vector<GeoPoint> simplified;
+        simplified.reserve(input.size());
+        simplified.push_back(input.front());
+
+        GeoPoint lastKept = input.front();
+        for (size_t i = 1; i + 1 < input.size(); ++i) {
+            const GeoPoint& pt = input[i];
+            const double dLat = pt.lat - lastKept.lat;
+            const double dLon = pt.lon - lastKept.lon;
+            if (dLat * dLat + dLon * dLon >= toleranceSq) {
+                simplified.push_back(pt);
+                lastKept = pt;
+            }
+        }
+
+        simplified.push_back(input.back());
+        if (simplified.size() < 4)
+            return source;
+        return simplified;
+    }
+
+    static BoundaryLod BuildBoundaryLod(const BoundaryRing& source, double toleranceDegrees)
+    {
+        BoundaryLod lod;
+        lod.points = SimplifyBoundaryRingPoints(source.points, toleranceDegrees);
+        SetBoundaryBounds(lod.points, lod.minLat, lod.maxLat, lod.minLon, lod.maxLon);
+        RebuildBoundarySegments(lod.points, lod.segmentsByMinLat);
+        return lod;
+    }
+
     bool LoadBoundaryRingsFromFile(
         const std::filesystem::path& path,
         std::vector<BoundaryRing>& target,
-        std::wstring* errorOut = nullptr)
+        std::wstring* errorOut = nullptr,
+        bool buildWorldLods = false)
     {
         std::ifstream in(path, std::ios::binary);
         if (!in) {
@@ -725,30 +849,15 @@ public:
                 continue;
 
             BoundaryRing cached;
-            cached.minLat = cached.maxLat = ring[0].lat;
-            cached.minLon = cached.maxLon = ring[0].lon;
-            for (const GeoPoint& pt : ring) {
-                cached.minLat = MinValue(cached.minLat, pt.lat);
-                cached.maxLat = MaxValue(cached.maxLat, pt.lat);
-                cached.minLon = MinValue(cached.minLon, pt.lon);
-                cached.maxLon = MaxValue(cached.maxLon, pt.lon);
-            }
-            cached.segmentsByMinLat.reserve(ring.size());
-            for (size_t i = 0; i < ring.size(); ++i) {
-                BoundarySegment segment;
-                segment.a = ring[i];
-                segment.b = ring[(i + 1) % ring.size()];
-                segment.minLat = MinValue(segment.a.lat, segment.b.lat);
-                segment.maxLat = MaxValue(segment.a.lat, segment.b.lat);
-                segment.minLon = MinValue(segment.a.lon, segment.b.lon);
-                segment.maxLon = MaxValue(segment.a.lon, segment.b.lon);
-                cached.segmentsByMinLat.push_back(segment);
-            }
-            std::sort(cached.segmentsByMinLat.begin(), cached.segmentsByMinLat.end(), [](const auto& a, const auto& b) {
-                return a.minLat < b.minLat;
-                });
-
             cached.points = std::move(ring);
+            SetBoundaryBounds(cached.points, cached.minLat, cached.maxLat, cached.minLon, cached.maxLon);
+            RebuildBoundarySegments(cached.points, cached.segmentsByMinLat);
+            if (buildWorldLods) {
+                cached.worldLods.reserve(3);
+                cached.worldLods.push_back(BuildBoundaryLod(cached, kWorldLodMidToleranceDegrees));
+                cached.worldLods.push_back(BuildBoundaryLod(cached, kWorldLodFarToleranceDegrees));
+                cached.worldLods.push_back(BuildBoundaryLod(cached, kWorldLodGlobalToleranceDegrees));
+            }
             target.push_back(std::move(cached));
         }
 
@@ -759,12 +868,12 @@ public:
 
     bool LoadUkBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut = nullptr)
     {
-        return LoadBoundaryRingsFromFile(path, m_ukBoundaryRings, errorOut);
+        return LoadBoundaryRingsFromFile(path, m_ukBoundaryRings, errorOut, false);
     }
 
     bool LoadWorldBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut = nullptr)
     {
-        return LoadBoundaryRingsFromFile(path, m_worldBoundaryRings, errorOut);
+        return LoadBoundaryRingsFromFile(path, m_worldBoundaryRings, errorOut, true);
     }
 
 private:
@@ -918,6 +1027,8 @@ private:
             return 0;
 
         case WM_RBUTTONDOWN:
+            if (HandleNotificationHistoryRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
             if (HandlePolygonRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             break;
@@ -1474,9 +1585,13 @@ private:
     {
         D2D1_POINT_2F anchor = GeoToScreen(view, m_noteEditorLat, m_noteEditorLon);
         float textHeight = 46.0f;
-        if (m_overlayUi.BodyFormat())
-            textHeight = MaxValue(46.0f, m_overlayUi.MeasureTextHeight(m_noteEditorText.empty() ? L" " : m_noteEditorText, m_overlayUi.BodyFormat(), kNoteEditorWidth - 32.0f));
-        const float height = ClampValue(94.0f + textHeight, kNoteEditorMinHeight, 320.0f);
+        if (m_overlayUi.BodyFormat()) {
+            const float textWidth = kNoteEditorWidth - 44.0f;
+            textHeight = MaxValue(46.0f, m_overlayUi.MeasureTextHeight(m_noteEditorText.empty() ? L" " : m_noteEditorText, m_overlayUi.BodyFormat(), textWidth));
+        }
+        const float desiredHeight = 42.0f + textHeight + 78.0f;
+        const float maxHeight = MaxValue(kNoteEditorMinHeight, static_cast<float>(view.height) - 28.0f);
+        const float height = ClampValue(desiredHeight, kNoteEditorMinHeight, MinValue(360.0f, maxHeight));
         return BuildNoteBubbleRect(view, anchor, kNoteEditorWidth, height);
     }
 
@@ -3873,9 +3988,9 @@ private:
         return false;
     }
 
-    bool NotificationHistoryNotificationAtPoint(int x, int y, AppNotification& notificationOut) const
+    bool NotificationHistoryNotificationAtPoint(int x, int y, AppNotification& notificationOut, size_t* indexOut = nullptr) const
     {
-        if (!m_showNotificationHistory || !m_onNotificationHistoryActivate)
+        if (!m_showNotificationHistory)
             return false;
 
         const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
@@ -3895,6 +4010,8 @@ private:
             const float itemH = NotificationItemHeight(notification, contentW);
             if (static_cast<float>(y) >= itemTop && static_cast<float>(y) <= itemTop + itemH) {
                 notificationOut = notification;
+                if (indexOut)
+                    *indexOut = i;
                 const int lineIndex = NotificationBodyLineIndexAtY(notification, itemTop, contentW, static_cast<float>(y));
                 if (lineIndex >= 0 && static_cast<size_t>(lineIndex) < notification.links.size()) {
                     const AppNotificationLink& link = notification.links[static_cast<size_t>(lineIndex)];
@@ -3905,7 +4022,7 @@ private:
                         notificationOut.links.clear();
                     }
                 }
-                else if (notification.links.size() == 1 &&
+                else if (!notification.links.empty() &&
                     notification.sourceType.empty() &&
                     notification.sourceId.empty() &&
                     !notification.links.front().sourceType.empty() &&
@@ -3921,6 +4038,42 @@ private:
             itemTop += itemH;
         }
         return false;
+    }
+
+    bool HandleNotificationHistoryRightClick(int x, int y)
+    {
+        if (!m_onNotificationHistoryDelete)
+            return false;
+
+        AppNotification notification;
+        size_t index = static_cast<size_t>(-1);
+        if (!NotificationHistoryNotificationAtPoint(x, y, notification, &index))
+            return false;
+        if (index == static_cast<size_t>(-1))
+            return false;
+
+        HMENU menu = CreatePopupMenu();
+        if (!menu)
+            return true;
+
+        AppendMenuW(menu, MF_STRING, kNotificationContextDeleteId, L"Delete");
+        POINT pt{ x, y };
+        ClientToScreen(m_hwnd, &pt);
+        const UINT command = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+            pt.x,
+            pt.y,
+            0,
+            m_hwnd,
+            nullptr);
+        DestroyMenu(menu);
+
+        if (command == kNotificationContextDeleteId) {
+            m_onNotificationHistoryDelete(index);
+            Invalidate();
+        }
+        return true;
     }
 
     bool TryActivateNotificationHistoryItem(int x, int y)
@@ -4606,6 +4759,37 @@ private:
         m_rt->DrawLine(a, b, m_textBrush.Get(), 2.0f);
     }
 
+    void UpdateFpsSample()
+    {
+        if (!m_showFpsCounter)
+            return;
+
+        const ULONGLONG now = GetTickCount64();
+        if (m_fpsLastSampleMs == 0)
+            m_fpsLastSampleMs = now;
+
+        ++m_fpsFrameCount;
+        const ULONGLONG elapsed = now - m_fpsLastSampleMs;
+        if (elapsed >= 500) {
+            m_fpsValue = static_cast<double>(m_fpsFrameCount) * 1000.0 / static_cast<double>(elapsed);
+            m_fpsFrameCount = 0;
+            m_fpsLastSampleMs = now;
+        }
+    }
+
+    void DrawFpsCounter()
+    {
+        if (!m_showFpsCounter || !m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return;
+
+        wchar_t buffer[48]{};
+        swprintf_s(buffer, L"FPS %.0f", m_fpsValue);
+        const float width = 78.0f;
+        const D2D1_RECT_F rect = D2D1::RectF(18.0f, 58.0f, 18.0f + width, 86.0f);
+        m_overlayUi.DrawGlassPanel(rect, 8.0f);
+        m_overlayUi.DrawLabel(buffer, m_overlayUi.ControlFormat(), D2D1::RectF(rect.left + 9.0f, rect.top + 6.0f, rect.right - 8.0f, rect.bottom - 5.0f));
+    }
+
 
     void UpdateSceneCache(const ViewState& view)
     {
@@ -4807,6 +4991,8 @@ private:
             DrawNotificationInterface(view);
             DrawUsersPanel(view);
             DrawResponderChat(view);
+            UpdateFpsSample();
+            DrawFpsCounter();
 
             HRESULT hr = m_rt->EndDraw();
             if (hr == D2DERR_RECREATE_TARGET)
@@ -5071,7 +5257,21 @@ private:
         }
     }
 
-    bool EnsureBoundaryFillGeometry(BoundaryRing& ring)
+    BoundaryLod* WorldBoundaryLodForZoom(BoundaryRing& ring)
+    {
+        if (ring.worldLods.size() < 3)
+            return nullptr;
+        if (m_zoom <= 3)
+            return &ring.worldLods[2];
+        if (m_zoom <= 5)
+            return &ring.worldLods[1];
+        if (m_zoom <= 9)
+            return &ring.worldLods[0];
+        return nullptr;
+    }
+
+    template <typename BoundaryLike>
+    bool EnsureBoundaryFillGeometry(BoundaryLike& ring)
     {
         if (!g_d2dFactory || ring.points.size() < 3)
             return false;
@@ -5106,7 +5306,8 @@ private:
         return true;
     }
 
-    void DrawBoundaryRingFull(BoundaryRing& ring, const ViewState& view)
+    template <typename BoundaryLike>
+    void DrawBoundaryRingFull(BoundaryLike& ring, const ViewState& view)
     {
         if (!m_rt || !EnsureBoundaryFillGeometry(ring))
             return;
@@ -5127,7 +5328,8 @@ private:
         m_rt->SetTransform(oldTransform);
     }
 
-    void DrawBoundaryRingVisibleStroke(const BoundaryRing& ring, const ViewState& view)
+    template <typename BoundaryLike>
+    void DrawBoundaryRingVisibleStroke(const BoundaryLike& ring, const ViewState& view)
     {
         if (!m_rt || !m_outlineStrokeBrush || ring.segmentsByMinLat.empty())
             return;
@@ -5224,6 +5426,15 @@ private:
             if (!RingIntersectsView(ring, view))
                 continue;
 
+            BoundaryLod* lod = WorldBoundaryLodForZoom(ring);
+            if (lod && lod->points.size() >= 3) {
+                if (fillBoundary)
+                    DrawBoundaryRingFull(*lod, view);
+                else
+                    DrawBoundaryRingVisibleStroke(*lod, view);
+                continue;
+            }
+
             if (fillBoundary)
                 DrawBoundaryRingFull(ring, view);
             else
@@ -5254,6 +5465,7 @@ private:
     RefreshCallback m_onRefresh;
     NotificationHistoryClearCallback m_onNotificationHistoryClear;
     NotificationHistoryActivateCallback m_onNotificationHistoryActivate;
+    NotificationHistoryDeleteCallback m_onNotificationHistoryDelete;
     ChatSendCallback m_onChatSend;
     ChatClearCallback m_onChatClear;
 
@@ -5311,6 +5523,7 @@ private:
     bool m_showAreaLabels = true;
     bool m_showRoadDepictions = false;
     bool m_displayWorldMap = false;
+    bool m_showFpsCounter = false;
     bool m_draggingNotificationHistoryScrollbar = false;
     bool m_draggingNotificationHistoryContent = false;
     bool m_responderChatCollapsed = false;
@@ -5339,6 +5552,9 @@ private:
     bool m_hasLastActiveNotificationRect = false;
     bool m_hasLastNotificationHistoryRect = false;
     MapOverlayUiRenderer m_overlayUi;
+    ULONGLONG m_fpsLastSampleMs = 0;
+    int m_fpsFrameCount = 0;
+    double m_fpsValue = 0.0;
 
     ComPtr<ID2D1HwndRenderTarget> m_rt;
     ComPtr<ID2D1SolidColorBrush> m_severeBrush;
@@ -5455,6 +5671,11 @@ void MapView::SetNotificationHistoryClearCallback(NotificationHistoryClearCallba
 void MapView::SetNotificationHistoryActivateCallback(NotificationHistoryActivateCallback cb)
 {
     m_impl->SetNotificationHistoryActivateCallback(std::move(cb));
+}
+
+void MapView::SetNotificationHistoryDeleteCallback(NotificationHistoryDeleteCallback cb)
+{
+    m_impl->SetNotificationHistoryDeleteCallback(std::move(cb));
 }
 
 void MapView::SetChatSendCallback(ChatSendCallback cb)
@@ -5580,6 +5801,11 @@ void MapView::SetRoadDepictionsVisible(bool visible)
 void MapView::SetDisplayWorldMap(bool visible)
 {
     m_impl->SetDisplayWorldMap(visible);
+}
+
+void MapView::SetFpsCounterVisible(bool visible)
+{
+    m_impl->SetFpsCounterVisible(visible);
 }
 
 void MapView::SetActiveNotification(const AppNotification& notification)

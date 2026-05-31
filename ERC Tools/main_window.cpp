@@ -87,6 +87,7 @@ constexpr int IDM_INCIDENT_OVERLAY_SUMMARY = 2039;
 constexpr int IDM_INCIDENT_OVERLAY_NOTIFIED_ONLY = 2040;
 constexpr int IDM_WEATHER_WARNING_POLYGONS = 2041;
 constexpr int IDM_WEATHER_SYSTEM_FORECASTS = 2042;
+constexpr int IDM_VIEW_FPS_COUNTER = 2043;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -1897,6 +1898,9 @@ private:
         m_map.SetNotificationHistoryActivateCallback([this](const AppNotification& notification) {
             ActivateNotificationHistoryEntry(notification);
             });
+        m_map.SetNotificationHistoryDeleteCallback([this](size_t index) {
+            DeleteNotificationHistoryEntry(index);
+            });
         m_map.SetChatSendCallback([this](const std::wstring& text) {
             SendChatTextAsync(text);
             });
@@ -1916,6 +1920,7 @@ private:
         m_map.SetAreaLabelsVisible(m_showAreaLabels);
         m_map.SetRoadDepictionsVisible(m_showRoadDepictions);
         m_map.SetDisplayWorldMap(m_displayWorldMap);
+        m_map.SetFpsCounterVisible(m_showFpsCounter);
         RenderChatHistory();
         RenderOnlineUsers();
         RenderNotificationHistory();
@@ -2203,6 +2208,10 @@ private:
             ToggleRoadDepictions();
             break;
 
+        case IDM_VIEW_FPS_COUNTER:
+            ToggleFpsCounter();
+            break;
+
         case IDM_ABOUT:
             ShowAboutDialog();
             break;
@@ -2447,6 +2456,7 @@ private:
             readBool("alertFilterUnplannedOnly", m_alertFilterUnplannedOnly);
             readBool("periodicRefreshEnabled", m_periodicRefreshEnabled);
             readBool("showNotificationHistory", m_showNotificationHistory);
+            readBool("showFpsCounter", m_showFpsCounter);
             readBool("displayWorldMap", m_displayWorldMap);
             readBool("syncSettingsFromServer", m_syncSettingsFromServer);
             readString("refreshIntervalText", m_refreshIntervalText);
@@ -2876,6 +2886,7 @@ private:
             settings["alertFilterUnplannedOnly"] = m_alertFilterUnplannedOnly;
             settings["periodicRefreshEnabled"] = m_periodicRefreshEnabled;
             settings["showNotificationHistory"] = m_showNotificationHistory;
+            settings["showFpsCounter"] = m_showFpsCounter;
             settings["displayWorldMap"] = m_displayWorldMap;
             settings["syncSettingsFromServer"] = m_syncSettingsFromServer;
             settings["refreshIntervalText"] = WideToUtf8(m_refreshIntervalText);
@@ -3789,6 +3800,16 @@ private:
         SetStatusText(L"Notification history cleared.");
     }
 
+    void DeleteNotificationHistoryEntry(size_t index)
+    {
+        if (index >= m_notificationHistory.size())
+            return;
+
+        m_notificationHistory.erase(m_notificationHistory.begin() + static_cast<std::ptrdiff_t>(index));
+        RenderNotificationHistory();
+        SetStatusText(L"Notification deleted.");
+    }
+
     void AddNotificationHistory(
         const std::wstring& title,
         const std::wstring& body,
@@ -4067,14 +4088,177 @@ private:
         SetStatusText(L"Showing notification incident details.");
     }
 
+    static void SelectListViewRow(HWND listView, int row)
+    {
+        if (!listView || row < 0)
+            return;
+
+        LVITEMW clear{};
+        clear.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+        clear.state = 0;
+        SendMessageW(listView, LVM_SETITEMSTATE, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(&clear));
+
+        LVITEMW select{};
+        select.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+        select.state = LVIS_SELECTED | LVIS_FOCUSED;
+        SendMessageW(listView, LVM_SETITEMSTATE, static_cast<WPARAM>(row), reinterpret_cast<LPARAM>(&select));
+        SendMessageW(listView, LVM_ENSUREVISIBLE, static_cast<WPARAM>(row), FALSE);
+        SetFocus(listView);
+    }
+
+    template <typename TEvent, typename TKeyFn>
+    static int FindEventIndexByKey(const std::vector<TEvent>& events, const std::wstring& sourceId, TKeyFn keyFn)
+    {
+        for (size_t i = 0; i < events.size(); ++i) {
+            if (keyFn(events[i]) == sourceId)
+                return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+    bool SelectEarthquakeNotificationSource(const std::wstring& sourceId)
+    {
+        ShowEarthquakeListWindow();
+        int row = FindEventIndexByKey(m_filteredEarthquakes, sourceId, [this](const EarthquakeEvent& event) {
+            return EarthquakeStableKey(event);
+            });
+        if (row < 0 && FindEventIndexByKey(m_allEarthquakes, sourceId, [this](const EarthquakeEvent& event) {
+            return EarthquakeStableKey(event);
+            }) >= 0)
+        {
+            m_earthquakeListMagnitudeText.clear();
+            m_earthquakeListTimeText.clear();
+            m_earthquakeListUseDateFilter = false;
+            m_earthquakeListPeriodText = L"All";
+            m_earthquakeFilterRegion.clear();
+            if (m_earthquakeListMagnitudeEdit)
+                SetWindowTextSafe(m_earthquakeListMagnitudeEdit, m_earthquakeListMagnitudeText);
+            if (m_earthquakeListTimeEdit)
+                SetWindowTextSafe(m_earthquakeListTimeEdit, m_earthquakeListTimeText);
+            if (m_earthquakeListPeriodCombo)
+                PopulatePeriodCombo(m_earthquakeListPeriodCombo, m_earthquakeListPeriodText);
+            SyncEarthquakeListDateModeControls();
+            ApplyEarthquakeListFilters();
+            row = FindEventIndexByKey(m_filteredEarthquakes, sourceId, [this](const EarthquakeEvent& event) {
+                return EarthquakeStableKey(event);
+                });
+        }
+        if (row < 0)
+            return false;
+        SelectListViewRow(m_earthquakeListView, row);
+        return true;
+    }
+
+    bool SelectWeatherSystemNotificationSource(const std::wstring& sourceId)
+    {
+        ShowWeatherSystemsListWindow();
+        int row = FindEventIndexByKey(m_filteredWeatherSystems, sourceId, [this](const WeatherSystemEvent& system) {
+            return WeatherSystemStableKey(system);
+            });
+        if (row < 0 && FindEventIndexByKey(m_allWeatherSystems, sourceId, [this](const WeatherSystemEvent& system) {
+            return WeatherSystemStableKey(system);
+            }) >= 0)
+        {
+            m_weatherSystemsListForecastText = L"All";
+            if (m_weatherSystemsListForecastCombo)
+                PopulateForecastMinimumCombo(m_weatherSystemsListForecastCombo, m_weatherSystemsListForecastText);
+            ApplyWeatherSystemsListFilter(false);
+            row = FindEventIndexByKey(m_filteredWeatherSystems, sourceId, [this](const WeatherSystemEvent& system) {
+                return WeatherSystemStableKey(system);
+                });
+        }
+        if (row < 0)
+            return false;
+        SelectListViewRow(m_weatherSystemsListView, row);
+        return true;
+    }
+
+    bool SelectWeatherWarningNotificationSource(const std::wstring& sourceId)
+    {
+        ShowWeatherWarningsListWindow();
+        int row = FindEventIndexByKey(m_filteredWeatherWarnings, sourceId, [this](const WeatherWarningEvent& warning) {
+            return WeatherWarningStableKey(warning);
+            });
+        if (row < 0 && FindEventIndexByKey(m_allWeatherWarnings, sourceId, [this](const WeatherWarningEvent& warning) {
+            return WeatherWarningStableKey(warning);
+            }) >= 0)
+        {
+            m_weatherWarningsListPeriodText = L"All";
+            if (m_weatherWarningsListPeriodCombo)
+                PopulatePeriodCombo(m_weatherWarningsListPeriodCombo, m_weatherWarningsListPeriodText);
+            ApplyWeatherWarningsListFilter(false);
+            row = FindEventIndexByKey(m_filteredWeatherWarnings, sourceId, [this](const WeatherWarningEvent& warning) {
+                return WeatherWarningStableKey(warning);
+                });
+        }
+        if (row < 0)
+            return false;
+        SelectListViewRow(m_weatherWarningsListView, row);
+        return true;
+    }
+
+    bool SelectFloodNotificationSource(const std::wstring& sourceId)
+    {
+        ShowFloodsListWindow();
+        int row = FindEventIndexByKey(m_filteredFloods, sourceId, [this](const FloodEvent& flood) {
+            return FloodStableKey(flood);
+            });
+        if (row < 0 && FindEventIndexByKey(m_allFloods, sourceId, [this](const FloodEvent& flood) {
+            return FloodStableKey(flood);
+            }) >= 0)
+        {
+            m_floodsListPeriodText = L"All";
+            if (m_floodsListPeriodCombo)
+                PopulatePeriodCombo(m_floodsListPeriodCombo, m_floodsListPeriodText);
+            ApplyFloodsListFilter(false);
+            row = FindEventIndexByKey(m_filteredFloods, sourceId, [this](const FloodEvent& flood) {
+                return FloodStableKey(flood);
+                });
+        }
+        if (row < 0)
+            return false;
+        SelectListViewRow(m_floodsListView, row);
+        return true;
+    }
+
     void ActivateNotificationHistoryEntry(const AppNotification& notification)
     {
-        if (ToLower(Trim(notification.sourceType)) != L"incident" || notification.sourceId.empty()) {
-            SetStatusText(L"This notification is not linked to a current incident.");
+        std::wstring sourceType = ToLower(Trim(notification.sourceType));
+        if (sourceType.empty() || notification.sourceId.empty()) {
+            SetStatusText(L"This notification is not linked to a selectable event.");
             return;
         }
 
-        ShowAlertDetailsById(notification.sourceId, true);
+        if (sourceType == L"incident") {
+            ShowAlertDetailsById(notification.sourceId, true);
+            return;
+        }
+        if (sourceType == L"earthquake") {
+            SetStatusText(SelectEarthquakeNotificationSource(notification.sourceId)
+                ? L"Showing notification earthquake."
+                : L"Notification source earthquake is no longer available.");
+            return;
+        }
+        if (sourceType == L"weather_system") {
+            SetStatusText(SelectWeatherSystemNotificationSource(notification.sourceId)
+                ? L"Showing notification weather system."
+                : L"Notification source weather system is no longer available.");
+            return;
+        }
+        if (sourceType == L"weather_warning") {
+            SetStatusText(SelectWeatherWarningNotificationSource(notification.sourceId)
+                ? L"Showing notification weather warning."
+                : L"Notification source weather warning is no longer available.");
+            return;
+        }
+        if (sourceType == L"flood") {
+            SetStatusText(SelectFloodNotificationSource(notification.sourceId)
+                ? L"Showing notification flood item."
+                : L"Notification source flood item is no longer available.");
+            return;
+        }
+
+        SetStatusText(L"This notification is not linked to a selectable event.");
     }
 
 
@@ -4870,6 +5054,7 @@ private:
         AppendMenuW(viewMenu, m_showNotificationHistory ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_NOTIFICATION_HISTORY, L"Notification History");
         AppendMenuW(viewMenu, m_showAreaLabels ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_AREA_LABELS, L"Area Labels");
         AppendMenuW(viewMenu, m_showRoadDepictions ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_ROAD_DEPICTIONS, L"Road Depictions");
+        AppendMenuW(viewMenu, m_showFpsCounter ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_FPS_COUNTER, L"FPS Counter");
         MENUITEMINFOW historyInfo{};
         historyInfo.cbSize = sizeof(historyInfo);
         historyInfo.fMask = MIIM_FTYPE;
@@ -4877,6 +5062,7 @@ private:
         SetMenuItemInfoW(viewMenu, IDM_VIEW_NOTIFICATION_HISTORY, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_AREA_LABELS, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_ROAD_DEPICTIONS, FALSE, &historyInfo);
+        SetMenuItemInfoW(viewMenu, IDM_VIEW_FPS_COUNTER, FALSE, &historyInfo);
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"View");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
@@ -8556,6 +8742,7 @@ private:
         CheckMenuItem(menu, IDM_VIEW_NOTIFICATION_HISTORY, MF_BYCOMMAND | (m_showNotificationHistory ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(menu, IDM_VIEW_AREA_LABELS, MF_BYCOMMAND | (m_showAreaLabels ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(menu, IDM_VIEW_ROAD_DEPICTIONS, MF_BYCOMMAND | (m_showRoadDepictions ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(menu, IDM_VIEW_FPS_COUNTER, MF_BYCOMMAND | (m_showFpsCounter ? MF_CHECKED : MF_UNCHECKED));
     }
 
     void ToggleNotificationHistory()
@@ -8564,6 +8751,14 @@ private:
         UpdateViewMenu();
         m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
         RenderNotificationHistory();
+        SaveSettings();
+    }
+
+    void ToggleFpsCounter()
+    {
+        m_showFpsCounter = !m_showFpsCounter;
+        UpdateViewMenu();
+        m_map.SetFpsCounterVisible(m_showFpsCounter);
         SaveSettings();
     }
 
@@ -8859,7 +9054,7 @@ private:
     }
 
     void PublishEarthquakeNotificationBatch(
-        const std::vector<std::wstring>& lines,
+        const std::vector<NotificationBatchItem>& lines,
         const std::wstring& singleTitle,
         const std::wstring& pluralSuffix)
     {
@@ -8868,9 +9063,15 @@ private:
 
         std::wstring title;
         std::wstring body;
+        std::wstring sourceType;
+        std::wstring sourceId;
+        std::vector<AppNotificationLink> links;
         if (lines.size() == 1) {
             title = singleTitle;
-            body = lines.front();
+            body = lines.front().line;
+            sourceType = lines.front().sourceType;
+            sourceId = lines.front().sourceId;
+            links.push_back({ lines.front().line, lines.front().sourceType, lines.front().sourceId });
         }
         else {
             title = std::to_wstring(lines.size()) + L" " + pluralSuffix;
@@ -8878,21 +9079,22 @@ private:
             for (size_t i = 0; i < displayCount; ++i) {
                 if (!body.empty())
                     body += L"\r\n";
-                body += lines[i];
+                body += lines[i].line;
+                links.push_back({ lines[i].line, lines[i].sourceType, lines[i].sourceId });
             }
             if (lines.size() > displayCount)
                 body += L"\r\n...";
         }
 
-        PublishNotification(title, body);
+        PublishNotification(title, body, sourceType, sourceId, links);
     }
 
     void NotifyForMatchingEarthquakes(const std::vector<EarthquakeEvent>& events)
     {
         std::unordered_set<std::wstring> currentKeys;
-        std::vector<std::wstring> newLines;
-        std::vector<std::wstring> updateLines;
-        std::vector<std::wstring> removedLines;
+        std::vector<NotificationBatchItem> newLines;
+        std::vector<NotificationBatchItem> updateLines;
+        std::vector<NotificationBatchItem> removedLines;
 
         for (const EarthquakeEvent& event : events) {
             std::wstring key = EarthquakeStableKey(event);
@@ -8901,7 +9103,7 @@ private:
             if (!EarthquakeMatchesNotification(event)) {
                 auto existing = m_notifiedEarthquakeStates.find(key);
                 if (m_haveEarthquakeNotificationSnapshot && existing != m_notifiedEarthquakeStates.end()) {
-                    removedLines.push_back(existing->second.line);
+                    removedLines.push_back({ existing->second.line, L"earthquake", key });
                     m_notifiedEarthquakeStates.erase(existing);
                 }
                 continue;
@@ -8911,11 +9113,11 @@ private:
             std::wstring line = EarthquakeNotificationLine(event);
             auto existing = m_notifiedEarthquakeStates.find(key);
             if (existing == m_notifiedEarthquakeStates.end()) {
-                newLines.push_back(line);
+                newLines.push_back({ line, L"earthquake", key });
                 m_notifiedEarthquakeStates[key] = EarthquakeNotificationState{ signature, line };
             }
             else if (existing->second.signature != signature) {
-                updateLines.push_back(line);
+                updateLines.push_back({ line, L"earthquake", key });
                 existing->second.signature = std::move(signature);
                 existing->second.line = std::move(line);
             }
@@ -8924,7 +9126,7 @@ private:
         if (m_haveEarthquakeNotificationSnapshot) {
             for (auto it = m_notifiedEarthquakeStates.begin(); it != m_notifiedEarthquakeStates.end();) {
                 if (currentKeys.find(it->first) == currentKeys.end()) {
-                    removedLines.push_back(it->second.line);
+                    removedLines.push_back({ it->second.line, L"earthquake", it->first });
                     it = m_notifiedEarthquakeStates.erase(it);
                 }
                 else {
@@ -8993,40 +9195,19 @@ private:
     }
 
     void PublishWeatherSystemNotificationBatch(
-        const std::vector<std::wstring>& lines,
+        const std::vector<NotificationBatchItem>& lines,
         const std::wstring& singleTitle,
         const std::wstring& pluralSuffix)
     {
-        if (lines.empty())
-            return;
-
-        std::wstring title;
-        std::wstring body;
-        if (lines.size() == 1) {
-            title = singleTitle;
-            body = lines.front();
-        }
-        else {
-            title = std::to_wstring(lines.size()) + L" " + pluralSuffix;
-            const size_t displayCount = MinValue<size_t>(lines.size(), 3);
-            for (size_t i = 0; i < displayCount; ++i) {
-                if (!body.empty())
-                    body += L"\r\n";
-                body += lines[i];
-            }
-            if (lines.size() > displayCount)
-                body += L"\r\n...";
-        }
-
-        PublishNotification(title, body);
+        PublishEarthquakeNotificationBatch(lines, singleTitle, pluralSuffix);
     }
 
     void NotifyForMatchingWeatherSystems(const std::vector<WeatherSystemEvent>& systems)
     {
         std::unordered_set<std::wstring> currentKeys;
-        std::vector<std::wstring> newLines;
-        std::vector<std::wstring> updateLines;
-        std::vector<std::wstring> removedLines;
+        std::vector<NotificationBatchItem> newLines;
+        std::vector<NotificationBatchItem> updateLines;
+        std::vector<NotificationBatchItem> removedLines;
 
         for (const WeatherSystemEvent& system : systems) {
             std::wstring key = WeatherSystemStableKey(system);
@@ -9035,7 +9216,7 @@ private:
             if (!WeatherSystemMatchesNotification(system)) {
                 auto existing = m_notifiedWeatherSystemStates.find(key);
                 if (m_haveWeatherSystemNotificationSnapshot && existing != m_notifiedWeatherSystemStates.end()) {
-                    removedLines.push_back(existing->second.line);
+                    removedLines.push_back({ existing->second.line, L"weather_system", key });
                     m_notifiedWeatherSystemStates.erase(existing);
                 }
                 continue;
@@ -9045,11 +9226,11 @@ private:
             std::wstring line = WeatherSystemNotificationLine(system);
             auto existing = m_notifiedWeatherSystemStates.find(key);
             if (existing == m_notifiedWeatherSystemStates.end()) {
-                newLines.push_back(line);
+                newLines.push_back({ line, L"weather_system", key });
                 m_notifiedWeatherSystemStates[key] = WeatherSystemNotificationState{ signature, line };
             }
             else if (existing->second.signature != signature) {
-                updateLines.push_back(line);
+                updateLines.push_back({ line, L"weather_system", key });
                 existing->second.signature = std::move(signature);
                 existing->second.line = std::move(line);
             }
@@ -9058,7 +9239,7 @@ private:
         if (m_haveWeatherSystemNotificationSnapshot) {
             for (auto it = m_notifiedWeatherSystemStates.begin(); it != m_notifiedWeatherSystemStates.end();) {
                 if (currentKeys.find(it->first) == currentKeys.end()) {
-                    removedLines.push_back(it->second.line);
+                    removedLines.push_back({ it->second.line, L"weather_system", it->first });
                     it = m_notifiedWeatherSystemStates.erase(it);
                 }
                 else {
@@ -9139,7 +9320,7 @@ private:
     }
 
     void PublishWeatherWarningNotificationBatch(
-        const std::vector<std::wstring>& lines,
+        const std::vector<NotificationBatchItem>& lines,
         const std::wstring& singleTitle,
         const std::wstring& pluralSuffix)
     {
@@ -9147,7 +9328,7 @@ private:
     }
 
     void PublishFloodNotificationBatch(
-        const std::vector<std::wstring>& lines,
+        const std::vector<NotificationBatchItem>& lines,
         const std::wstring& singleTitle,
         const std::wstring& pluralSuffix)
     {
@@ -9157,9 +9338,9 @@ private:
     void NotifyForWeatherWarnings(const std::vector<WeatherWarningEvent>& warnings)
     {
         std::unordered_set<std::wstring> currentKeys;
-        std::vector<std::wstring> newLines;
-        std::vector<std::wstring> updateLines;
-        std::vector<std::wstring> removedLines;
+        std::vector<NotificationBatchItem> newLines;
+        std::vector<NotificationBatchItem> updateLines;
+        std::vector<NotificationBatchItem> removedLines;
 
         for (const WeatherWarningEvent& warning : warnings) {
             std::wstring key = WeatherWarningStableKey(warning);
@@ -9169,11 +9350,11 @@ private:
             std::wstring line = WeatherWarningNotificationLine(warning);
             auto existing = m_notifiedWeatherWarningStates.find(key);
             if (existing == m_notifiedWeatherWarningStates.end()) {
-                newLines.push_back(line);
+                newLines.push_back({ line, L"weather_warning", key });
                 m_notifiedWeatherWarningStates[key] = WeatherWarningNotificationState{ signature, line };
             }
             else if (existing->second.signature != signature) {
-                updateLines.push_back(line);
+                updateLines.push_back({ line, L"weather_warning", key });
                 existing->second.signature = std::move(signature);
                 existing->second.line = std::move(line);
             }
@@ -9182,7 +9363,7 @@ private:
         if (m_haveWeatherWarningNotificationSnapshot) {
             for (auto it = m_notifiedWeatherWarningStates.begin(); it != m_notifiedWeatherWarningStates.end();) {
                 if (currentKeys.find(it->first) == currentKeys.end()) {
-                    removedLines.push_back(it->second.line);
+                    removedLines.push_back({ it->second.line, L"weather_warning", it->first });
                     it = m_notifiedWeatherWarningStates.erase(it);
                 }
                 else {
@@ -9200,9 +9381,9 @@ private:
     void NotifyForFloods(const std::vector<FloodEvent>& floods)
     {
         std::unordered_set<std::wstring> currentKeys;
-        std::vector<std::wstring> newLines;
-        std::vector<std::wstring> updateLines;
-        std::vector<std::wstring> removedLines;
+        std::vector<NotificationBatchItem> newLines;
+        std::vector<NotificationBatchItem> updateLines;
+        std::vector<NotificationBatchItem> removedLines;
 
         for (const FloodEvent& flood : floods) {
             std::wstring key = FloodStableKey(flood);
@@ -9212,11 +9393,11 @@ private:
             std::wstring line = FloodNotificationLine(flood);
             auto existing = m_notifiedFloodStates.find(key);
             if (existing == m_notifiedFloodStates.end()) {
-                newLines.push_back(line);
+                newLines.push_back({ line, L"flood", key });
                 m_notifiedFloodStates[key] = FloodNotificationState{ signature, line };
             }
             else if (existing->second.signature != signature) {
-                updateLines.push_back(line);
+                updateLines.push_back({ line, L"flood", key });
                 existing->second.signature = std::move(signature);
                 existing->second.line = std::move(line);
             }
@@ -9225,7 +9406,7 @@ private:
         if (m_haveFloodNotificationSnapshot) {
             for (auto it = m_notifiedFloodStates.begin(); it != m_notifiedFloodStates.end();) {
                 if (currentKeys.find(it->first) == currentKeys.end()) {
-                    removedLines.push_back(it->second.line);
+                    removedLines.push_back({ it->second.line, L"flood", it->first });
                     it = m_notifiedFloodStates.erase(it);
                 }
                 else {
@@ -9299,8 +9480,8 @@ private:
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                980,
-                540,
+                1020,
+                560,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -9318,15 +9499,15 @@ private:
     {
         CreateAutoLabel(parent, 0, L"Earthquakes List", 18, 18, m_headerFont);
         CreateAutoLabel(parent, 0, L"Minimum magnitude", 18, 58);
-        m_earthquakeListMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 84, 120, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_MAG_EDIT), m_hInst, nullptr);
-        m_earthquakeListDateRadio = CreateWindowExW(0, L"BUTTON", L"After date/time", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 160, 58, 150, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_DATE_RADIO), m_hInst, nullptr);
-        m_earthquakeListTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 160, 84, 170, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_TIME_EDIT), m_hInst, nullptr);
-        m_earthquakeListPeriodRadio = CreateWindowExW(0, L"BUTTON", L"Period", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 350, 58, 96, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_RADIO), m_hInst, nullptr);
-        m_earthquakeListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 350, 84, 130, 120, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_COMBO), m_hInst, nullptr);
-        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 500, 80, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
-        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 628, 80, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 812, 80, 102, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 126, 920, 350, parent, ControlId(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
+        m_earthquakeListMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 88, 120, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_MAG_EDIT), m_hInst, nullptr);
+        m_earthquakeListDateRadio = CreateWindowExW(0, L"BUTTON", L"After date/time", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 180, 58, 150, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_DATE_RADIO), m_hInst, nullptr);
+        m_earthquakeListTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 180, 88, 180, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_TIME_EDIT), m_hInst, nullptr);
+        m_earthquakeListPeriodRadio = CreateWindowExW(0, L"BUTTON", L"Period", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 390, 58, 96, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_RADIO), m_hInst, nullptr);
+        m_earthquakeListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 390, 88, 130, 120, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_COMBO), m_hInst, nullptr);
+        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 552, 84, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
+        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 680, 84, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 848, 84, 102, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
+        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 142, 950, 350, parent, ControlId(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
 
         for (HWND h : { m_earthquakeListMagnitudeEdit, m_earthquakeListDateRadio, m_earthquakeListTimeEdit, m_earthquakeListPeriodRadio, m_earthquakeListPeriodCombo, m_earthquakeListRegionBtn, m_earthquakeListClearRegionBtn, closeBtn, m_earthquakeListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -9352,11 +9533,11 @@ private:
         SendMessageW(m_earthquakeListView, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&col));
         std::wstring c2 = L"Region";
         col.pszText = const_cast<LPWSTR>(c2.c_str());
-        col.cx = 420;
+        col.cx = 470;
         SendMessageW(m_earthquakeListView, LVM_INSERTCOLUMNW, 2, reinterpret_cast<LPARAM>(&col));
         std::wstring c3 = L"Depth km";
         col.pszText = const_cast<LPWSTR>(c3.c_str());
-        col.cx = 90;
+        col.cx = 100;
         SendMessageW(m_earthquakeListView, LVM_INSERTCOLUMNW, 3, reinterpret_cast<LPARAM>(&col));
         AutoFitWindowToChildren(parent);
     }
@@ -9746,7 +9927,7 @@ private:
         m_weatherSystemsListForecastCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 84, 160, 160, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_FORECAST_COMBO), m_hInst, nullptr);
         HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 626, 54, 102, 32, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_REFRESH_BTN), m_hInst, nullptr);
         HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 742, 54, 102, 32, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_weatherSystemsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 132, 826, 320, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_LISTVIEW), m_hInst, nullptr);
+        m_weatherSystemsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 146, 826, 306, parent, ControlId(IDC_WEATHER_SYSTEMS_LIST_LISTVIEW), m_hInst, nullptr);
 
         for (HWND h : { m_weatherSystemsListForecastCombo, refreshBtn, closeBtn, m_weatherSystemsListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -9995,7 +10176,7 @@ private:
         m_weatherWarningsListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 84, 130, 120, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_PERIOD_COMBO), m_hInst, nullptr);
         HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 626, 54, 102, 32, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_REFRESH_BTN), m_hInst, nullptr);
         HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 742, 54, 102, 32, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_weatherWarningsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 132, 826, 300, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_LISTVIEW), m_hInst, nullptr);
+        m_weatherWarningsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 146, 826, 286, parent, ControlId(IDC_WEATHER_WARNINGS_LIST_LISTVIEW), m_hInst, nullptr);
 
         for (HWND h : { m_weatherWarningsListPeriodCombo, refreshBtn, closeBtn, m_weatherWarningsListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -10184,7 +10365,7 @@ private:
         m_floodsListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 84, 130, 120, parent, ControlId(IDC_FLOODS_LIST_PERIOD_COMBO), m_hInst, nullptr);
         HWND refreshBtn = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 626, 54, 102, 32, parent, ControlId(IDC_FLOODS_LIST_REFRESH_BTN), m_hInst, nullptr);
         HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 742, 54, 102, 32, parent, ControlId(IDC_FLOODS_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_floodsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 132, 826, 300, parent, ControlId(IDC_FLOODS_LIST_LISTVIEW), m_hInst, nullptr);
+        m_floodsListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 146, 826, 286, parent, ControlId(IDC_FLOODS_LIST_LISTVIEW), m_hInst, nullptr);
 
         for (HWND h : { m_floodsListPeriodCombo, refreshBtn, closeBtn, m_floodsListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -10897,6 +11078,7 @@ private:
     bool m_showFloodOverlayLabels = false;
     bool m_showAreaLabels = true;
     bool m_showRoadDepictions = false;
+    bool m_showFpsCounter = false;
     bool m_displayWorldMap = false;
     bool m_syncSettingsFromServer = false;
     std::wstring m_earthquakeListMagnitudeText;
