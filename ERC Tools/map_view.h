@@ -73,12 +73,14 @@ public:
     void SetRoadDepictionsVisible(bool visible);
     void SetDisplayWorldMap(bool visible);
     void SetFpsCounterVisible(bool visible);
+    void SetToolbarVisible(bool visible);
     void SetActiveNotification(const AppNotification& notification);
     void ClearActiveNotification();
     void SetNotificationHistory(const std::vector<AppNotification>& notifications);
     void SetNotificationHistoryVisible(bool visible);
     void SetSelectedId(const std::wstring& id);
     void CenterOnAlert(const std::wstring& id);
+    void FitToPoints(const std::vector<GeoPoint>& points, int singlePointZoom = 8);
     void FitToAlerts();
     bool LoadUkBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut = nullptr);
     bool LoadWorldBoundaryFromFile(const std::filesystem::path& path, std::wstring* errorOut = nullptr);

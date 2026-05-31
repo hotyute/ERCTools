@@ -80,6 +80,15 @@ struct BoundaryRing
     std::vector<BoundaryLod> worldLods;
 };
 
+struct BoundaryRenderSource
+{
+    const std::vector<BoundarySegment>* segments = nullptr;
+    double minLat = 0.0;
+    double maxLat = 0.0;
+    double minLon = 0.0;
+    double maxLon = 0.0;
+};
+
 // Tile/cache tuning.
 constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
@@ -112,10 +121,10 @@ constexpr float kNoteEditorMinHeight = 144.0f;
 // Boundary rendering.
 constexpr double kBoundaryDrawMarginPixels = 512.0;
 constexpr int kFullBoundaryMaxZoom = 7;
+constexpr double kWorldLodDetailToleranceDegrees = 0.012;
 constexpr double kWorldLodMidToleranceDegrees = 0.035;
 constexpr double kWorldLodFarToleranceDegrees = 0.09;
 constexpr double kWorldLodGlobalToleranceDegrees = 0.22;
-constexpr UINT kNotificationContextDeleteId = 1;
 
 std::atomic<int> g_activeTileDownloads{ 0 };
 
@@ -470,6 +479,17 @@ public:
         Invalidate();
     }
 
+    void SetToolbarVisible(bool visible)
+    {
+        if (m_showToolbarPanel == visible)
+            return;
+
+        m_showToolbarPanel = visible;
+        if (!m_showToolbarPanel)
+            m_addNoteMode = false;
+        Invalidate();
+    }
+
     void SetActiveNotification(const AppNotification& notification)
     {
         m_activeNotification = notification;
@@ -495,6 +515,10 @@ public:
     void SetNotificationHistory(const std::vector<AppNotification>& notifications)
     {
         m_notificationHistory = notifications;
+        if (m_notificationContextMenuIndex >= m_notificationHistory.size()) {
+            m_notificationContextMenuVisible = false;
+            m_notificationContextMenuIndex = static_cast<size_t>(-1);
+        }
         m_notificationHistoryScroll = ClampNotificationHistoryScroll(m_notificationHistoryScroll);
         Invalidate();
     }
@@ -649,36 +673,33 @@ public:
         }
     }
 
-    void FitToAlerts()
+    void FitToPoints(const std::vector<GeoPoint>& points, int singlePointZoom = 8)
     {
-        RECT rc{};
-        GetClientRect(m_hwnd, &rc);
-
-        LONG width = std::max<LONG>(1L, rc.right - rc.left);
-        LONG height = std::max<LONG>(1L, rc.bottom - rc.top);
-
         std::vector<GeoPoint> pts;
-        for (size_t i = 0; i < m_alerts.size(); ++i) {
-            if (m_alerts[i].hasLocation)
-                pts.push_back({ m_alerts[i].latitude, m_alerts[i].longitude });
+        pts.reserve(points.size());
+        for (const GeoPoint& pt : points) {
+            if (std::isfinite(pt.lat) && std::isfinite(pt.lon))
+                pts.push_back(pt);
         }
 
         if (pts.empty()) {
-            m_centerLat = kDefaultCenterLat;
-            m_centerLon = kDefaultCenterLon;
-            m_zoom = kDefaultZoom;
-            Invalidate();
             return;
         }
 
         if (pts.size() == 1) {
             m_centerLat = pts[0].lat;
             m_centerLon = pts[0].lon;
-            m_zoom = 12;
+            m_zoom = ClampValue(singlePointZoom, kMinZoom, kMaxZoom);
             NormalizeCenter();
             Invalidate();
             return;
         }
+
+        RECT rc{};
+        GetClientRect(m_hwnd, &rc);
+
+        LONG width = std::max<LONG>(1L, rc.right - rc.left);
+        LONG height = std::max<LONG>(1L, rc.bottom - rc.top);
 
         double minLat = pts[0].lat;
         double maxLat = pts[0].lat;
@@ -719,6 +740,25 @@ public:
         m_zoom = kDefaultZoom;
         NormalizeCenter();
         Invalidate();
+    }
+
+    void FitToAlerts()
+    {
+        std::vector<GeoPoint> pts;
+        for (const TrafficAlert& alert : m_alerts) {
+            if (alert.hasLocation)
+                pts.push_back({ alert.latitude, alert.longitude });
+        }
+
+        if (pts.empty()) {
+            m_centerLat = kDefaultCenterLat;
+            m_centerLon = kDefaultCenterLon;
+            m_zoom = kDefaultZoom;
+            Invalidate();
+            return;
+        }
+
+        FitToPoints(pts, 12);
     }
 
     static bool SameGeoPoint(const GeoPoint& a, const GeoPoint& b)
@@ -853,7 +893,8 @@ public:
             SetBoundaryBounds(cached.points, cached.minLat, cached.maxLat, cached.minLon, cached.maxLon);
             RebuildBoundarySegments(cached.points, cached.segmentsByMinLat);
             if (buildWorldLods) {
-                cached.worldLods.reserve(3);
+                cached.worldLods.reserve(4);
+                cached.worldLods.push_back(BuildBoundaryLod(cached, kWorldLodDetailToleranceDegrees));
                 cached.worldLods.push_back(BuildBoundaryLod(cached, kWorldLodMidToleranceDegrees));
                 cached.worldLods.push_back(BuildBoundaryLod(cached, kWorldLodFarToleranceDegrees));
                 cached.worldLods.push_back(BuildBoundaryLod(cached, kWorldLodGlobalToleranceDegrees));
@@ -1029,6 +1070,11 @@ private:
         case WM_RBUTTONDOWN:
             if (HandleNotificationHistoryRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
+            if (m_notificationContextMenuVisible) {
+                m_notificationContextMenuVisible = false;
+                m_notificationContextMenuIndex = static_cast<size_t>(-1);
+                Invalidate();
+            }
             if (HandlePolygonRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             break;
@@ -1564,6 +1610,13 @@ private:
         return D2D1::RectF(18.0f, 18.0f, 120.0f, 50.0f);
     }
 
+    D2D1_RECT_F BuildToolbarPanelRect() const
+    {
+        const D2D1_RECT_F refresh = BuildRefreshButtonRect();
+        const D2D1_RECT_F add = BuildAddNoteButtonRect();
+        return D2D1::RectF(refresh.left - 10.0f, refresh.top - 10.0f, add.right + 10.0f, refresh.bottom + 10.0f);
+    }
+
     void SetOverlayInputFocus(OverlayInputFocus focus)
     {
         m_overlayInputFocus = focus;
@@ -1786,14 +1839,12 @@ private:
 
     bool HitNoteInterface(int x, int y) const
     {
-        if (PointInRect(x, y, BuildRefreshButtonRect()))
-            return true;
-        if (PointInRect(x, y, BuildResetViewButtonRect()))
-            return true;
-        if (PointInRect(x, y, BuildAddNoteButtonRect()))
-            return true;
-        if (m_addNoteMode && PointInRect(x, y, BuildAddNotePromptRect()))
-            return true;
+        if (m_showToolbarPanel) {
+            if (PointInRect(x, y, BuildToolbarPanelRect()))
+                return true;
+            if (m_addNoteMode && PointInRect(x, y, BuildAddNotePromptRect()))
+                return true;
+        }
         if (m_noteEditorMode != NoteEditorMode::None) {
             D2D1_RECT_F editor = BuildNoteEditorRect(BuildViewState());
             if (PointInRect(x, y, editor))
@@ -1807,26 +1858,28 @@ private:
         if (!m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
             return false;
 
-        const D2D1_RECT_F addButton = BuildAddNoteButtonRect();
-        const D2D1_RECT_F resetButton = BuildResetViewButtonRect();
-        const D2D1_RECT_F refreshButton = BuildRefreshButtonRect();
-        if (PointInRect(x, y, refreshButton)) {
-            if (m_onRefresh)
-                m_onRefresh();
-            return true;
-        }
+        if (m_showToolbarPanel) {
+            const D2D1_RECT_F addButton = BuildAddNoteButtonRect();
+            const D2D1_RECT_F resetButton = BuildResetViewButtonRect();
+            const D2D1_RECT_F refreshButton = BuildRefreshButtonRect();
+            if (PointInRect(x, y, refreshButton)) {
+                if (m_onRefresh)
+                    m_onRefresh();
+                return true;
+            }
 
-        if (PointInRect(x, y, resetButton)) {
-            FitToAlerts();
-            return true;
-        }
+            if (PointInRect(x, y, resetButton)) {
+                FitToAlerts();
+                return true;
+            }
 
-        if (PointInRect(x, y, addButton)) {
-            m_addNoteMode = !m_addNoteMode;
-            if (m_addNoteMode)
-                CancelNoteEditor();
-            Invalidate();
-            return true;
+            if (PointInRect(x, y, addButton)) {
+                m_addNoteMode = !m_addNoteMode;
+                if (m_addNoteMode)
+                    CancelNoteEditor();
+                Invalidate();
+                return true;
+            }
         }
 
         if (m_noteEditorMode != NoteEditorMode::None) {
@@ -2159,6 +2212,11 @@ private:
 
     void OnDoubleClick(int x, int y)
     {
+        if (m_notificationContextMenuVisible) {
+            HandleNotificationContextMenuPointerDown(x, y);
+            return;
+        }
+
         if (TryActivateNotificationHistoryItem(x, y))
             return;
 
@@ -3914,6 +3972,9 @@ private:
         if (!m_showNotificationHistory && !m_hasActiveNotification)
             return false;
 
+        if (m_notificationContextMenuVisible && PointInRect(x, y, m_notificationContextMenuRect))
+            return true;
+
         const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
         if (m_showNotificationHistory && PointInRect(x, y, layout.historyToggleRect))
             return true;
@@ -3929,8 +3990,47 @@ private:
         return false;
     }
 
+    D2D1_RECT_F BuildNotificationContextMenuRect(int x, int y) const
+    {
+        RECT rc{};
+        GetClientRect(m_hwnd, &rc);
+        const float width = 132.0f;
+        const float height = 42.0f;
+        const float pad = 8.0f;
+        float left = static_cast<float>(x);
+        float top = static_cast<float>(y);
+        const float maxLeft = MaxValue(pad, static_cast<float>(rc.right) - width - pad);
+        const float maxTop = MaxValue(pad, static_cast<float>(rc.bottom) - height - pad);
+        left = ClampValue(left, pad, maxLeft);
+        top = ClampValue(top, pad, maxTop);
+        return D2D1::RectF(left, top, left + width, top + height);
+    }
+
+    bool HandleNotificationContextMenuPointerDown(int x, int y)
+    {
+        if (!m_notificationContextMenuVisible)
+            return false;
+
+        const bool hitMenu = PointInRect(x, y, m_notificationContextMenuRect);
+        const size_t index = m_notificationContextMenuIndex;
+        m_notificationContextMenuVisible = false;
+        m_notificationContextMenuIndex = static_cast<size_t>(-1);
+
+        if (hitMenu && m_onNotificationHistoryDelete && index < m_notificationHistory.size()) {
+            m_onNotificationHistoryDelete(index);
+            Invalidate();
+            return true;
+        }
+
+        Invalidate();
+        return hitMenu;
+    }
+
     bool HandleNotificationPointerDown(int x, int y)
     {
+        if (HandleNotificationContextMenuPointerDown(x, y))
+            return true;
+
         if (!m_showNotificationHistory)
             return false;
 
@@ -4052,27 +4152,11 @@ private:
         if (index == static_cast<size_t>(-1))
             return false;
 
-        HMENU menu = CreatePopupMenu();
-        if (!menu)
-            return true;
-
-        AppendMenuW(menu, MF_STRING, kNotificationContextDeleteId, L"Delete");
-        POINT pt{ x, y };
-        ClientToScreen(m_hwnd, &pt);
-        const UINT command = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-            pt.x,
-            pt.y,
-            0,
-            m_hwnd,
-            nullptr);
-        DestroyMenu(menu);
-
-        if (command == kNotificationContextDeleteId) {
-            m_onNotificationHistoryDelete(index);
-            Invalidate();
-        }
+        m_notificationContextMenuVisible = true;
+        m_notificationContextMenuIndex = index;
+        m_notificationContextMenuRect = BuildNotificationContextMenuRect(x, y);
+        ClearOverlayInputFocus();
+        Invalidate();
         return true;
     }
 
@@ -4249,11 +4333,29 @@ private:
         m_overlayUi.DrawScrollbar(scrollTrack, contentH, viewportH, m_notificationHistoryScroll);
     }
 
+    void DrawNotificationContextMenu()
+    {
+        if (!m_notificationContextMenuVisible || !m_rt)
+            return;
+
+        m_overlayUi.DrawGlassPanel(m_notificationContextMenuRect, 8.0f);
+        D2D1_RECT_F buttonRect = D2D1::RectF(
+            m_notificationContextMenuRect.left + 6.0f,
+            m_notificationContextMenuRect.top + 6.0f,
+            m_notificationContextMenuRect.right - 6.0f,
+            m_notificationContextMenuRect.bottom - 6.0f);
+        OverlayButton deleteButton;
+        deleteButton.text = L"Delete";
+        deleteButton.bounds = buttonRect;
+        deleteButton.enabled = m_notificationContextMenuIndex < m_notificationHistory.size();
+        m_overlayUi.DrawButton(deleteButton);
+    }
+
     void DrawNotificationInterface(const ViewState& view)
     {
         m_hasLastActiveNotificationRect = false;
         m_hasLastNotificationHistoryRect = false;
-        if ((!m_hasActiveNotification && !m_showNotificationHistory) || !m_rt)
+        if ((!m_hasActiveNotification && !m_showNotificationHistory && !m_notificationContextMenuVisible) || !m_rt)
             return;
         if (!m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
             return;
@@ -4261,6 +4363,7 @@ private:
         const NotificationLayout layout = BuildNotificationLayout(view);
         DrawNotificationHistory(layout);
         DrawActiveNotification(layout, view);
+        DrawNotificationContextMenu();
     }
 
     void DrawAlertOverlay(const ViewState& view)
@@ -4706,8 +4809,10 @@ private:
 
     void DrawNoteToolbar()
     {
-        if (!m_rt)
+        if (!m_rt || !m_showToolbarPanel)
             return;
+
+        m_overlayUi.DrawGlassPanel(BuildToolbarPanelRect(), 10.0f);
 
         OverlayButton refreshButton;
         refreshButton.text = L"Refresh";
@@ -4785,7 +4890,8 @@ private:
         wchar_t buffer[48]{};
         swprintf_s(buffer, L"FPS %.0f", m_fpsValue);
         const float width = 78.0f;
-        const D2D1_RECT_F rect = D2D1::RectF(18.0f, 58.0f, 18.0f + width, 86.0f);
+        const float top = m_showToolbarPanel ? BuildToolbarPanelRect().bottom + 8.0f : 18.0f;
+        const D2D1_RECT_F rect = D2D1::RectF(18.0f, top, 18.0f + width, top + 28.0f);
         m_overlayUi.DrawGlassPanel(rect, 8.0f);
         m_overlayUi.DrawLabel(buffer, m_overlayUi.ControlFormat(), D2D1::RectF(rect.left + 9.0f, rect.top + 6.0f, rect.right - 8.0f, rect.bottom - 5.0f));
     }
@@ -4979,10 +5085,8 @@ private:
                 DrawTiles(interactive);
                 DrawSceneOverlays(overlayView, boundaryView);
 
-                if (!interactive) {
-                    m_rt->Flush();
-                    UpdateSceneCache(view);
-                }
+                m_rt->Flush();
+                UpdateSceneCache(view);
             }
 
             DrawMapChrome();
@@ -5157,17 +5261,40 @@ private:
         return LongitudeRangesIntersect(view, ring.minLon, ring.maxLon);
     }
 
-    static bool IsGeoPointInRing(const BoundaryRing& ring, double lat, double lon)
+    template <typename BoundaryLike>
+    static BoundaryRenderSource MakeBoundaryRenderSource(const BoundaryLike& ring)
     {
-        if (ring.segmentsByMinLat.empty() ||
-            lat < ring.minLat || lat > ring.maxLat ||
-            lon < ring.minLon || lon > ring.maxLon)
+        return BoundaryRenderSource{
+            &ring.segmentsByMinLat,
+            ring.minLat,
+            ring.maxLat,
+            ring.minLon,
+            ring.maxLon
+        };
+    }
+
+    static bool BoundarySourceIntersectsView(const BoundaryRenderSource& source, const ViewState& view)
+    {
+        if (!source.segments || source.segments->empty())
+            return false;
+
+        if (source.maxLat < view.minLat || source.minLat > view.maxLat)
+            return false;
+
+        return LongitudeRangesIntersect(view, source.minLon, source.maxLon);
+    }
+
+    static bool IsGeoPointInBoundarySource(const BoundaryRenderSource& source, double lat, double lon)
+    {
+        if (!source.segments || source.segments->empty() ||
+            lat < source.minLat || lat > source.maxLat ||
+            lon < source.minLon || lon > source.maxLon)
         {
             return false;
         }
 
         bool inside = false;
-        for (const BoundarySegment& segment : ring.segmentsByMinLat) {
+        for (const BoundarySegment& segment : *source.segments) {
             if (segment.minLat > lat)
                 break;
             if (segment.maxLat <= lat || segment.maxLon < lon)
@@ -5185,9 +5312,9 @@ private:
         return inside;
     }
 
-    void DrawHighZoomBoundaryFill(const ViewState& view)
+    void DrawHighZoomBoundaryFill(const ViewState& view, const std::vector<BoundaryRenderSource>& sources)
     {
-        if (!m_rt || !m_outlineFillBrush)
+        if (!m_rt || !m_outlineFillBrush || sources.empty())
             return;
 
         // At close zoom levels, filling the whole viewport when the centre is on
@@ -5214,14 +5341,14 @@ private:
             intersections.clear();
             bool centreInsideRing = false;
 
-            for (const BoundaryRing& ring : m_ukBoundaryRings) {
-                if (ring.segmentsByMinLat.empty() || lat < ring.minLat || lat > ring.maxLat)
+            for (const BoundaryRenderSource& source : sources) {
+                if (!source.segments || source.segments->empty() || lat < source.minLat || lat > source.maxLat)
                     continue;
 
-                if (!centreInsideRing && IsGeoPointInRing(ring, lat, centerLon))
+                if (!centreInsideRing && IsGeoPointInBoundarySource(source, lat, centerLon))
                     centreInsideRing = true;
 
-                for (const BoundarySegment& segment : ring.segmentsByMinLat) {
+                for (const BoundarySegment& segment : *source.segments) {
                     if (segment.minLat > lat)
                         break;
                     if (segment.maxLat <= lat || std::abs(segment.b.lat - segment.a.lat) < 1e-12)
@@ -5259,13 +5386,15 @@ private:
 
     BoundaryLod* WorldBoundaryLodForZoom(BoundaryRing& ring)
     {
-        if (ring.worldLods.size() < 3)
+        if (ring.worldLods.size() < 4)
             return nullptr;
         if (m_zoom <= 3)
-            return &ring.worldLods[2];
+            return &ring.worldLods[3];
         if (m_zoom <= 5)
-            return &ring.worldLods[1];
+            return &ring.worldLods[2];
         if (m_zoom <= 9)
+            return &ring.worldLods[1];
+        if (m_zoom <= 13)
             return &ring.worldLods[0];
         return nullptr;
     }
@@ -5389,18 +5518,22 @@ private:
         // geometry rebuilds during pan and repaint.
         const bool fullBoundary = m_zoom <= kFullBoundaryMaxZoom;
 
+        std::vector<BoundaryRenderSource> visibleSources;
+        if (!fullBoundary)
+            visibleSources.reserve(m_ukBoundaryRings.size());
+
+        for (const BoundaryRing& ring : m_ukBoundaryRings) {
+            if (RingIntersectsView(ring, view))
+                visibleSources.push_back(MakeBoundaryRenderSource(ring));
+        }
+
         if (!fullBoundary) {
             // At close zoom levels the fill renderer is already clipped to the
             // actual visible boundary spans. Run it whenever a high-zoom boundary
             // is visible rather than gating on the viewport centre; otherwise
             // panning over coastline can randomly drop all land tint as soon as
             // the centre point crosses water.
-            for (const auto& ring : m_ukBoundaryRings) {
-                if (RingIntersectsView(ring, view)) {
-                    DrawHighZoomBoundaryFill(view);
-                    break;
-                }
-            }
+            DrawHighZoomBoundaryFill(view, visibleSources);
         }
 
         for (auto& ring : m_ukBoundaryRings) {
@@ -5422,23 +5555,47 @@ private:
         }
 
         const bool fillBoundary = m_zoom <= kFullBoundaryMaxZoom;
+        struct VisibleWorldRing
+        {
+            BoundaryRing* ring = nullptr;
+            BoundaryLod* lod = nullptr;
+        };
+        std::vector<VisibleWorldRing> visibleRings;
+        std::vector<BoundaryRenderSource> visibleSources;
+        visibleRings.reserve(64);
+        visibleSources.reserve(64);
+
         for (BoundaryRing& ring : m_worldBoundaryRings) {
             if (!RingIntersectsView(ring, view))
                 continue;
 
             BoundaryLod* lod = WorldBoundaryLodForZoom(ring);
-            if (lod && lod->points.size() >= 3) {
-                if (fillBoundary)
-                    DrawBoundaryRingFull(*lod, view);
-                else
-                    DrawBoundaryRingVisibleStroke(*lod, view);
+            BoundaryRenderSource source = (lod && lod->points.size() >= 3)
+                ? MakeBoundaryRenderSource(*lod)
+                : MakeBoundaryRenderSource(ring);
+            if (!BoundarySourceIntersectsView(source, view))
                 continue;
-            }
 
-            if (fillBoundary)
-                DrawBoundaryRingFull(ring, view);
-            else
-                DrawBoundaryRingVisibleStroke(ring, view);
+            visibleRings.push_back({ &ring, lod });
+            visibleSources.push_back(source);
+        }
+
+        if (!fillBoundary)
+            DrawHighZoomBoundaryFill(view, visibleSources);
+
+        for (VisibleWorldRing& item : visibleRings) {
+            if (item.lod && item.lod->points.size() >= 3) {
+                if (fillBoundary)
+                    DrawBoundaryRingFull(*item.lod, view);
+                else
+                    DrawBoundaryRingVisibleStroke(*item.lod, view);
+            }
+            else if (item.ring) {
+                if (fillBoundary)
+                    DrawBoundaryRingFull(*item.ring, view);
+                else
+                    DrawBoundaryRingVisibleStroke(*item.ring, view);
+            }
         }
     }
 
@@ -5524,6 +5681,10 @@ private:
     bool m_showRoadDepictions = false;
     bool m_displayWorldMap = false;
     bool m_showFpsCounter = false;
+    bool m_showToolbarPanel = true;
+    bool m_notificationContextMenuVisible = false;
+    size_t m_notificationContextMenuIndex = static_cast<size_t>(-1);
+    D2D1_RECT_F m_notificationContextMenuRect{};
     bool m_draggingNotificationHistoryScrollbar = false;
     bool m_draggingNotificationHistoryContent = false;
     bool m_responderChatCollapsed = false;
@@ -5808,6 +5969,11 @@ void MapView::SetFpsCounterVisible(bool visible)
     m_impl->SetFpsCounterVisible(visible);
 }
 
+void MapView::SetToolbarVisible(bool visible)
+{
+    m_impl->SetToolbarVisible(visible);
+}
+
 void MapView::SetActiveNotification(const AppNotification& notification)
 {
     m_impl->SetActiveNotification(notification);
@@ -5836,6 +6002,11 @@ void MapView::SetSelectedId(const std::wstring& id)
 void MapView::CenterOnAlert(const std::wstring& id)
 {
     m_impl->CenterOnAlert(id);
+}
+
+void MapView::FitToPoints(const std::vector<GeoPoint>& points, int singlePointZoom)
+{
+    m_impl->FitToPoints(points, singlePointZoom);
 }
 
 void MapView::FitToAlerts()

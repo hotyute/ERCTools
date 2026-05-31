@@ -88,6 +88,7 @@ constexpr int IDM_INCIDENT_OVERLAY_NOTIFIED_ONLY = 2040;
 constexpr int IDM_WEATHER_WARNING_POLYGONS = 2041;
 constexpr int IDM_WEATHER_SYSTEM_FORECASTS = 2042;
 constexpr int IDM_VIEW_FPS_COUNTER = 2043;
+constexpr int IDM_VIEW_MAP_CONTROLS = 2044;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -172,6 +173,10 @@ constexpr int IDC_EARTHQUAKE_LIST_DATE_RADIO = 2508;
 constexpr int IDC_EARTHQUAKE_LIST_PERIOD_RADIO = 2509;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT = 2521;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN = 2522;
+constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_TIME_EDIT = 2523;
+constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_COMBO = 2524;
+constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_DATE_RADIO = 2525;
+constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_RADIO = 2526;
 constexpr int IDC_WEATHER_SYSTEMS_LIST_LISTVIEW = 2541;
 constexpr int IDC_WEATHER_SYSTEMS_LIST_REFRESH_BTN = 2542;
 constexpr int IDC_WEATHER_SYSTEMS_LIST_CLOSE_BTN = 2543;
@@ -1921,6 +1926,7 @@ private:
         m_map.SetRoadDepictionsVisible(m_showRoadDepictions);
         m_map.SetDisplayWorldMap(m_displayWorldMap);
         m_map.SetFpsCounterVisible(m_showFpsCounter);
+        m_map.SetToolbarVisible(m_showMapControls);
         RenderChatHistory();
         RenderOnlineUsers();
         RenderNotificationHistory();
@@ -2212,6 +2218,10 @@ private:
             ToggleFpsCounter();
             break;
 
+        case IDM_VIEW_MAP_CONTROLS:
+            ToggleMapControls();
+            break;
+
         case IDM_ABOUT:
             ShowAboutDialog();
             break;
@@ -2457,6 +2467,7 @@ private:
             readBool("periodicRefreshEnabled", m_periodicRefreshEnabled);
             readBool("showNotificationHistory", m_showNotificationHistory);
             readBool("showFpsCounter", m_showFpsCounter);
+            readBool("showMapControls", m_showMapControls);
             readBool("displayWorldMap", m_displayWorldMap);
             readBool("syncSettingsFromServer", m_syncSettingsFromServer);
             readString("refreshIntervalText", m_refreshIntervalText);
@@ -2643,6 +2654,9 @@ private:
             }
             readString("earthquakeNotificationMagnitudeText", m_earthquakeNotificationMagnitudeText);
             readDouble("earthquakeNotificationMagnitude", m_earthquakeNotificationMagnitude);
+            readString("earthquakeNotificationTimeText", m_earthquakeNotificationTimeText);
+            readBool("earthquakeNotificationUseDateFilter", m_earthquakeNotificationUseDateFilter);
+            readString("earthquakeNotificationPeriodText", m_earthquakeNotificationPeriodText);
             double parsedMag = 0.0;
             if (TryParseDoubleText(m_earthquakeNotificationMagnitudeText, parsedMag))
                 m_earthquakeNotificationMagnitude = parsedMag;
@@ -2887,6 +2901,7 @@ private:
             settings["periodicRefreshEnabled"] = m_periodicRefreshEnabled;
             settings["showNotificationHistory"] = m_showNotificationHistory;
             settings["showFpsCounter"] = m_showFpsCounter;
+            settings["showMapControls"] = m_showMapControls;
             settings["displayWorldMap"] = m_displayWorldMap;
             settings["syncSettingsFromServer"] = m_syncSettingsFromServer;
             settings["refreshIntervalText"] = WideToUtf8(m_refreshIntervalText);
@@ -2988,6 +3003,9 @@ private:
             }
             settings["earthquakeNotificationMagnitudeText"] = WideToUtf8(m_earthquakeNotificationMagnitudeText);
             settings["earthquakeNotificationMagnitude"] = m_earthquakeNotificationMagnitude;
+            settings["earthquakeNotificationTimeText"] = WideToUtf8(m_earthquakeNotificationTimeText);
+            settings["earthquakeNotificationUseDateFilter"] = m_earthquakeNotificationUseDateFilter;
+            settings["earthquakeNotificationPeriodText"] = WideToUtf8(m_earthquakeNotificationPeriodText);
             settings["weatherSystemNotificationWindText"] = WideToUtf8(m_weatherSystemNotificationWindText);
             settings["weatherSystemNotificationWindMph"] = m_weatherSystemNotificationWindMph;
 
@@ -4116,6 +4134,40 @@ private:
         return -1;
     }
 
+    void FocusEarthquakeOnMap(const EarthquakeEvent& event)
+    {
+        if (event.hasLocation)
+            m_map.FitToPoints({ { event.latitude, event.longitude } }, 6);
+    }
+
+    void FocusWeatherSystemOnMap(const WeatherSystemEvent& system)
+    {
+        std::vector<GeoPoint> points;
+        if (system.hasLocation)
+            points.push_back({ system.latitude, system.longitude });
+        if (system.hasForecastLocation)
+            points.push_back({ system.forecastLatitude, system.forecastLongitude });
+        for (const WeatherForecastPoint& point : system.forecastTrack) {
+            if (point.hasLocation)
+                points.push_back({ point.latitude, point.longitude });
+        }
+        m_map.FitToPoints(points, 5);
+    }
+
+    void FocusWeatherWarningOnMap(const WeatherWarningEvent& warning)
+    {
+        std::vector<GeoPoint> points = warning.polygon;
+        if (points.empty() && warning.hasLocation)
+            points.push_back({ warning.latitude, warning.longitude });
+        m_map.FitToPoints(points, 7);
+    }
+
+    void FocusFloodOnMap(const FloodEvent& flood)
+    {
+        if (flood.hasLocation)
+            m_map.FitToPoints({ { flood.latitude, flood.longitude } }, 8);
+    }
+
     bool SelectEarthquakeNotificationSource(const std::wstring& sourceId)
     {
         ShowEarthquakeListWindow();
@@ -4145,6 +4197,7 @@ private:
         }
         if (row < 0)
             return false;
+        FocusEarthquakeOnMap(m_filteredEarthquakes[static_cast<size_t>(row)]);
         SelectListViewRow(m_earthquakeListView, row);
         return true;
     }
@@ -4169,6 +4222,7 @@ private:
         }
         if (row < 0)
             return false;
+        FocusWeatherSystemOnMap(m_filteredWeatherSystems[static_cast<size_t>(row)]);
         SelectListViewRow(m_weatherSystemsListView, row);
         return true;
     }
@@ -4193,6 +4247,7 @@ private:
         }
         if (row < 0)
             return false;
+        FocusWeatherWarningOnMap(m_filteredWeatherWarnings[static_cast<size_t>(row)]);
         SelectListViewRow(m_weatherWarningsListView, row);
         return true;
     }
@@ -4217,6 +4272,7 @@ private:
         }
         if (row < 0)
             return false;
+        FocusFloodOnMap(m_filteredFloods[static_cast<size_t>(row)]);
         SelectListViewRow(m_floodsListView, row);
         return true;
     }
@@ -5055,6 +5111,7 @@ private:
         AppendMenuW(viewMenu, m_showAreaLabels ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_AREA_LABELS, L"Area Labels");
         AppendMenuW(viewMenu, m_showRoadDepictions ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_ROAD_DEPICTIONS, L"Road Depictions");
         AppendMenuW(viewMenu, m_showFpsCounter ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_FPS_COUNTER, L"FPS Counter");
+        AppendMenuW(viewMenu, m_showMapControls ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_MAP_CONTROLS, L"Map Controls");
         MENUITEMINFOW historyInfo{};
         historyInfo.cbSize = sizeof(historyInfo);
         historyInfo.fMask = MIIM_FTYPE;
@@ -5063,6 +5120,7 @@ private:
         SetMenuItemInfoW(viewMenu, IDM_VIEW_AREA_LABELS, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_ROAD_DEPICTIONS, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_FPS_COUNTER, FALSE, &historyInfo);
+        SetMenuItemInfoW(viewMenu, IDM_VIEW_MAP_CONTROLS, FALSE, &historyInfo);
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"View");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
@@ -8743,6 +8801,7 @@ private:
         CheckMenuItem(menu, IDM_VIEW_AREA_LABELS, MF_BYCOMMAND | (m_showAreaLabels ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(menu, IDM_VIEW_ROAD_DEPICTIONS, MF_BYCOMMAND | (m_showRoadDepictions ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(menu, IDM_VIEW_FPS_COUNTER, MF_BYCOMMAND | (m_showFpsCounter ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(menu, IDM_VIEW_MAP_CONTROLS, MF_BYCOMMAND | (m_showMapControls ? MF_CHECKED : MF_UNCHECKED));
     }
 
     void ToggleNotificationHistory()
@@ -8759,6 +8818,14 @@ private:
         m_showFpsCounter = !m_showFpsCounter;
         UpdateViewMenu();
         m_map.SetFpsCounterVisible(m_showFpsCounter);
+        SaveSettings();
+    }
+
+    void ToggleMapControls()
+    {
+        m_showMapControls = !m_showMapControls;
+        UpdateViewMenu();
+        m_map.SetToolbarVisible(m_showMapControls);
         SaveSettings();
     }
 
@@ -9006,7 +9073,26 @@ private:
 
     bool EarthquakeMatchesNotification(const EarthquakeEvent& event) const
     {
-        return event.magnitude + 0.0001 >= m_earthquakeNotificationMagnitude;
+        if (event.magnitude + 0.0001 < m_earthquakeNotificationMagnitude)
+            return false;
+
+        long long afterMs = 0;
+        if (m_earthquakeNotificationUseDateFilter) {
+            long long parsed = 0;
+            if (!m_earthquakeNotificationTimeText.empty() &&
+                TryParseDateTimeFilter(m_earthquakeNotificationTimeText, parsed))
+            {
+                afterMs = parsed;
+            }
+        }
+        else if (!IsAllPeriodText(m_earthquakeNotificationPeriodText)) {
+            afterMs = PeriodStartTimeMs(m_earthquakeNotificationPeriodText);
+        }
+
+        if (afterMs > 0 && event.timeMs > 0 && event.timeMs < afterMs)
+            return false;
+
+        return true;
     }
 
     std::wstring EarthquakeNotificationLine(const EarthquakeEvent& event) const
@@ -9787,8 +9873,8 @@ private:
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                430,
-                230,
+                590,
+                260,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -9802,15 +9888,21 @@ private:
     void CreateEarthquakeNotificationsControls(HWND parent)
     {
         CreateAutoLabel(parent, 0, L"Earthquake Notifications", 18, 18, m_headerFont);
-        CreateAutoLabel(parent, 0, L"Notify when an earthquake is at or above this magnitude.", 18, 58, nullptr, 360);
+        CreateAutoLabel(parent, 0, L"Notify when earthquakes match this magnitude and time window.", 18, 58, nullptr, 520);
         CreateAutoLabel(parent, 0, L"Minimum magnitude", 18, 104);
         m_earthquakeNotificationMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 130, 120, 26, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 292, 130, 102, 32, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
-        for (HWND h : { m_earthquakeNotificationMagnitudeEdit, closeBtn }) {
+        m_earthquakeNotificationDateRadio = CreateWindowExW(0, L"BUTTON", L"After date/time", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 170, 104, 150, 24, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_DATE_RADIO), m_hInst, nullptr);
+        m_earthquakeNotificationTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 170, 130, 180, 26, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_TIME_EDIT), m_hInst, nullptr);
+        m_earthquakeNotificationPeriodRadio = CreateWindowExW(0, L"BUTTON", L"Period", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 382, 104, 96, 24, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_RADIO), m_hInst, nullptr);
+        m_earthquakeNotificationPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 382, 130, 130, 120, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_COMBO), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 430, 178, 102, 32, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
+        for (HWND h : { m_earthquakeNotificationMagnitudeEdit, m_earthquakeNotificationDateRadio, m_earthquakeNotificationTimeEdit, m_earthquakeNotificationPeriodRadio, m_earthquakeNotificationPeriodCombo, closeBtn }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
         SendMessageW(m_earthquakeNotificationMagnitudeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"4.0"));
+        SendMessageW(m_earthquakeNotificationTimeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"2026-05-14 09:00"));
+        PopulatePeriodCombo(m_earthquakeNotificationPeriodCombo, m_earthquakeNotificationPeriodText);
         SyncEarthquakeNotificationControls();
         AutoFitWindowToChildren(parent);
     }
@@ -9820,6 +9912,18 @@ private:
         m_syncingControls = true;
         if (m_earthquakeNotificationMagnitudeEdit)
             SetWindowTextSafe(m_earthquakeNotificationMagnitudeEdit, m_earthquakeNotificationMagnitudeText);
+        if (m_earthquakeNotificationTimeEdit)
+            SetWindowTextSafe(m_earthquakeNotificationTimeEdit, m_earthquakeNotificationTimeText);
+        if (m_earthquakeNotificationPeriodCombo)
+            PopulatePeriodCombo(m_earthquakeNotificationPeriodCombo, m_earthquakeNotificationPeriodText.empty() ? L"All" : m_earthquakeNotificationPeriodText);
+        if (m_earthquakeNotificationDateRadio)
+            SendMessageW(m_earthquakeNotificationDateRadio, BM_SETCHECK, m_earthquakeNotificationUseDateFilter ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_earthquakeNotificationPeriodRadio)
+            SendMessageW(m_earthquakeNotificationPeriodRadio, BM_SETCHECK, m_earthquakeNotificationUseDateFilter ? BST_UNCHECKED : BST_CHECKED, 0);
+        if (m_earthquakeNotificationTimeEdit)
+            EnableWindow(m_earthquakeNotificationTimeEdit, m_earthquakeNotificationUseDateFilter);
+        if (m_earthquakeNotificationPeriodCombo)
+            EnableWindow(m_earthquakeNotificationPeriodCombo, !m_earthquakeNotificationUseDateFilter);
         m_syncingControls = false;
     }
 
@@ -9843,6 +9947,27 @@ private:
                 SetWindowTextSafe(m_earthquakeNotificationMagnitudeEdit, m_earthquakeNotificationMagnitudeText);
                 SetStatusText(L"Earthquake magnitude should be a number such as 4.0.");
             }
+        }
+        if ((id == IDC_EARTHQUAKE_NOTIFICATIONS_DATE_RADIO || id == IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_RADIO) && code == BN_CLICKED) {
+            m_earthquakeNotificationUseDateFilter = id == IDC_EARTHQUAKE_NOTIFICATIONS_DATE_RADIO;
+            SyncEarthquakeNotificationControls();
+            SaveSettings();
+            return;
+        }
+        if (id == IDC_EARTHQUAKE_NOTIFICATIONS_TIME_EDIT && (code == EN_CHANGE || code == EN_KILLFOCUS)) {
+            m_earthquakeNotificationTimeText = Trim(GetWindowTextString(m_earthquakeNotificationTimeEdit));
+            if (code == EN_KILLFOCUS && !m_earthquakeNotificationTimeText.empty()) {
+                long long parsed = 0;
+                if (!TryParseDateTimeFilter(m_earthquakeNotificationTimeText, parsed))
+                    SetStatusText(L"Earthquake notification date should be like 2026-05-14 09:00.");
+            }
+            SaveSettings();
+            return;
+        }
+        if (id == IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_COMBO && code == CBN_SELCHANGE) {
+            m_earthquakeNotificationPeriodText = Trim(GetWindowTextString(m_earthquakeNotificationPeriodCombo));
+            SaveSettings();
+            return;
         }
     }
 
@@ -10962,6 +11087,10 @@ private:
     HWND m_earthquakeListClearRegionBtn = nullptr;
     HWND m_earthquakeListView = nullptr;
     HWND m_earthquakeNotificationMagnitudeEdit = nullptr;
+    HWND m_earthquakeNotificationDateRadio = nullptr;
+    HWND m_earthquakeNotificationTimeEdit = nullptr;
+    HWND m_earthquakeNotificationPeriodRadio = nullptr;
+    HWND m_earthquakeNotificationPeriodCombo = nullptr;
     HWND m_weatherSystemsListWnd = nullptr;
     HWND m_weatherSystemNotificationsWnd = nullptr;
     HWND m_weatherSystemsListView = nullptr;
@@ -11079,6 +11208,7 @@ private:
     bool m_showAreaLabels = true;
     bool m_showRoadDepictions = false;
     bool m_showFpsCounter = false;
+    bool m_showMapControls = true;
     bool m_displayWorldMap = false;
     bool m_syncSettingsFromServer = false;
     std::wstring m_earthquakeListMagnitudeText;
@@ -11090,6 +11220,9 @@ private:
     std::wstring m_floodsListPeriodText = L"24h";
     std::wstring m_earthquakeNotificationMagnitudeText = L"4.0";
     double m_earthquakeNotificationMagnitude = 4.0;
+    std::wstring m_earthquakeNotificationTimeText;
+    bool m_earthquakeNotificationUseDateFilter = false;
+    std::wstring m_earthquakeNotificationPeriodText = L"All";
     std::wstring m_weatherSystemNotificationWindText = L"39";
     double m_weatherSystemNotificationWindMph = 39.0;
     std::wstring m_alertOrder = L"Road";
