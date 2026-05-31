@@ -93,7 +93,6 @@ struct BoundaryRenderSource
 constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
 constexpr int kMaxFallbackTileZoomDelta = 5;
-constexpr int kMaxInteractiveTileRequestsPerFrame = 2;
 constexpr int kAlertFocusZoom = 9;
 
 // Interaction timing.
@@ -1128,7 +1127,8 @@ private:
             break;
 
         case WM_APP_TILE_READY:
-            InvalidateRect(m_hwnd, nullptr, FALSE);
+            if (!m_interactivePan)
+                InvalidateRect(m_hwnd, nullptr, FALSE);
             return 0;
 
         case WM_DESTROY:
@@ -1297,7 +1297,6 @@ private:
     void InvalidateSceneCache()
     {
         m_sceneBitmap.Reset();
-        m_sceneBitmapBack.Reset();
         m_sceneBitmapWidth = 0;
         m_sceneBitmapHeight = 0;
     }
@@ -4743,10 +4742,6 @@ private:
                     if (!interactive) {
                         RequestTile(key);
                     }
-                    else if (m_interactiveTileRequestsThisFrame < kMaxInteractiveTileRequestsPerFrame) {
-                        RequestTile(key);
-                        ++m_interactiveTileRequestsThisFrame;
-                    }
 
                     if (!drewFallback)
                         m_rt->FillRectangle(dest, m_placeholderBrush.Get());
@@ -5023,7 +5018,7 @@ private:
     }
 
 
-    void UpdateSceneCache(const ViewState& view, bool avoidCurrentBitmapSource = false)
+    void UpdateSceneCache(const ViewState& view)
     {
         if (!m_rt)
             return;
@@ -5032,15 +5027,13 @@ private:
         if (pixelSize.width == 0 || pixelSize.height == 0)
             return;
 
-        ComPtr<ID2D1Bitmap>& targetBitmap = avoidCurrentBitmapSource ? m_sceneBitmapBack : m_sceneBitmap;
-
-        if (!targetBitmap ||
+        if (!m_sceneBitmap ||
             m_sceneBitmapWidth != static_cast<int>(pixelSize.width) ||
             m_sceneBitmapHeight != static_cast<int>(pixelSize.height))
         {
-            targetBitmap.Reset();
+            m_sceneBitmap.Reset();
             D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(m_rt->GetPixelFormat());
-            if (FAILED(m_rt->CreateBitmap(pixelSize, nullptr, 0, &props, &targetBitmap)))
+            if (FAILED(m_rt->CreateBitmap(pixelSize, nullptr, 0, &props, &m_sceneBitmap)))
                 return;
 
             m_sceneBitmapWidth = static_cast<int>(pixelSize.width);
@@ -5049,13 +5042,10 @@ private:
 
         D2D1_POINT_2U destPoint = D2D1::Point2U(0, 0);
         D2D1_RECT_U srcRect = D2D1::RectU(0, 0, pixelSize.width, pixelSize.height);
-        if (FAILED(targetBitmap->CopyFromRenderTarget(&destPoint, m_rt.Get(), &srcRect))) {
+        if (FAILED(m_sceneBitmap->CopyFromRenderTarget(&destPoint, m_rt.Get(), &srcRect))) {
             InvalidateSceneCache();
             return;
         }
-
-        if (avoidCurrentBitmapSource)
-            m_sceneBitmap.Swap(m_sceneBitmapBack);
 
         m_sceneBitmapZoom = m_zoom;
         m_sceneBitmapCenterWorld = view.centerWorld;
@@ -5158,33 +5148,6 @@ private:
             DrawTilesInClip(strip);
     }
 
-    void DrawSceneOverlaysInClip(const D2D1_RECT_F& clip, const ViewState& overlayView, const ViewState& boundaryView)
-    {
-        if (!m_rt || clip.right <= clip.left || clip.bottom <= clip.top)
-            return;
-
-        const bool hadClip = m_hasOverlayClip;
-        const D2D1_RECT_F previousClip = m_overlayClip;
-        m_hasOverlayClip = true;
-        m_overlayClip = clip;
-
-        m_rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        DrawSceneOverlays(overlayView, boundaryView);
-        m_rt->PopAxisAlignedClip();
-
-        m_hasOverlayClip = hadClip;
-        m_overlayClip = previousClip;
-    }
-
-    void DrawExposedCachedSceneEdges(const std::vector<D2D1_RECT_F>& strips, const ViewState& overlayView, const ViewState& boundaryView)
-    {
-        // The cached scene is only the previous viewport. Draw full overlays just
-        // into newly exposed strips so panning reveals boundary/fill/markers ahead
-        // of the cursor without paying to redraw the whole map each frame.
-        for (const D2D1_RECT_F& strip : strips)
-            DrawSceneOverlaysInClip(strip, overlayView, boundaryView);
-    }
-
     void OnPaint()
     {
         PAINTSTRUCT ps{};
@@ -5196,7 +5159,6 @@ private:
             m_rt->Clear(D2D1::ColorF(kMapWaterR, kMapWaterG, kMapWaterB, 1.0f));
 
             const bool interactive = m_interactivePan;
-            m_interactiveTileRequestsThisFrame = 0;
             const ViewState view = BuildViewState();
             const ViewState overlayView = BuildViewState(220.0);
             const ViewState boundaryView = BuildViewState(kBoundaryDrawMarginPixels);
@@ -5208,9 +5170,6 @@ private:
                 if (drewCachedScene) {
                     const std::vector<D2D1_RECT_F> exposedStrips = BuildExposedSceneStrips(view, cachedSceneDest);
                     DrawExposedCachedSceneTiles(exposedStrips);
-                    DrawExposedCachedSceneEdges(exposedStrips, overlayView, boundaryView);
-                    m_rt->Flush();
-                    UpdateSceneCache(view, true);
                 }
             }
 
@@ -5777,7 +5736,6 @@ private:
     size_t m_draggingPolygonIndex = static_cast<size_t>(-1);
     size_t m_draggingPolygonPointIndex = static_cast<size_t>(-1);
     bool m_trackingMouseLeave = false;
-    int m_interactiveTileRequestsThisFrame = 0;
     std::wstring m_hoveredAlertId;
     std::wstring m_hoveredEarthquakeId;
     std::wstring m_hoveredWeatherSystemId;
@@ -5884,7 +5842,6 @@ private:
     ComPtr<ID2D1StrokeStyle> m_forecastErrorStrokeStyle;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
     ComPtr<ID2D1Bitmap> m_sceneBitmap;
-    ComPtr<ID2D1Bitmap> m_sceneBitmapBack;
     int m_sceneBitmapWidth = 0;
     int m_sceneBitmapHeight = 0;
     int m_sceneBitmapZoom = kDefaultZoom;

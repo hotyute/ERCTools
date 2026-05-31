@@ -7734,33 +7734,6 @@ private:
         const bool chooseStep = TemplateWizardTemplateChoiceStep();
         const bool variableStep = TemplateWizardVariablesStep();
         const bool reviewStep = TemplateWizardReviewStep();
-        MoveWindow(m_templateWizardList, 18, 92, 684, 300, TRUE);
-        if (reviewStep) {
-            MoveWindow(m_templateWizardTitlePreviewLabel, 18, 92, 160, 22, TRUE);
-            MoveWindow(m_templateWizardTitlePreviewEdit, 18, 118, 684, 26, TRUE);
-            MoveWindow(m_templateWizardBodyPreviewLabel, 18, 158, 160, 22, TRUE);
-            MoveWindow(m_templateWizardPreviewEdit, 18, 184, 684, 208, TRUE);
-        }
-        else {
-            MoveWindow(m_templateWizardVariablesEdit, 18, 92, 684, 300, TRUE);
-            MoveWindow(m_templateWizardTitlePreviewLabel, 18, 92, 160, 22, TRUE);
-            MoveWindow(m_templateWizardTitlePreviewEdit, 18, 118, 684, 26, TRUE);
-            MoveWindow(m_templateWizardBodyPreviewLabel, 18, 158, 160, 22, TRUE);
-            MoveWindow(m_templateWizardPreviewEdit, 18, 184, 684, 128, TRUE);
-        }
-
-        ShowWindow(m_templateWizardList, (weatherKindStep || chooseStep) ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardVariablesEdit, variableStep ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardTitlePreviewLabel, reviewStep ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardTitlePreviewEdit, reviewStep ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardBodyPreviewLabel, reviewStep ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardPreviewEdit, reviewStep ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardCopyTitleBtn, reviewStep ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardCopyBtn, reviewStep ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardCopyLocationBtn, reviewStep ? SW_SHOW : SW_HIDE);
-        ShowWindow(m_templateWizardNextBtn, reviewStep ? SW_HIDE : SW_SHOW);
-        EnableWindow(m_templateWizardPrevBtn, m_templateWizardStep > 0);
-        SetWindowTextSafe(m_templateWizardNextBtn, L"Next");
 
         if (weatherKindStep) {
             SetWindowTextSafe(m_templateWizardDesc, L"Choose which weather product this template should cover.");
@@ -7783,6 +7756,53 @@ private:
             SetWindowTextSafe(m_templateWizardDesc, L"Edit the highlighted generated values in the title and template, then copy whichever section you need.");
             RefreshTemplatesWizardPreview();
         }
+
+        constexpr int left = 18;
+        constexpr int contentW = 684;
+        MoveLabelToText(m_templateWizardDesc, left, 54, contentW);
+        const int descH = AutoLabelHeight(m_templateWizardDesc, 22, contentW);
+        const int contentTop = 54 + descH + 14;
+        int contentBottom = contentTop;
+
+        MoveWindow(m_templateWizardList, left, contentTop, contentW, 300, TRUE);
+        if (reviewStep) {
+            MoveWindow(m_templateWizardTitlePreviewLabel, left, contentTop, 160, 22, TRUE);
+            MoveWindow(m_templateWizardTitlePreviewEdit, left, contentTop + 26, contentW, 26, TRUE);
+            MoveWindow(m_templateWizardBodyPreviewLabel, left, contentTop + 66, 160, 22, TRUE);
+            MoveWindow(m_templateWizardPreviewEdit, left, contentTop + 92, contentW, 208, TRUE);
+            contentBottom = contentTop + 300;
+        }
+        else {
+            MoveWindow(m_templateWizardVariablesEdit, left, contentTop, contentW, 300, TRUE);
+            MoveWindow(m_templateWizardTitlePreviewLabel, left, contentTop, 160, 22, TRUE);
+            MoveWindow(m_templateWizardTitlePreviewEdit, left, contentTop + 26, contentW, 26, TRUE);
+            MoveWindow(m_templateWizardBodyPreviewLabel, left, contentTop + 66, 160, 22, TRUE);
+            MoveWindow(m_templateWizardPreviewEdit, left, contentTop + 92, contentW, 128, TRUE);
+            contentBottom = contentTop + 300;
+        }
+
+        const int buttonY = contentBottom + 40;
+        MoveWindow(m_templateWizardPrevBtn, 122, buttonY, 102, 32, TRUE);
+        MoveWindow(m_templateWizardNextBtn, 232, buttonY, 102, 32, TRUE);
+        MoveWindow(m_templateWizardCopyTitleBtn, 342, buttonY, 104, 32, TRUE);
+        MoveWindow(m_templateWizardCopyBtn, 454, buttonY, 124, 32, TRUE);
+        MoveWindow(m_templateWizardCopyLocationBtn, 586, buttonY, 118, 32, TRUE);
+        HWND closeBtn = GetDlgItem(m_templatesWizardWnd, IDC_TEMPLATES_WIZARD_CLOSE);
+        if (closeBtn)
+            MoveWindow(closeBtn, reviewStep ? 712 : 342, buttonY, reviewStep ? 68 : 102, 32, TRUE);
+
+        ShowWindow(m_templateWizardList, (weatherKindStep || chooseStep) ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardVariablesEdit, variableStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardTitlePreviewLabel, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardTitlePreviewEdit, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardBodyPreviewLabel, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardPreviewEdit, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardCopyTitleBtn, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardCopyBtn, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardCopyLocationBtn, reviewStep ? SW_SHOW : SW_HIDE);
+        ShowWindow(m_templateWizardNextBtn, reviewStep ? SW_HIDE : SW_SHOW);
+        EnableWindow(m_templateWizardPrevBtn, m_templateWizardStep > 0);
+        SetWindowTextSafe(m_templateWizardNextBtn, L"Next");
 
         AutoFitWindowToChildren(m_templatesWizardWnd);
     }
