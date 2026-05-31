@@ -5694,7 +5694,7 @@ private:
         // From that point on, use the clipped scanline fill plus visible stroke
         // path; it preserves the same land/sea result while avoiding full-ring
         // geometry rebuilds during pan and repaint.
-        const bool fullBoundary = m_zoom <= kFullBoundaryMaxZoom;
+        const bool fullBoundary = !m_hasOverlayClip && !m_interactivePan && m_zoom <= kFullBoundaryMaxZoom;
 
         std::vector<BoundaryRenderSource> visibleSources;
         if (!fullBoundary)
@@ -5732,7 +5732,7 @@ private:
             return;
         }
 
-        const bool fillBoundary = m_zoom <= kWorldGeometryFillMaxZoom;
+        const bool fillBoundary = !m_hasOverlayClip && !m_interactivePan && m_zoom <= kWorldGeometryFillMaxZoom;
         struct VisibleWorldRing
         {
             BoundaryRing* ring = nullptr;
