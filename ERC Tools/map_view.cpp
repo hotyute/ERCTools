@@ -1297,6 +1297,7 @@ private:
     void InvalidateSceneCache()
     {
         m_sceneBitmap.Reset();
+        m_sceneBitmapBack.Reset();
         m_sceneBitmapWidth = 0;
         m_sceneBitmapHeight = 0;
     }
@@ -5022,7 +5023,7 @@ private:
     }
 
 
-    void UpdateSceneCache(const ViewState& view)
+    void UpdateSceneCache(const ViewState& view, bool avoidCurrentBitmapSource = false)
     {
         if (!m_rt)
             return;
@@ -5031,13 +5032,15 @@ private:
         if (pixelSize.width == 0 || pixelSize.height == 0)
             return;
 
-        if (!m_sceneBitmap ||
+        ComPtr<ID2D1Bitmap>& targetBitmap = avoidCurrentBitmapSource ? m_sceneBitmapBack : m_sceneBitmap;
+
+        if (!targetBitmap ||
             m_sceneBitmapWidth != static_cast<int>(pixelSize.width) ||
             m_sceneBitmapHeight != static_cast<int>(pixelSize.height))
         {
-            m_sceneBitmap.Reset();
+            targetBitmap.Reset();
             D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(m_rt->GetPixelFormat());
-            if (FAILED(m_rt->CreateBitmap(pixelSize, nullptr, 0, &props, &m_sceneBitmap)))
+            if (FAILED(m_rt->CreateBitmap(pixelSize, nullptr, 0, &props, &targetBitmap)))
                 return;
 
             m_sceneBitmapWidth = static_cast<int>(pixelSize.width);
@@ -5046,10 +5049,13 @@ private:
 
         D2D1_POINT_2U destPoint = D2D1::Point2U(0, 0);
         D2D1_RECT_U srcRect = D2D1::RectU(0, 0, pixelSize.width, pixelSize.height);
-        if (FAILED(m_sceneBitmap->CopyFromRenderTarget(&destPoint, m_rt.Get(), &srcRect))) {
+        if (FAILED(targetBitmap->CopyFromRenderTarget(&destPoint, m_rt.Get(), &srcRect))) {
             InvalidateSceneCache();
             return;
         }
+
+        if (avoidCurrentBitmapSource)
+            m_sceneBitmap.Swap(m_sceneBitmapBack);
 
         m_sceneBitmapZoom = m_zoom;
         m_sceneBitmapCenterWorld = view.centerWorld;
@@ -5203,6 +5209,8 @@ private:
                     const std::vector<D2D1_RECT_F> exposedStrips = BuildExposedSceneStrips(view, cachedSceneDest);
                     DrawExposedCachedSceneTiles(exposedStrips);
                     DrawExposedCachedSceneEdges(exposedStrips, overlayView, boundaryView);
+                    m_rt->Flush();
+                    UpdateSceneCache(view, true);
                 }
             }
 
@@ -5876,6 +5884,7 @@ private:
     ComPtr<ID2D1StrokeStyle> m_forecastErrorStrokeStyle;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
     ComPtr<ID2D1Bitmap> m_sceneBitmap;
+    ComPtr<ID2D1Bitmap> m_sceneBitmapBack;
     int m_sceneBitmapWidth = 0;
     int m_sceneBitmapHeight = 0;
     int m_sceneBitmapZoom = kDefaultZoom;

@@ -547,6 +547,7 @@ static constexpr COLORREF kUiSurface = RGB(255, 255, 255);
 static constexpr COLORREF kUiText = RGB(22, 34, 49);
 static constexpr COLORREF kUiMutedText = RGB(86, 99, 115);
 static constexpr COLORREF kUiSelection = RGB(226, 240, 255);
+static constexpr const wchar_t* kAutoLabelMaxWidthProp = L"ERC_AUTO_LABEL_MAX_WIDTH";
 
 static COLORREF SeverityLabelColor(const std::wstring& severity)
 {
@@ -774,7 +775,7 @@ static BOOL CALLBACK AutoSizeTextChildEnumProc(HWND child, LPARAM param)
     const int currentH = parentRect.bottom - parentRect.top;
 
     const int maxRight = MaxAutoLayoutClientWidth(dialog) - 28;
-    const int maxWidth = MaxInt(80, maxRight - topLeft.x);
+    int maxWidth = MaxInt(80, maxRight - topLeft.x);
 
     DWORD style = static_cast<DWORD>(GetWindowLongPtrW(child, GWL_STYLE));
     if (IsClassName(child, L"BUTTON") && IsTextButtonStyle(style)) {
@@ -793,6 +794,9 @@ static BOOL CALLBACK AutoSizeTextChildEnumProc(HWND child, LPARAM param)
     }
 
     if (IsClassName(child, L"STATIC") && IsTextStaticStyle(style)) {
+        const int labelMaxWidth = static_cast<int>(reinterpret_cast<INT_PTR>(GetPropW(child, kAutoLabelMaxWidthProp)));
+        if (labelMaxWidth > 0)
+            maxWidth = MinInt(maxWidth, labelMaxWidth);
         const int desiredW = PreferredControlWidth(child, 6, currentW, maxWidth);
         const int desiredH = PreferredControlHeight(child, 8, currentH, desiredW);
         if (desiredW != currentW || desiredH != currentH) {
@@ -1571,6 +1575,8 @@ private:
 
         SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font ? font : m_font), TRUE);
         ApplyExplorerTheme(label);
+        if (maximumWidth > 0)
+            SetPropW(label, kAutoLabelMaxWidthProp, reinterpret_cast<HANDLE>(static_cast<INT_PTR>(maximumWidth)));
         SizeLabelToText(label, maximumWidth);
         return label;
     }
@@ -5196,8 +5202,8 @@ private:
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                470,
-                360,
+                500,
+                380,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -5211,6 +5217,7 @@ private:
     void CreateIncidentFiltersControls(HWND parent)
     {
         CreateAutoLabel(parent, IDC_INCIDENT_FILTERS_TITLE_LABEL, L"Incident Filters", 18, 18, m_headerFont);
+        constexpr int contentW = 420;
         HWND descLabel = CreateAutoLabel(
             parent,
             IDC_INCIDENT_FILTERS_DESC_LABEL,
@@ -5218,8 +5225,8 @@ private:
             18,
             54,
             nullptr,
-            416);
-        const int descH = AutoLabelHeight(descLabel, 44, 416);
+            contentW);
+        const int descH = AutoLabelHeight(descLabel, 44, contentW);
 
         CreateAutoLabel(parent, IDC_INCIDENT_FILTERS_SEVERITY_LABEL, L"Severity", 18, 54 + descH + 18);
         const int severityY = 54 + descH + 46;
@@ -5228,12 +5235,12 @@ private:
         m_incidentMinorCheck = CreateWindowExW(0, L"BUTTON", L"Minor", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 288, severityY, 110, 24, parent, ControlId(IDC_INCIDENT_FILTERS_MINOR_CHECK), m_hInst, nullptr);
         m_incidentUnknownCheck = CreateWindowExW(0, L"BUTTON", L"Unknown", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, severityY + 32, 130, 24, parent, ControlId(IDC_INCIDENT_FILTERS_UNKNOWN_CHECK), m_hInst, nullptr);
 
-        CreateAutoLabel(parent, IDC_INCIDENT_FILTERS_TYPE_LABEL, L"Incident type", 18, severityY + 78);
-        const int typeY = severityY + 106;
+        CreateAutoLabel(parent, IDC_INCIDENT_FILTERS_TYPE_LABEL, L"Incident type", 18, severityY + 84);
+        const int typeY = severityY + 112;
         m_incidentUnplannedCheck = CreateWindowExW(0, L"BUTTON", L"Unplanned incidents", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY, 180, 24, parent, ControlId(IDC_INCIDENT_FILTERS_UNPLANNED_CHECK), m_hInst, nullptr);
-        m_incidentPlannedCheck = CreateWindowExW(0, L"BUTTON", L"Planned roadworks", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 218, typeY, 170, 24, parent, ControlId(IDC_INCIDENT_FILTERS_PLANNED_CHECK), m_hInst, nullptr);
+        m_incidentPlannedCheck = CreateWindowExW(0, L"BUTTON", L"Planned roadworks", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 236, typeY, 170, 24, parent, ControlId(IDC_INCIDENT_FILTERS_PLANNED_CHECK), m_hInst, nullptr);
         m_incidentSidePanelListOnlyCheck = CreateWindowExW(0, L"BUTTON", L"Side panel: only Incidents List", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY + 38, 270, 24, parent, ControlId(IDC_INCIDENT_FILTERS_SIDE_PANEL_LIST_ONLY_CHECK), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 280, 102, 32, parent, ControlId(IDC_INCIDENT_FILTERS_CLOSE_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 336, typeY + 76, 102, 32, parent, ControlId(IDC_INCIDENT_FILTERS_CLOSE_BTN), m_hInst, nullptr);
 
         for (HWND h : { m_incidentSevereCheck, m_incidentModerateCheck, m_incidentMinorCheck, m_incidentUnknownCheck, m_incidentUnplannedCheck, m_incidentPlannedCheck, m_incidentSidePanelListOnlyCheck, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -5361,7 +5368,7 @@ private:
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                540,
+                500,
                 720,
                 m_hwnd,
                 nullptr,
@@ -5376,6 +5383,7 @@ private:
     void CreateIncidentNotificationsControls(HWND parent)
     {
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_TITLE_LABEL, L"Incident Notifications", 18, 18, m_headerFont);
+        constexpr int contentW = 430;
         HWND descLabel = CreateAutoLabel(
             parent,
             IDC_INCIDENT_NOTIFICATIONS_DESC_LABEL,
@@ -5383,12 +5391,12 @@ private:
             18,
             54,
             nullptr,
-            476);
-        const int descH = AutoLabelHeight(descLabel, 44, 476);
+            contentW);
+        const int descH = AutoLabelHeight(descLabel, 44, contentW);
 
         const int left = 18;
         const int editX = 18;
-        const int editW = 476;
+        const int editW = contentW;
         int y = 54 + descH + 18;
 
         CreateAutoLabel(parent, IDC_INCIDENT_NOTIFICATIONS_ROADS_LABEL, L"Roads to notify on", left, y);
@@ -5435,7 +5443,7 @@ private:
         y += 26;
         m_incidentNotifyLocationExclusionsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, editX, y, editW, 26, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_LOCATION_EXCLUSIONS_EDIT), m_hInst, nullptr);
 
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 392, y + 42, 102, 32, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, editX + editW - 102, y + 42, 102, 32, parent, ControlId(IDC_INCIDENT_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
 
         for (HWND h : { m_incidentNotifyRoadsEdit, m_incidentNotifyRoadExclusionsEdit, m_incidentNotifyLaneThresholdEdit, m_incidentNotifyAndRadio, m_incidentNotifyOrRadio, m_incidentNotifyDelayThresholdEdit, m_incidentNotifyUpdatesRadio, m_incidentIgnoreUpdatesRadio, m_incidentNotifyRegionsBtn, m_incidentNotifyReasonExclusionsEdit, m_incidentNotifyLocationExclusionsEdit, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -7595,7 +7603,7 @@ private:
     {
         const wchar_t* previewClass = EnsureRichEditLoaded() ? MSFTEDIT_CLASS : L"EDIT";
         CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_TITLE, L"Templates Wizard", 18, 18, m_headerFont);
-        m_templateWizardDesc = CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_DESC, L"", 18, 54, nullptr, 700);
+        m_templateWizardDesc = CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_DESC, L"", 18, 54, nullptr, 684);
         m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
         m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
         m_templateWizardTitlePreviewLabel = CreateAutoLabel(parent, 0, L"Title", 18, 92);
@@ -9586,14 +9594,14 @@ private:
         CreateAutoLabel(parent, 0, L"Earthquakes List", 18, 18, m_headerFont);
         CreateAutoLabel(parent, 0, L"Minimum magnitude", 18, 58);
         m_earthquakeListMagnitudeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 88, 120, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_MAG_EDIT), m_hInst, nullptr);
-        m_earthquakeListDateRadio = CreateWindowExW(0, L"BUTTON", L"After date/time", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 180, 58, 150, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_DATE_RADIO), m_hInst, nullptr);
-        m_earthquakeListTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 180, 88, 180, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_TIME_EDIT), m_hInst, nullptr);
-        m_earthquakeListPeriodRadio = CreateWindowExW(0, L"BUTTON", L"Period", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 390, 58, 96, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_RADIO), m_hInst, nullptr);
-        m_earthquakeListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 390, 88, 130, 120, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_COMBO), m_hInst, nullptr);
-        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 552, 84, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
-        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 680, 84, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 848, 84, 102, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 142, 950, 350, parent, ControlId(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
+        m_earthquakeListDateRadio = CreateWindowExW(0, L"BUTTON", L"After date/time", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 210, 58, 150, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_DATE_RADIO), m_hInst, nullptr);
+        m_earthquakeListTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 210, 88, 180, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_TIME_EDIT), m_hInst, nullptr);
+        m_earthquakeListPeriodRadio = CreateWindowExW(0, L"BUTTON", L"Period", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 430, 58, 96, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_RADIO), m_hInst, nullptr);
+        m_earthquakeListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 430, 88, 130, 120, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_COMBO), m_hInst, nullptr);
+        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 598, 84, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
+        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 728, 84, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 858, 84, 102, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
+        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 154, 950, 350, parent, ControlId(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
 
         for (HWND h : { m_earthquakeListMagnitudeEdit, m_earthquakeListDateRadio, m_earthquakeListTimeEdit, m_earthquakeListPeriodRadio, m_earthquakeListPeriodCombo, m_earthquakeListRegionBtn, m_earthquakeListClearRegionBtn, closeBtn, m_earthquakeListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
