@@ -61,6 +61,10 @@ struct BoundaryLod
     std::vector<BoundarySegment> segmentsByMinLat;
     ComPtr<ID2D1PathGeometry> fillGeometry;
     int fillGeometryZoom = -1;
+    double geometryMinX = 0.0;
+    double geometryMaxX = 0.0;
+    double geometryMinY = 0.0;
+    double geometryMaxY = 0.0;
     double minLat = 0.0;
     double maxLat = 0.0;
     double minLon = 0.0;
@@ -73,6 +77,10 @@ struct BoundaryRing
     std::vector<BoundarySegment> segmentsByMinLat;
     ComPtr<ID2D1PathGeometry> fillGeometry;
     int fillGeometryZoom = -1;
+    double geometryMinX = 0.0;
+    double geometryMaxX = 0.0;
+    double geometryMinY = 0.0;
+    double geometryMaxY = 0.0;
     double minLat = 0.0;
     double maxLat = 0.0;
     double minLon = 0.0;
@@ -89,18 +97,80 @@ struct BoundaryRenderSource
     double maxLon = 0.0;
 };
 
+struct SceneTileKey
+{
+    int z = 0;
+    int x = 0;
+    int y = 0;
+    bool world = false;
+};
+
+inline bool operator==(const SceneTileKey& a, const SceneTileKey& b) noexcept
+{
+    return a.z == b.z && a.x == b.x && a.y == b.y && a.world == b.world;
+}
+
+struct SceneTileKeyHash
+{
+    std::size_t operator()(const SceneTileKey& k) const noexcept
+    {
+        std::size_t h1 = std::hash<int>{}(k.z);
+        std::size_t h2 = std::hash<int>{}(k.x);
+        std::size_t h3 = std::hash<int>{}(k.y);
+        std::size_t h4 = std::hash<bool>{}(k.world);
+        return h1 ^ (h2 << 1) ^ (h3 << 2) ^ (h4 << 3);
+    }
+};
+
+struct SceneTileEntry
+{
+    bool loading = false;
+    bool failed = false;
+    ULONGLONG lastUsedMs = 0;
+    ULONGLONG lastAttemptMs = 0;
+    ComPtr<ID2D1Bitmap> bitmap;
+};
+
+struct RoadRoute
+{
+    const wchar_t* label;
+    std::vector<GeoPoint> points;
+};
+
+static const std::vector<RoadRoute>& GetRoadRoutes()
+{
+    static const std::vector<RoadRoute> routes = {
+        { L"M25", { {51.66, -0.45}, {51.69, -0.05}, {51.60, 0.29}, {51.36, 0.20}, {51.25, -0.16}, {51.34, -0.55}, {51.55, -0.57}, {51.66, -0.45} } },
+        { L"M1", { {51.55, -0.42}, {52.04, -0.76}, {52.59, -1.13}, {53.02, -1.30}, {53.46, -1.39}, {53.80, -1.55} } },
+        { L"M6", { {52.49, -1.89}, {52.74, -2.02}, {53.01, -2.18}, {53.39, -2.60}, {53.75, -2.72}, {54.05, -2.80}, {54.89, -2.94}, {55.00, -3.06} } },
+        { L"M4", { {51.50, -0.42}, {51.45, -1.00}, {51.45, -1.49}, {51.56, -2.24}, {51.54, -3.05}, {51.62, -3.94} } },
+        { L"M5", { {52.49, -1.89}, {52.19, -2.22}, {51.86, -2.24}, {51.45, -2.59}, {51.02, -3.10}, {50.72, -3.53} } },
+        { L"M62", { {53.41, -2.99}, {53.48, -2.24}, {53.67, -1.50}, {53.74, -0.33}, {53.77, -0.10} } },
+        { L"A1(M)", { {51.88, -0.21}, {52.14, -0.32}, {52.57, -0.25}, {53.14, -0.67}, {53.53, -1.12}, {54.34, -1.43}, {54.97, -1.62} } },
+        { L"A14", { {52.40, -1.00}, {52.38, -0.72}, {52.33, -0.19}, {52.25, 0.15}, {52.06, 1.16} } },
+        { L"A27", { {50.82, -1.09}, {50.84, -0.78}, {50.82, -0.37}, {50.83, -0.14}, {50.82, 0.14}, {50.77, 0.29} } }
+    };
+    return routes;
+}
+
 // Tile/cache tuning.
 constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
-constexpr int kMaxFallbackTileZoomDelta = 5;
+constexpr int kMaxFallbackTileZoomDelta = 1;
+constexpr int kMaxTileBitmapDecodesPerFrame = 3;
 constexpr int kMaxInteractiveTileRequestsPerFrame = 2;
 constexpr int kAlertFocusZoom = 9;
 
 // Interaction timing.
 constexpr UINT_PTR kInteractionIdleTimer = 1;
 constexpr UINT_PTR kOverlayAnimationTimer = 2;
+constexpr UINT_PTR kSceneCacheRefreshTimer = 3;
+constexpr UINT WM_APP_SCENE_CACHE_READY = WM_APP + 60;
+constexpr UINT WM_APP_SCENE_TILE_READY = WM_APP + 61;
 constexpr UINT kInteractionIdleMs = 120;
 constexpr UINT kOverlayAnimationMs = 220;
+constexpr UINT kSceneCacheRefreshMs = 450;
+constexpr UINT kSceneCacheMinRebuildIntervalMs = 1200;
 
 // Map styling.
 constexpr float kMapWaterR = 0.80f;
@@ -120,7 +190,15 @@ constexpr float kNoteEditorMinHeight = 144.0f;
 
 // Boundary rendering.
 constexpr double kBoundaryDrawMarginPixels = 512.0;
+constexpr int kSceneCachePanMarginPixels = 1024;
+constexpr int kSceneCacheMaxScaledZoomDelta = 0;
+constexpr int kSceneTileSize = 512;
+constexpr size_t kMaxSceneTileCacheEntries = 256;
+constexpr int kMaxSceneTileBuildsInFlight = 2;
+constexpr int kMaxSceneTileRequestsPerPaint = 4;
+constexpr int kSceneTilePrefetchMarginTiles = 1;
 constexpr int kFullBoundaryMaxZoom = 7;
+constexpr int kWorldCachedGeographyMaxZoom = 7;
 constexpr int kWorldGeometryFillMaxZoom = 13;
 constexpr double kWorldLodDetailToleranceDegrees = 0.012;
 constexpr double kWorldLodMidToleranceDegrees = 0.035;
@@ -284,7 +362,6 @@ public:
     void SetAlerts(const std::vector<TrafficAlert>& alerts)
     {
         m_alerts = alerts;
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -294,7 +371,6 @@ public:
             return;
 
         m_showIncidentOverlayLabels = visible;
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -306,7 +382,6 @@ public:
         m_notes = notes;
         if (m_noteEditorMode == NoteEditorMode::Edit && m_noteEditorIndex >= m_notes.size())
             CancelNoteEditor();
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -337,21 +412,18 @@ public:
     void SetNotificationPolygons(const std::vector<GeoPolygon>& polygons)
     {
         m_notificationPolygons = polygons;
-        InvalidateSceneCache();
         Invalidate();
     }
 
     void SetActiveNotificationPolygonIndex(size_t index)
     {
         m_activeNotificationPolygonIndex = index;
-        InvalidateSceneCache();
         Invalidate();
     }
 
     void SetDraftPolygon(const std::vector<GeoPoint>& points)
     {
         m_draftPolygon = points;
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -364,7 +436,6 @@ public:
     void SetEarthquakes(const std::vector<EarthquakeEvent>& earthquakes)
     {
         m_earthquakes = earthquakes;
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -374,14 +445,12 @@ public:
             return;
 
         m_showEarthquakeOverlayLabels = visible;
-        InvalidateSceneCache();
         Invalidate();
     }
 
     void SetWeatherSystems(const std::vector<WeatherSystemEvent>& systems)
     {
         m_weatherSystems = systems;
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -391,14 +460,12 @@ public:
             return;
 
         m_showWeatherSystemOverlayLabels = visible;
-        InvalidateSceneCache();
         Invalidate();
     }
 
     void SetWeatherWarnings(const std::vector<WeatherWarningEvent>& warnings)
     {
         m_weatherWarnings = warnings;
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -408,7 +475,6 @@ public:
             return;
 
         m_showWeatherWarningOverlayLabels = visible;
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -418,14 +484,12 @@ public:
             return;
 
         m_showWeatherWarningPolygons = visible;
-        InvalidateSceneCache();
         Invalidate();
     }
 
     void SetFloods(const std::vector<FloodEvent>& floods)
     {
         m_floods = floods;
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -435,7 +499,6 @@ public:
             return;
 
         m_showFloodOverlayLabels = visible;
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -540,7 +603,6 @@ public:
     void SetSelectedId(const std::wstring& id)
     {
         m_selectedId = id;
-        InvalidateSceneCache();
         Invalidate();
     }
 
@@ -908,6 +970,8 @@ public:
                 cached.worldLods.push_back(BuildBoundaryLod(cached, kWorldLodMidToleranceDegrees));
                 cached.worldLods.push_back(BuildBoundaryLod(cached, kWorldLodFarToleranceDegrees));
                 cached.worldLods.push_back(BuildBoundaryLod(cached, kWorldLodGlobalToleranceDegrees));
+                for (auto& lod : cached.worldLods)
+                    EnsureBoundaryFillGeometry(lod);
             }
             target.push_back(std::move(cached));
         }
@@ -997,10 +1061,10 @@ private:
             return 0;
 
         case WM_SIZE:
-            if (m_rt) {
+            if (m_hwndRt) {
                 UINT w = static_cast<UINT>(std::max<LONG>(1L, LOWORD(lParam)));
                 UINT h = static_cast<UINT>(std::max<LONG>(1L, HIWORD(lParam)));
-                m_rt->Resize(D2D1::SizeU(w, h));
+                m_hwndRt->Resize(D2D1::SizeU(w, h));
                 InvalidateSceneCache();
             }
             ClampToolbarPanelOffsets(BuildViewState());
@@ -1020,6 +1084,42 @@ private:
             }
             if (wParam == kOverlayAnimationTimer) {
                 UpdateOverlayAnimations();
+                return 0;
+            }
+            if (wParam == kSceneCacheRefreshTimer) {
+                KillTimer(m_hwnd, kSceneCacheRefreshTimer);
+                m_sceneCacheRefreshPending = false;
+
+                const ULONGLONG now = GetTickCount64();
+                if (m_sceneCacheDirty && m_sceneCacheAllowDirtyUntilMs > now) {
+                    const UINT delay = static_cast<UINT>(ClampValue<ULONGLONG>(m_sceneCacheAllowDirtyUntilMs - now, 16, kSceneCacheRefreshMs));
+                    SetTimer(m_hwnd, kSceneCacheRefreshTimer, delay, nullptr);
+                    m_sceneCacheRefreshPending = true;
+                    return 0;
+                }
+
+                if (m_sceneCacheDirty && (m_interactivePan || IsOverlayUiDragActive())) {
+                    m_sceneCacheAllowDirtyUntilMs = now + kSceneCacheRefreshMs;
+                    SetTimer(m_hwnd, kSceneCacheRefreshTimer, kSceneCacheRefreshMs, nullptr);
+                    m_sceneCacheRefreshPending = true;
+                    return 0;
+                }
+
+                if (m_sceneCacheDirty &&
+                    m_sceneBitmap &&
+                    m_sceneCacheLastRebuildMs != 0 &&
+                    now < m_sceneCacheLastRebuildMs + kSceneCacheMinRebuildIntervalMs)
+                {
+                    const ULONGLONG due = m_sceneCacheLastRebuildMs + kSceneCacheMinRebuildIntervalMs;
+                    const UINT delay = static_cast<UINT>(ClampValue<ULONGLONG>(due - now, 16, kSceneCacheMinRebuildIntervalMs));
+                    m_sceneCacheAllowDirtyUntilMs = due;
+                    SetTimer(m_hwnd, kSceneCacheRefreshTimer, delay, nullptr);
+                    m_sceneCacheRefreshPending = true;
+                    return 0;
+                }
+
+                m_sceneCacheAllowDirtyUntilMs = 0;
+                InvalidateRect(m_hwnd, nullptr, FALSE);
                 return 0;
             }
             break;
@@ -1075,7 +1175,6 @@ private:
                 m_hoveredWeatherSystemId.clear();
                 m_hoveredWeatherWarningId.clear();
                 m_hoveredFloodId.clear();
-                InvalidateSceneCache();
                 Invalidate();
             }
             return 0;
@@ -1129,8 +1228,15 @@ private:
             break;
 
         case WM_APP_TILE_READY:
-            m_sceneCacheDirty = true;
             InvalidateRect(m_hwnd, nullptr, FALSE);
+            return 0;
+
+        case WM_APP_SCENE_CACHE_READY:
+            AdoptAsyncSceneCacheResult(std::unique_ptr<SceneCacheBuildResult>(reinterpret_cast<SceneCacheBuildResult*>(lParam)));
+            return 0;
+
+        case WM_APP_SCENE_TILE_READY:
+            AdoptSceneTileResult(std::unique_ptr<SceneTileBuildResult>(reinterpret_cast<SceneTileBuildResult*>(lParam)));
             return 0;
 
         case WM_DESTROY:
@@ -1152,6 +1258,28 @@ private:
         double y = (0.5 - std::log((1.0 + sinLat) / (1.0 - sinLat)) / (4.0 * kPi)) * worldSize;
 
         return { x, y };
+    }
+
+    static double WorldPixelSizeForZoom(int zoom)
+    {
+        return 256.0 * static_cast<double>(1 << zoom);
+    }
+
+    static int SceneTileCountForZoom(int zoom)
+    {
+        const double worldSize = WorldPixelSizeForZoom(zoom);
+        return MaxValue(1, static_cast<int>(std::ceil(worldSize / static_cast<double>(kSceneTileSize))));
+    }
+
+    static int NormalizeSceneTileX(int x, int zoom)
+    {
+        const int count = SceneTileCountForZoom(zoom);
+        if (count <= 1)
+            return 0;
+        int normalized = x % count;
+        if (normalized < 0)
+            normalized += count;
+        return normalized;
     }
 
     static GeoPoint WorldToGeo(double x, double y, int zoom)
@@ -1192,6 +1320,66 @@ private:
         bool allLongitudes = true;
     };
 
+    struct SceneCacheRingSnapshot
+    {
+        std::vector<GeoPoint> points;
+    };
+
+    struct SceneCacheBuildRequest
+    {
+        int zoom = kDefaultZoom;
+        int cacheWidth = 1;
+        int cacheHeight = 1;
+        int viewportWidth = 1;
+        int viewportHeight = 1;
+        bool displayWorldMap = false;
+        bool includeRoadDepictions = false;
+        WorldPoint centerWorld{};
+        ViewState boundaryView{};
+        std::vector<SceneCacheRingSnapshot> rings;
+    };
+
+    struct SceneCacheBuildResult
+    {
+        int zoom = kDefaultZoom;
+        int cacheWidth = 1;
+        int cacheHeight = 1;
+        int viewportWidth = 1;
+        int viewportHeight = 1;
+        bool displayWorldMap = false;
+        WorldPoint centerWorld{};
+        std::vector<BYTE> pixels;
+        bool success = false;
+    };
+
+    struct SceneTileBuildRequest
+    {
+        SceneTileKey key{};
+        uint64_t generation = 0;
+        int tileSize = kSceneTileSize;
+        bool includeRoadDepictions = false;
+        WorldPoint tileCenterWorld{};
+        ViewState boundaryView{};
+        std::vector<SceneCacheRingSnapshot> rings;
+    };
+
+    struct SceneTileBuildResult
+    {
+        SceneTileKey key{};
+        uint64_t generation = 0;
+        int tileSize = kSceneTileSize;
+        std::vector<BYTE> pixels;
+        bool success = false;
+    };
+
+    struct SceneTileDrawItem
+    {
+        SceneTileKey key{};
+        int drawTileX = 0;
+        int drawTileY = 0;
+        D2D1_RECT_F dest{};
+    };
+
     static double NormalizeLongitude(double lon)
     {
         while (lon < -180.0) lon += 360.0;
@@ -1204,9 +1392,17 @@ private:
         RECT rc{};
         GetClientRect(m_hwnd, &rc);
 
+        return BuildViewStateForSize(
+            std::max(1, static_cast<int>(rc.right - rc.left)),
+            std::max(1, static_cast<int>(rc.bottom - rc.top)),
+            marginPixels);
+    }
+
+    ViewState BuildViewStateForSize(int width, int height, double marginPixels = 0.0) const
+    {
         ViewState view;
-        view.width = std::max(1, static_cast<int>(rc.right - rc.left));
-        view.height = std::max(1, static_cast<int>(rc.bottom - rc.top));
+        view.width = std::max(1, width);
+        view.height = std::max(1, height);
         view.centerWorld = GeoToWorld(m_centerLat, m_centerLon, m_zoom);
 
         const double left = view.centerWorld.x - view.width * 0.5 - marginPixels;
@@ -1231,6 +1427,38 @@ private:
         return view;
     }
 
+    static ViewState BuildViewStateFromCenter(
+        int width,
+        int height,
+        int zoom,
+        const WorldPoint& centerWorld,
+        double marginPixels = 0.0)
+    {
+        ViewState view;
+        view.width = std::max(1, width);
+        view.height = std::max(1, height);
+        view.centerWorld = centerWorld;
+
+        const double left = view.centerWorld.x - view.width * 0.5 - marginPixels;
+        const double right = view.centerWorld.x + view.width * 0.5 + marginPixels;
+        const double top = view.centerWorld.y - view.height * 0.5 - marginPixels;
+        const double bottom = view.centerWorld.y + view.height * 0.5 + marginPixels;
+
+        GeoPoint nw = WorldToGeo(left, top, zoom);
+        GeoPoint se = WorldToGeo(right, bottom, zoom);
+
+        view.minLat = ClampValue(MinValue(nw.lat, se.lat), -kMaxMercatorLat, kMaxMercatorLat);
+        view.maxLat = ClampValue(MaxValue(nw.lat, se.lat), -kMaxMercatorLat, kMaxMercatorLat);
+
+        const double worldSize = WorldPixelSizeForZoom(zoom);
+        view.allLongitudes = (right - left) >= worldSize;
+        view.minLon = NormalizeLongitude(nw.lon);
+        view.maxLon = NormalizeLongitude(se.lon);
+        view.wrapsLongitude = !view.allLongitudes && view.minLon > view.maxLon;
+
+        return view;
+    }
+
     D2D1_POINT_2F GeoToScreen(const ViewState& view, double lat, double lon) const
     {
         WorldPoint p = GeoToWorld(lat, lon, m_zoom);
@@ -1244,6 +1472,20 @@ private:
         float y = static_cast<float>((p.y - view.centerWorld.y) + view.height * 0.5);
 
         return D2D1::Point2F(x, y);
+    }
+
+    static D2D1_POINT_2F GeoToScreenForZoom(const ViewState& view, double lat, double lon, int zoom)
+    {
+        WorldPoint p = GeoToWorld(lat, lon, zoom);
+        const double worldSize = WorldPixelSizeForZoom(zoom);
+        while (p.x - view.centerWorld.x > worldSize * 0.5)
+            p.x -= worldSize;
+        while (p.x - view.centerWorld.x < -worldSize * 0.5)
+            p.x += worldSize;
+
+        return D2D1::Point2F(
+            static_cast<float>((p.x - view.centerWorld.x) + view.width * 0.5),
+            static_cast<float>((p.y - view.centerWorld.y) + view.height * 0.5));
     }
 
     D2D1_POINT_2F GeoToScreen(double lat, double lon) const
@@ -1270,10 +1512,39 @@ private:
         return lon >= view.minLon && lon <= view.maxLon;
     }
 
+    static bool AnyPointInViewStatic(const ViewState& view, const std::vector<GeoPoint>& points)
+    {
+        for (const GeoPoint& pt : points) {
+            if (IsGeoPointInView(view, pt.lat, pt.lon))
+                return true;
+        }
+        return false;
+    }
+
     static bool RectsIntersect(const D2D1_RECT_F& a, const D2D1_RECT_F& b)
     {
         return a.left < b.right && a.right > b.left &&
             a.top < b.bottom && a.bottom > b.top;
+    }
+
+    static float RectIntersectionArea(const D2D1_RECT_F& a, const D2D1_RECT_F& b)
+    {
+        const float left = MaxValue(a.left, b.left);
+        const float top = MaxValue(a.top, b.top);
+        const float right = MinValue(a.right, b.right);
+        const float bottom = MinValue(a.bottom, b.bottom);
+        if (right <= left || bottom <= top)
+            return 0.0f;
+        return (right - left) * (bottom - top);
+    }
+
+    static float RectCenterDistanceSq(const D2D1_RECT_F& rect, float x, float y)
+    {
+        const float centerX = (rect.left + rect.right) * 0.5f;
+        const float centerY = (rect.top + rect.bottom) * 0.5f;
+        const float dx = centerX - x;
+        const float dy = centerY - y;
+        return dx * dx + dy * dy;
     }
 
     static int PositiveModulo(int value, int modulus)
@@ -1298,11 +1569,31 @@ private:
 
     void InvalidateSceneCache()
     {
+        KillTimer(m_hwnd, kSceneCacheRefreshTimer);
         m_sceneBitmap.Reset();
         m_sceneBitmapBack.Reset();
         m_sceneCacheDirty = false;
+        m_sceneCacheRefreshPending = false;
+        m_sceneCacheAllowDirtyUntilMs = 0;
+        m_sceneCacheLastRebuildMs = 0;
         m_sceneBitmapWidth = 0;
         m_sceneBitmapHeight = 0;
+        m_sceneViewportWidth = 0;
+        m_sceneViewportHeight = 0;
+        ClearSceneTileCache();
+    }
+
+    void MarkSceneCacheDirtyDeferred(bool invalidateIfMissing = true)
+    {
+        m_sceneCacheDirty = true;
+        m_sceneCacheAllowDirtyUntilMs = GetTickCount64() + kSceneCacheRefreshMs;
+        if (!m_sceneCacheRefreshPending) {
+            SetTimer(m_hwnd, kSceneCacheRefreshTimer, kSceneCacheRefreshMs, nullptr);
+            m_sceneCacheRefreshPending = true;
+        }
+
+        if (invalidateIfMissing && !m_sceneBitmap)
+            InvalidateRect(m_hwnd, nullptr, FALSE);
     }
 
     void MoveCenterByPixels(int dx, int dy)
@@ -2067,7 +2358,6 @@ private:
                 m_notificationPolygons[hit.polygonIndex].points.erase(m_notificationPolygons[hit.polygonIndex].points.begin() + hit.pointIndex);
                 if (m_onPolygonPointDelete)
                     m_onPolygonPointDelete(hit.polygonIndex, hit.pointIndex);
-                InvalidateSceneCache();
                 Invalidate();
             }
             return true;
@@ -2078,7 +2368,6 @@ private:
             m_notificationPolygons[m_activeNotificationPolygonIndex].points.clear();
             if (m_onPolygonClear)
                 m_onPolygonClear(m_activeNotificationPolygonIndex);
-            InvalidateSceneCache();
             Invalidate();
             return true;
         }
@@ -2154,7 +2443,6 @@ private:
                 m_notificationPolygons[m_draggingPolygonIndex].points[m_draggingPolygonPointIndex] = geo;
                 if (m_onPolygonPointMove)
                     m_onPolygonPointMove(m_draggingPolygonIndex, m_draggingPolygonPointIndex, geo.lat, geo.lon);
-                InvalidateSceneCache();
                 Invalidate();
             }
             return;
@@ -2172,7 +2460,6 @@ private:
                 m_hoveredWeatherSystemId.clear();
                 m_hoveredWeatherWarningId.clear();
                 m_hoveredFloodId.clear();
-                InvalidateSceneCache();
                 Invalidate();
             }
             return;
@@ -2194,7 +2481,6 @@ private:
             m_hoveredWeatherSystemId = std::move(hoveredWeatherSystemId);
             m_hoveredWeatherWarningId = std::move(hoveredWeatherWarningId);
             m_hoveredFloodId = std::move(hoveredFloodId);
-            InvalidateSceneCache();
             Invalidate();
         }
 
@@ -2386,13 +2672,17 @@ private:
             m_hwnd,
             D2D1::SizeU(width, height));
 
-        if (FAILED(g_d2dFactory->CreateHwndRenderTarget(rtProps, hwndProps, &m_rt)))
+        ComPtr<ID2D1HwndRenderTarget> hwndRt;
+        if (FAILED(g_d2dFactory->CreateHwndRenderTarget(rtProps, hwndProps, &hwndRt)))
             return;
+
+        m_hwndRt = hwndRt;
+        hwndRt.As(&m_rt);
 
         // Keep Direct2D drawing units aligned with Win32 mouse/client coordinates.
         // Otherwise high-DPI scaling can make ScreenToGeo and GeoToScreen disagree,
         // which places newly-created notes away from the double-clicked map point.
-        m_rt->SetDpi(96.0f, 96.0f);
+        m_hwndRt->SetDpi(96.0f, 96.0f);
 
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.85f, 0.10f, 0.10f, 0.95f), &m_severeBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.62f, 0.18f, 0.95f), &m_moderateBrush);
@@ -2458,6 +2748,7 @@ private:
         m_placeholderBrush.Reset();
         m_borderBrush.Reset();
         m_rt.Reset();
+        m_hwndRt.Reset();
         m_outlineFillBrush.Reset();
         m_outlineStrokeBrush.Reset();
         m_panelBrush.Reset();
@@ -2548,7 +2839,7 @@ private:
                 (subX + 1) * srcSize,
                 (subY + 1) * srcSize);
 
-            m_rt->DrawBitmap(parentBmp.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, src);
+            m_rt->DrawBitmap(parentBmp.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, src);
             return true;
         }
 
@@ -2709,11 +3000,7 @@ private:
 
     bool AnyPointInView(const ViewState& view, const std::vector<GeoPoint>& points) const
     {
-        for (const GeoPoint& pt : points) {
-            if (IsGeoPointInView(view, pt.lat, pt.lon))
-                return true;
-        }
-        return false;
+        return AnyPointInViewStatic(view, points);
     }
 
     void DrawPolygonPath(
@@ -4668,13 +4955,10 @@ private:
         }
     }
 
-    void DrawTiles(bool interactive, const D2D1_RECT_F* clip = nullptr)
+    void DrawTilesForView(const ViewState& tileView, bool interactive, const D2D1_RECT_F* clip = nullptr, bool requestMissingTiles = true)
     {
-        RECT rc{};
-        GetClientRect(m_hwnd, &rc);
-
-        int width = std::max(1, static_cast<int>(rc.right - rc.left));
-        int height = std::max(1, static_cast<int>(rc.bottom - rc.top));
+        int width = std::max(1, tileView.width);
+        int height = std::max(1, tileView.height);
 
         const D2D1_RECT_F viewport = D2D1::RectF(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
         if (clip && !RectsIntersect(*clip, viewport))
@@ -4687,9 +4971,8 @@ private:
         if (drawRight <= drawLeft || drawBottom <= drawTop)
             return;
 
-        WorldPoint centerWorld = GeoToWorld(m_centerLat, m_centerLon, m_zoom);
-        double originX = centerWorld.x - width * 0.5;
-        double originY = centerWorld.y - height * 0.5;
+        double originX = tileView.centerWorld.x - width * 0.5;
+        double originY = tileView.centerWorld.y - height * 0.5;
 
         int startTileX = static_cast<int>(std::floor((originX + drawLeft) / 256.0)) - 1;
         int endTileX = static_cast<int>(std::floor((originX + drawRight) / 256.0)) + 1;
@@ -4726,8 +5009,14 @@ private:
                     if (entry->bitmap) {
                         bmp = entry->bitmap;
                     }
-                    else if (!interactive && entry->ready && !entry->bytes.empty()) {
-                        bytesCopy = entry->bytes;
+                    else if (!interactive && entry->ready && !entry->failed && !entry->bytes.empty()) {
+                        if (m_tileBitmapDecodesThisFrame < kMaxTileBitmapDecodesPerFrame) {
+                            bytesCopy = entry->bytes;
+                            ++m_tileBitmapDecodesThisFrame;
+                        }
+                        else {
+                            m_pendingTileBitmapDecode = true;
+                        }
                     }
                 }
 
@@ -4738,14 +5027,28 @@ private:
                         if (!entry->bitmap)
                             entry->bitmap = bmp;
                     }
+                    else {
+                        std::lock_guard<std::mutex> lk(entry->mutex);
+                        if (!entry->bitmap && entry->ready && !entry->bytes.empty()) {
+                            entry->bytes.clear();
+                            entry->ready = false;
+                            entry->failed = true;
+                            entry->lastAttemptMs = GetTickCount64();
+                        }
+                    }
                 }
 
                 if (bmp) {
-                    m_rt->DrawBitmap(bmp.Get(), dest);
+                    m_rt->DrawBitmap(bmp.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
                 }
                 else {
                     const bool drewFallback = TryDrawFallbackTile(key, dest);
-                    if (!interactive) {
+                    if (!requestMissingTiles) {
+                        // Offscreen scene-cache renders should never fan out into a
+                        // large background tile request burst. Visible paints drive
+                        // tile loading; cache renders reuse whatever is already ready.
+                    }
+                    else if (!interactive) {
                         RequestTile(key);
                     }
                     else if (m_interactiveTileRequestsThisFrame < kMaxInteractiveTileRequestsPerFrame) {
@@ -4768,34 +5071,46 @@ private:
             PruneTileCache();
     }
 
+    void DrawTiles(bool interactive, const D2D1_RECT_F* clip = nullptr)
+    {
+        DrawTilesForView(BuildViewState(), interactive, clip);
+    }
 
 
-    void DrawRoadDepictions(const ViewState& view)
+
+    static void DrawWorkerRoadDepictionLines(
+        ID2D1RenderTarget* rt,
+        ID2D1Brush* roadBrush,
+        ID2D1Brush* casingBrush,
+        const ViewState& view,
+        int zoom)
+    {
+        if (!rt || !roadBrush || !casingBrush)
+            return;
+
+        const float casingWidth = zoom >= 8 ? 7.0f : 5.0f;
+        const float roadWidth = zoom >= 8 ? 4.0f : 3.0f;
+        for (const RoadRoute& route : GetRoadRoutes()) {
+            if (route.points.size() < 2 || !AnyPointInViewStatic(view, route.points))
+                continue;
+
+            for (size_t i = 1; i < route.points.size(); ++i) {
+                D2D1_POINT_2F a = GeoToScreenForZoom(view, route.points[i - 1].lat, route.points[i - 1].lon, zoom);
+                D2D1_POINT_2F b = GeoToScreenForZoom(view, route.points[i].lat, route.points[i].lon, zoom);
+                rt->DrawLine(a, b, casingBrush, casingWidth);
+                rt->DrawLine(a, b, roadBrush, roadWidth);
+            }
+        }
+    }
+
+    void DrawRoadDepictionLines(const ViewState& view)
     {
         if (!m_rt || !m_showRoadDepictions)
             return;
 
-        struct RoadRoute
-        {
-            const wchar_t* label;
-            std::vector<GeoPoint> points;
-        };
-
-        static const std::vector<RoadRoute> routes = {
-            { L"M25", { {51.66, -0.45}, {51.69, -0.05}, {51.60, 0.29}, {51.36, 0.20}, {51.25, -0.16}, {51.34, -0.55}, {51.55, -0.57}, {51.66, -0.45} } },
-            { L"M1", { {51.55, -0.42}, {52.04, -0.76}, {52.59, -1.13}, {53.02, -1.30}, {53.46, -1.39}, {53.80, -1.55} } },
-            { L"M6", { {52.49, -1.89}, {52.74, -2.02}, {53.01, -2.18}, {53.39, -2.60}, {53.75, -2.72}, {54.05, -2.80}, {54.89, -2.94}, {55.00, -3.06} } },
-            { L"M4", { {51.50, -0.42}, {51.45, -1.00}, {51.45, -1.49}, {51.56, -2.24}, {51.54, -3.05}, {51.62, -3.94} } },
-            { L"M5", { {52.49, -1.89}, {52.19, -2.22}, {51.86, -2.24}, {51.45, -2.59}, {51.02, -3.10}, {50.72, -3.53} } },
-            { L"M62", { {53.41, -2.99}, {53.48, -2.24}, {53.67, -1.50}, {53.74, -0.33}, {53.77, -0.10} } },
-            { L"A1(M)", { {51.88, -0.21}, {52.14, -0.32}, {52.57, -0.25}, {53.14, -0.67}, {53.53, -1.12}, {54.34, -1.43}, {54.97, -1.62} } },
-            { L"A14", { {52.40, -1.00}, {52.38, -0.72}, {52.33, -0.19}, {52.25, 0.15}, {52.06, 1.16} } },
-            { L"A27", { {50.82, -1.09}, {50.84, -0.78}, {50.82, -0.37}, {50.83, -0.14}, {50.82, 0.14}, {50.77, 0.29} } }
-        };
-
         const float casingWidth = m_zoom >= 8 ? 7.0f : 5.0f;
         const float roadWidth = m_zoom >= 8 ? 4.0f : 3.0f;
-        for (const RoadRoute& route : routes) {
+        for (const RoadRoute& route : GetRoadRoutes()) {
             if (route.points.size() < 2 || !AnyPointInView(view, route.points))
                 continue;
 
@@ -4805,14 +5120,20 @@ private:
                 m_rt->DrawLine(a, b, m_roadCasingBrush.Get(), casingWidth);
                 m_rt->DrawLine(a, b, m_roadBrush.Get(), roadWidth);
             }
+        }
+    }
 
-            if (m_zoom >= 7 && m_noteTextFormat) {
-                const GeoPoint& mid = route.points[route.points.size() / 2];
-                if (IsGeoPointInView(view, mid.lat, mid.lon)) {
-                    D2D1_POINT_2F p = GeoToScreen(view, mid.lat, mid.lon);
-                    D2D1_RECT_F rect = D2D1::RectF(p.x + 6.0f, p.y - 12.0f, p.x + 74.0f, p.y + 12.0f);
-                    m_rt->DrawTextW(route.label, static_cast<UINT32>(wcslen(route.label)), m_noteTextFormat.Get(), rect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                }
+    void DrawRoadDepictionLabels(const ViewState& view)
+    {
+        if (!m_rt || !m_showRoadDepictions || !m_noteTextFormat || m_zoom < 7)
+            return;
+
+        for (const RoadRoute& route : GetRoadRoutes()) {
+            const GeoPoint& mid = route.points[route.points.size() / 2];
+            if (IsGeoPointInView(view, mid.lat, mid.lon)) {
+                D2D1_POINT_2F p = GeoToScreen(view, mid.lat, mid.lon);
+                D2D1_RECT_F rect = D2D1::RectF(p.x + 6.0f, p.y - 12.0f, p.x + 74.0f, p.y + 12.0f);
+                m_rt->DrawTextW(route.label, static_cast<UINT32>(wcslen(route.label)), m_noteTextFormat.Get(), rect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
         }
     }
@@ -5027,70 +5348,977 @@ private:
         m_overlayUi.DrawLabel(buffer, m_overlayUi.ControlFormat(), D2D1::RectF(rect.left + 9.0f, rect.top + 6.0f, rect.right - 8.0f, rect.bottom - 5.0f));
     }
 
-
-    void UpdateSceneCache(const ViewState& view, bool avoidCurrentBitmapSource = false)
+    void TraceSlowPaintStage(const wchar_t* stage, ULONGLONG elapsedMs, bool interactive) const
     {
+        if (elapsedMs < 80)
+            return;
+
+        wchar_t buffer[256]{};
+        swprintf_s(
+            buffer,
+            L"ERC Tools map slow paint: %s took %llu ms (zoom=%d, world=%d, interactive=%d)\n",
+            stage,
+            static_cast<unsigned long long>(elapsedMs),
+            m_zoom,
+            m_displayWorldMap ? 1 : 0,
+            interactive ? 1 : 0);
+        OutputDebugStringW(buffer);
+    }
+
+
+    bool GetSceneCachePlacement(const ViewState& view, bool allowScaled, D2D1_RECT_F& dest, double& scale) const
+    {
+        if (!m_sceneBitmap || m_sceneBitmapWidth <= 0 || m_sceneBitmapHeight <= 0)
+            return false;
+        if (m_sceneViewportWidth != view.width || m_sceneViewportHeight != view.height)
+            return false;
+
+        const int zoomDelta = m_zoom - m_sceneBitmapZoom;
+        if (zoomDelta != 0) {
+            if (!allowScaled)
+                return false;
+            if (std::abs(zoomDelta) > kSceneCacheMaxScaledZoomDelta)
+                return false;
+        }
+
+        scale = std::ldexp(1.0, zoomDelta);
+        if (!std::isfinite(scale) || scale <= 0.0)
+            return false;
+
+        const double cacheCenterX = std::ldexp(m_sceneBitmapCenterWorld.x, zoomDelta);
+        const double cacheCenterY = std::ldexp(m_sceneBitmapCenterWorld.y, zoomDelta);
+
+        const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
+        double dx = cacheCenterX - view.centerWorld.x;
+        if (dx > worldSize * 0.5)
+            dx -= worldSize;
+        else if (dx < -worldSize * 0.5)
+            dx += worldSize;
+
+        const double dy = cacheCenterY - view.centerWorld.y;
+        const float scaledWidth = static_cast<float>(m_sceneBitmapWidth * scale);
+        const float scaledHeight = static_cast<float>(m_sceneBitmapHeight * scale);
+        const float centerX = static_cast<float>(view.width * 0.5 + dx);
+        const float centerY = static_cast<float>(view.height * 0.5 + dy);
+        dest = D2D1::RectF(
+            centerX - scaledWidth * 0.5f,
+            centerY - scaledHeight * 0.5f,
+            centerX + scaledWidth * 0.5f,
+            centerY + scaledHeight * 0.5f);
+        return true;
+    }
+
+    bool SceneCacheCoversView(const ViewState& view, const D2D1_RECT_F& dest) const
+    {
+        return dest.left <= 0.0f &&
+            dest.top <= 0.0f &&
+            dest.right >= static_cast<float>(view.width) &&
+            dest.bottom >= static_cast<float>(view.height);
+    }
+
+    bool SceneCacheResultCoversView(const SceneCacheBuildResult& result, const ViewState& view) const
+    {
+        if (result.cacheWidth <= 0 ||
+            result.cacheHeight <= 0 ||
+            result.viewportWidth != view.width ||
+            result.viewportHeight != view.height ||
+            result.zoom != m_zoom)
+        {
+            return false;
+        }
+
+        const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
+        double dx = result.centerWorld.x - view.centerWorld.x;
+        if (dx > worldSize * 0.5)
+            dx -= worldSize;
+        else if (dx < -worldSize * 0.5)
+            dx += worldSize;
+
+        const double dy = result.centerWorld.y - view.centerWorld.y;
+        const float centerX = static_cast<float>(view.width * 0.5 + dx);
+        const float centerY = static_cast<float>(view.height * 0.5 + dy);
+        const D2D1_RECT_F dest = D2D1::RectF(
+            centerX - result.cacheWidth * 0.5f,
+            centerY - result.cacheHeight * 0.5f,
+            centerX + result.cacheWidth * 0.5f,
+            centerY + result.cacheHeight * 0.5f);
+        return SceneCacheCoversView(view, dest);
+    }
+
+    static bool BuildWorkerBoundaryGeometry(
+        ID2D1Factory* factory,
+        const std::vector<GeoPoint>& points,
+        ComPtr<ID2D1PathGeometry>& geometry,
+        double& geometryMinX,
+        double& geometryMaxX,
+        double& geometryMinY,
+        double& geometryMaxY)
+    {
+        if (!factory || points.size() < 3)
+            return false;
+
+        ComPtr<ID2D1PathGeometry> geom;
+        if (FAILED(factory->CreatePathGeometry(&geom)))
+            return false;
+
+        ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(geom->Open(&sink)))
+            return false;
+
+        sink->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
+
+        constexpr double baseWorldSize = 256.0;
+        constexpr double halfBaseWorld = baseWorldSize * 0.5;
+
+        WorldPoint first = GeoToWorld(points[0].lat, points[0].lon, 0);
+        double previousX = first.x;
+        geometryMinX = geometryMaxX = first.x;
+        geometryMinY = geometryMaxY = first.y;
+        sink->BeginFigure(
+            D2D1::Point2F(static_cast<float>(first.x), static_cast<float>(first.y)),
+            D2D1_FIGURE_BEGIN_FILLED);
+
+        const bool hasExplicitClose = points.size() > 1 && SameGeoPoint(points.front(), points.back());
+        for (size_t i = 1; i < points.size(); ++i) {
+            WorldPoint p = GeoToWorld(points[i].lat, points[i].lon, 0);
+            while (p.x - previousX > halfBaseWorld)
+                p.x -= baseWorldSize;
+            while (p.x - previousX < -halfBaseWorld)
+                p.x += baseWorldSize;
+            previousX = p.x;
+
+            geometryMinX = MinValue(geometryMinX, p.x);
+            geometryMaxX = MaxValue(geometryMaxX, p.x);
+            geometryMinY = MinValue(geometryMinY, p.y);
+            geometryMaxY = MaxValue(geometryMaxY, p.y);
+            sink->AddLine(D2D1::Point2F(static_cast<float>(p.x), static_cast<float>(p.y)));
+        }
+
+        sink->EndFigure(hasExplicitClose ? D2D1_FIGURE_END_OPEN : D2D1_FIGURE_END_CLOSED);
+        if (FAILED(sink->Close()))
+            return false;
+
+        geometry = geom;
+        return true;
+    }
+
+    static void DrawWorkerBoundaryRingFull(
+        ID2D1RenderTarget* rt,
+        ID2D1Factory* factory,
+        ID2D1Brush* fillBrush,
+        ID2D1Brush* strokeBrush,
+        const std::vector<GeoPoint>& points,
+        const ViewState& view,
+        int zoom)
+    {
+        if (!rt || !factory || points.size() < 3)
+            return;
+
+        ComPtr<ID2D1PathGeometry> geometry;
+        double geometryMinX = 0.0;
+        double geometryMaxX = 0.0;
+        double geometryMinY = 0.0;
+        double geometryMaxY = 0.0;
+        if (!BuildWorkerBoundaryGeometry(
+            factory,
+            points,
+            geometry,
+            geometryMinX,
+            geometryMaxX,
+            geometryMinY,
+            geometryMaxY))
+        {
+            return;
+        }
+
+        const double scale = static_cast<double>(1 << zoom);
+        const double worldSize = 256.0 * scale;
+        const double viewLeft = view.centerWorld.x - view.width * 0.5;
+        const double viewRight = view.centerWorld.x + view.width * 0.5;
+        const double viewTop = view.centerWorld.y - view.height * 0.5;
+        const double viewBottom = view.centerWorld.y + view.height * 0.5;
+        const double geomTop = geometryMinY * scale;
+        const double geomBottom = geometryMaxY * scale;
+        if (geomBottom < viewTop - 4.0 || geomTop > viewBottom + 4.0)
+            return;
+
+        D2D1_MATRIX_3X2_F oldTransform{};
+        rt->GetTransform(&oldTransform);
+
+        const int minCopy = static_cast<int>(std::floor((viewLeft - geometryMaxX * scale) / worldSize)) - 1;
+        const int maxCopy = static_cast<int>(std::ceil((viewRight - geometryMinX * scale) / worldSize)) + 1;
+        for (int copy = minCopy; copy <= maxCopy; ++copy) {
+            const double shiftX = static_cast<double>(copy) * worldSize;
+            const double geomLeft = geometryMinX * scale + shiftX;
+            const double geomRight = geometryMaxX * scale + shiftX;
+            if (geomRight < viewLeft - 4.0 || geomLeft > viewRight + 4.0)
+                continue;
+
+            const double dx = -view.centerWorld.x + view.width * 0.5 + shiftX;
+            const double dy = -view.centerWorld.y + view.height * 0.5;
+            const D2D1_MATRIX_3X2_F transform = D2D1::Matrix3x2F(
+                static_cast<float>(scale), 0.0f,
+                0.0f, static_cast<float>(scale),
+                static_cast<float>(dx), static_cast<float>(dy));
+            rt->SetTransform(transform);
+
+            if (fillBrush)
+                rt->FillGeometry(geometry.Get(), fillBrush);
+            if (strokeBrush) {
+                const float strokeWidth = static_cast<float>(2.0 / MaxValue(scale, 1.0));
+                rt->DrawGeometry(geometry.Get(), strokeBrush, strokeWidth);
+            }
+        }
+
+        rt->SetTransform(oldTransform);
+    }
+
+    static std::unique_ptr<SceneCacheBuildResult> RenderSceneCacheOnWorker(std::unique_ptr<SceneCacheBuildRequest> request)
+    {
+        auto result = std::make_unique<SceneCacheBuildResult>();
+        if (!request)
+            return result;
+
+        result->zoom = request->zoom;
+        result->cacheWidth = request->cacheWidth;
+        result->cacheHeight = request->cacheHeight;
+        result->viewportWidth = request->viewportWidth;
+        result->viewportHeight = request->viewportHeight;
+        result->displayWorldMap = request->displayWorldMap;
+        result->centerWorld = request->centerWorld;
+
+        HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool coInitialized = SUCCEEDED(coHr);
+
+        ComPtr<ID2D1Factory> factory;
+        HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_PPV_ARGS(&factory));
+        if (SUCCEEDED(hr)) {
+            ComPtr<IWICImagingFactory> wicFactory;
+            hr = CoCreateInstance(
+                CLSID_WICImagingFactory,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(&wicFactory));
+            if (SUCCEEDED(hr) && wicFactory) {
+                ComPtr<IWICBitmap> wicBitmap;
+                hr = wicFactory->CreateBitmap(
+                    static_cast<UINT>(request->cacheWidth),
+                    static_cast<UINT>(request->cacheHeight),
+                    GUID_WICPixelFormat32bppPBGRA,
+                    WICBitmapCacheOnLoad,
+                    &wicBitmap);
+                if (SUCCEEDED(hr) && wicBitmap) {
+                    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+                        96.0f,
+                        96.0f);
+
+                    ComPtr<ID2D1RenderTarget> rt;
+                    hr = factory->CreateWicBitmapRenderTarget(wicBitmap.Get(), props, &rt);
+                    if (SUCCEEDED(hr) && rt) {
+                        ComPtr<ID2D1SolidColorBrush> fillBrush;
+                        ComPtr<ID2D1SolidColorBrush> strokeBrush;
+                        ComPtr<ID2D1SolidColorBrush> roadBrush;
+                        ComPtr<ID2D1SolidColorBrush> roadCasingBrush;
+                        rt->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.55f, 0.25f, 0.18f), &fillBrush);
+                        rt->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.28f, 0.12f, 0.92f), &strokeBrush);
+                        if (request->includeRoadDepictions) {
+                            rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.97f, 0.84f, 0.88f), &roadBrush);
+                            rt->CreateSolidColorBrush(D2D1::ColorF(0.11f, 0.19f, 0.24f, 0.70f), &roadCasingBrush);
+                        }
+
+                        rt->BeginDraw();
+                        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+                        rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+
+                        for (const SceneCacheRingSnapshot& ring : request->rings) {
+                            DrawWorkerBoundaryRingFull(
+                                rt.Get(),
+                                factory.Get(),
+                                fillBrush.Get(),
+                                strokeBrush.Get(),
+                                ring.points,
+                                request->boundaryView,
+                                request->zoom);
+                        }
+
+                        if (request->includeRoadDepictions) {
+                            DrawWorkerRoadDepictionLines(
+                                rt.Get(),
+                                roadBrush.Get(),
+                                roadCasingBrush.Get(),
+                                request->boundaryView,
+                                request->zoom);
+                        }
+
+                        hr = rt->EndDraw();
+                        if (SUCCEEDED(hr)) {
+                            WICRect rect{};
+                            rect.X = 0;
+                            rect.Y = 0;
+                            rect.Width = request->cacheWidth;
+                            rect.Height = request->cacheHeight;
+
+                            ComPtr<IWICBitmapLock> lock;
+                            hr = wicBitmap->Lock(&rect, WICBitmapLockRead, &lock);
+                            if (SUCCEEDED(hr) && lock) {
+                                UINT stride = 0;
+                                UINT dataSize = 0;
+                                BYTE* data = nullptr;
+                                hr = lock->GetStride(&stride);
+                                if (SUCCEEDED(hr))
+                                    hr = lock->GetDataPointer(&dataSize, &data);
+                                if (SUCCEEDED(hr) && data && stride >= static_cast<UINT>(request->cacheWidth * 4)) {
+                                    const size_t rowBytes = static_cast<size_t>(request->cacheWidth) * 4;
+                                    result->pixels.resize(rowBytes * static_cast<size_t>(request->cacheHeight));
+                                    for (int y = 0; y < request->cacheHeight; ++y) {
+                                        std::memcpy(
+                                            result->pixels.data() + rowBytes * static_cast<size_t>(y),
+                                            data + static_cast<size_t>(stride) * static_cast<size_t>(y),
+                                            rowBytes);
+                                    }
+                                    result->success = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (coInitialized)
+            CoUninitialize();
+        return result;
+    }
+
+    static std::unique_ptr<SceneTileBuildResult> RenderSceneTileOnWorker(std::unique_ptr<SceneTileBuildRequest> request)
+    {
+        auto result = std::make_unique<SceneTileBuildResult>();
+        if (!request)
+            return result;
+
+        result->key = request->key;
+        result->generation = request->generation;
+        result->tileSize = request->tileSize;
+
+        HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool coInitialized = SUCCEEDED(coHr);
+
+        ComPtr<ID2D1Factory> factory;
+        HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_PPV_ARGS(&factory));
+        if (SUCCEEDED(hr)) {
+            ComPtr<IWICImagingFactory> wicFactory;
+            hr = CoCreateInstance(
+                CLSID_WICImagingFactory,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(&wicFactory));
+            if (SUCCEEDED(hr) && wicFactory) {
+                ComPtr<IWICBitmap> wicBitmap;
+                hr = wicFactory->CreateBitmap(
+                    static_cast<UINT>(request->tileSize),
+                    static_cast<UINT>(request->tileSize),
+                    GUID_WICPixelFormat32bppPBGRA,
+                    WICBitmapCacheOnLoad,
+                    &wicBitmap);
+                if (SUCCEEDED(hr) && wicBitmap) {
+                    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+                        96.0f,
+                        96.0f);
+
+                    ComPtr<ID2D1RenderTarget> rt;
+                    hr = factory->CreateWicBitmapRenderTarget(wicBitmap.Get(), props, &rt);
+                    if (SUCCEEDED(hr) && rt) {
+                        ComPtr<ID2D1SolidColorBrush> fillBrush;
+                        ComPtr<ID2D1SolidColorBrush> strokeBrush;
+                        ComPtr<ID2D1SolidColorBrush> roadBrush;
+                        ComPtr<ID2D1SolidColorBrush> roadCasingBrush;
+                        rt->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.55f, 0.25f, 0.18f), &fillBrush);
+                        rt->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.28f, 0.12f, 0.92f), &strokeBrush);
+                        if (request->includeRoadDepictions) {
+                            rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.97f, 0.84f, 0.88f), &roadBrush);
+                            rt->CreateSolidColorBrush(D2D1::ColorF(0.11f, 0.19f, 0.24f, 0.70f), &roadCasingBrush);
+                        }
+
+                        rt->BeginDraw();
+                        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+                        rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+
+                        for (const SceneCacheRingSnapshot& ring : request->rings) {
+                            DrawWorkerBoundaryRingFull(
+                                rt.Get(),
+                                factory.Get(),
+                                fillBrush.Get(),
+                                strokeBrush.Get(),
+                                ring.points,
+                                request->boundaryView,
+                                request->key.z);
+                        }
+
+                        if (request->includeRoadDepictions) {
+                            DrawWorkerRoadDepictionLines(
+                                rt.Get(),
+                                roadBrush.Get(),
+                                roadCasingBrush.Get(),
+                                request->boundaryView,
+                                request->key.z);
+                        }
+
+                        hr = rt->EndDraw();
+                        if (SUCCEEDED(hr)) {
+                            WICRect rect{};
+                            rect.X = 0;
+                            rect.Y = 0;
+                            rect.Width = request->tileSize;
+                            rect.Height = request->tileSize;
+
+                            ComPtr<IWICBitmapLock> lock;
+                            hr = wicBitmap->Lock(&rect, WICBitmapLockRead, &lock);
+                            if (SUCCEEDED(hr) && lock) {
+                                UINT stride = 0;
+                                UINT dataSize = 0;
+                                BYTE* data = nullptr;
+                                hr = lock->GetStride(&stride);
+                                if (SUCCEEDED(hr))
+                                    hr = lock->GetDataPointer(&dataSize, &data);
+                                if (SUCCEEDED(hr) && data && stride >= static_cast<UINT>(request->tileSize * 4)) {
+                                    const size_t rowBytes = static_cast<size_t>(request->tileSize) * 4;
+                                    result->pixels.resize(rowBytes * static_cast<size_t>(request->tileSize));
+                                    for (int y = 0; y < request->tileSize; ++y) {
+                                        std::memcpy(
+                                            result->pixels.data() + rowBytes * static_cast<size_t>(y),
+                                            data + static_cast<size_t>(stride) * static_cast<size_t>(y),
+                                            rowBytes);
+                                    }
+                                    result->success = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (coInitialized)
+            CoUninitialize();
+        return result;
+    }
+
+    std::unique_ptr<SceneCacheBuildRequest> BuildAsyncSceneCacheRequest(const ViewState& view)
+    {
+        auto request = std::make_unique<SceneCacheBuildRequest>();
+        request->zoom = m_zoom;
+        request->cacheWidth = MaxValue(1, view.width + kSceneCachePanMarginPixels * 2);
+        request->cacheHeight = MaxValue(1, view.height + kSceneCachePanMarginPixels * 2);
+        request->viewportWidth = view.width;
+        request->viewportHeight = view.height;
+        request->displayWorldMap = m_displayWorldMap;
+        request->includeRoadDepictions = !m_displayWorldMap && m_showRoadDepictions;
+
+        const ViewState cacheView = BuildViewStateForSize(request->cacheWidth, request->cacheHeight);
+        request->centerWorld = cacheView.centerWorld;
+        request->boundaryView = BuildViewStateForSize(request->cacheWidth, request->cacheHeight, kBoundaryDrawMarginPixels);
+
+        if (m_displayWorldMap) {
+            request->rings.reserve(128);
+            for (BoundaryRing& ring : m_worldBoundaryRings) {
+                if (!RingIntersectsView(ring, request->boundaryView))
+                    continue;
+
+                BoundaryLod* lod = WorldBoundaryLodForZoom(ring);
+                BoundaryRenderSource source = (lod && lod->points.size() >= 3)
+                    ? MakeBoundaryRenderSource(*lod)
+                    : MakeBoundaryRenderSource(ring);
+                if (!BoundarySourceIntersectsView(source, request->boundaryView))
+                    continue;
+
+                const std::vector<GeoPoint>& points = (lod && lod->points.size() >= 3) ? lod->points : ring.points;
+                if (points.size() >= 3)
+                    request->rings.push_back({ points });
+            }
+        }
+        else {
+            request->rings.reserve(m_ukBoundaryRings.size());
+            for (const BoundaryRing& ring : m_ukBoundaryRings) {
+                if (RingIntersectsView(ring, request->boundaryView) && ring.points.size() >= 3)
+                    request->rings.push_back({ ring.points });
+            }
+        }
+
+        return request;
+    }
+
+    std::vector<SceneTileDrawItem> BuildSceneTileDrawItems(const ViewState& view, int marginTiles) const
+    {
+        std::vector<SceneTileDrawItem> items;
+        if (!HasSceneTileSources() || m_zoom < 0)
+            return items;
+
+        const double viewLeft = view.centerWorld.x - view.width * 0.5;
+        const double viewRight = view.centerWorld.x + view.width * 0.5;
+        const double viewTop = view.centerWorld.y - view.height * 0.5;
+        const double viewBottom = view.centerWorld.y + view.height * 0.5;
+        const int tileCount = SceneTileCountForZoom(m_zoom);
+        const int xStart = static_cast<int>(std::floor(viewLeft / kSceneTileSize)) - marginTiles;
+        const int xEnd = static_cast<int>(std::floor((viewRight - 0.001) / kSceneTileSize)) + marginTiles;
+        const int yStart = ClampValue(static_cast<int>(std::floor(viewTop / kSceneTileSize)) - marginTiles, 0, tileCount - 1);
+        const int yEnd = ClampValue(static_cast<int>(std::floor((viewBottom - 0.001) / kSceneTileSize)) + marginTiles, 0, tileCount - 1);
+
+        const size_t reserveCount =
+            static_cast<size_t>(MaxValue(0, xEnd - xStart + 1)) *
+            static_cast<size_t>(MaxValue(0, yEnd - yStart + 1));
+        items.reserve(reserveCount);
+
+        for (int y = yStart; y <= yEnd; ++y) {
+            for (int x = xStart; x <= xEnd; ++x) {
+                SceneTileDrawItem item;
+                item.drawTileX = x;
+                item.drawTileY = y;
+                item.key = SceneTileKey{ m_zoom, NormalizeSceneTileX(x, m_zoom), y, m_displayWorldMap };
+                item.dest = D2D1::RectF(
+                    static_cast<float>(static_cast<double>(x) * kSceneTileSize - viewLeft),
+                    static_cast<float>(static_cast<double>(y) * kSceneTileSize - viewTop),
+                    static_cast<float>((static_cast<double>(x) + 1.0) * kSceneTileSize - viewLeft),
+                    static_cast<float>((static_cast<double>(y) + 1.0) * kSceneTileSize - viewTop));
+                items.push_back(item);
+            }
+        }
+
+        return items;
+    }
+
+    bool HasSceneTileSources() const
+    {
+        if (m_displayWorldMap)
+            return !m_worldBoundaryRings.empty();
+        return !m_ukBoundaryRings.empty();
+    }
+
+    bool ShouldUseSceneTileCache() const
+    {
+        if (!HasSceneTileSources())
+            return false;
+
+        return true;
+    }
+
+    bool IsSceneTileCacheReady(const ViewState& view)
+    {
+        if (!ShouldUseSceneTileCache())
+            return false;
+
+        const std::vector<SceneTileDrawItem> items = BuildSceneTileDrawItems(view, 0);
+        if (items.empty())
+            return false;
+
+        const ULONGLONG now = GetTickCount64();
+        for (const SceneTileDrawItem& item : items) {
+            auto it = m_sceneTiles.find(item.key);
+            if (it == m_sceneTiles.end() || !it->second.bitmap)
+                return false;
+            it->second.lastUsedMs = now;
+        }
+
+        return true;
+    }
+
+    bool DrawSceneTileCache(
+        const ViewState& view,
+        bool requireComplete = true,
+        bool* allReadyOut = nullptr,
+        bool* anyDrawnOut = nullptr)
+    {
+        if (allReadyOut)
+            *allReadyOut = false;
+        if (anyDrawnOut)
+            *anyDrawnOut = false;
+
+        if (!m_rt || !ShouldUseSceneTileCache())
+            return false;
+
+        const std::vector<SceneTileDrawItem> items = BuildSceneTileDrawItems(view, 0);
+        if (items.empty())
+            return false;
+
+        const ULONGLONG now = GetTickCount64();
+        bool allReady = true;
+        bool anyDrawn = false;
+        for (const SceneTileDrawItem& item : items) {
+            auto it = m_sceneTiles.find(item.key);
+            if (it == m_sceneTiles.end() || !it->second.bitmap) {
+                allReady = false;
+                if (requireComplete)
+                    return false;
+                continue;
+            }
+
+            it->second.lastUsedMs = now;
+            m_rt->DrawBitmap(
+                it->second.bitmap.Get(),
+                item.dest,
+                1.0f,
+                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+            anyDrawn = true;
+        }
+
+        if (allReadyOut)
+            *allReadyOut = allReady;
+        if (anyDrawnOut)
+            *anyDrawnOut = anyDrawn;
+
+        if (requireComplete)
+            return allReady;
+        return anyDrawn;
+    }
+
+    std::unique_ptr<SceneTileBuildRequest> BuildSceneTileRequest(const SceneTileKey& key)
+    {
+        auto request = std::make_unique<SceneTileBuildRequest>();
+        request->key = key;
+        request->generation = m_sceneTileGeneration;
+        request->tileSize = kSceneTileSize;
+        request->includeRoadDepictions = !key.world && m_showRoadDepictions;
+
+        const double tileLeft = static_cast<double>(key.x) * kSceneTileSize;
+        const double tileTop = static_cast<double>(key.y) * kSceneTileSize;
+        request->tileCenterWorld = {
+            tileLeft + kSceneTileSize * 0.5,
+            tileTop + kSceneTileSize * 0.5
+        };
+        request->boundaryView = BuildViewStateFromCenter(
+            kSceneTileSize,
+            kSceneTileSize,
+            key.z,
+            request->tileCenterWorld,
+            64.0);
+
+        request->rings.reserve(16);
+        if (key.world) {
+            for (BoundaryRing& ring : m_worldBoundaryRings) {
+                if (!RingIntersectsView(ring, request->boundaryView))
+                    continue;
+
+                BoundaryLod* lod = WorldBoundaryLodForZoom(ring);
+                BoundaryRenderSource source = (lod && lod->points.size() >= 3)
+                    ? MakeBoundaryRenderSource(*lod)
+                    : MakeBoundaryRenderSource(ring);
+                if (!BoundarySourceIntersectsView(source, request->boundaryView))
+                    continue;
+
+                const std::vector<GeoPoint>& points = (lod && lod->points.size() >= 3) ? lod->points : ring.points;
+                if (points.size() >= 3)
+                    request->rings.push_back({ points });
+            }
+        }
+        else {
+            for (const BoundaryRing& ring : m_ukBoundaryRings) {
+                if (RingIntersectsView(ring, request->boundaryView) && ring.points.size() >= 3)
+                    request->rings.push_back({ ring.points });
+            }
+        }
+
+        return request;
+    }
+
+    void QueueVisibleSceneTiles(const ViewState& view)
+    {
+        if (!ShouldUseSceneTileCache())
+            return;
+
+        std::vector<SceneTileDrawItem> items = BuildSceneTileDrawItems(view, kSceneTilePrefetchMarginTiles);
+        if (items.empty())
+            return;
+
+        const D2D1_RECT_F viewport = D2D1::RectF(
+            0.0f,
+            0.0f,
+            static_cast<float>(view.width),
+            static_cast<float>(view.height));
+        const float centerX = static_cast<float>(view.width) * 0.5f;
+        const float centerY = static_cast<float>(view.height) * 0.5f;
+        std::sort(items.begin(), items.end(), [viewport, centerX, centerY](const auto& a, const auto& b) {
+            const float aArea = RectIntersectionArea(a.dest, viewport);
+            const float bArea = RectIntersectionArea(b.dest, viewport);
+            if (std::abs(aArea - bArea) > 0.5f)
+                return aArea > bArea;
+
+            return RectCenterDistanceSq(a.dest, centerX, centerY) <
+                RectCenterDistanceSq(b.dest, centerX, centerY);
+            });
+
+        const ULONGLONG now = GetTickCount64();
+        int requested = 0;
+        std::unordered_set<SceneTileKey, SceneTileKeyHash> seen;
+        for (const SceneTileDrawItem& item : items) {
+            if (!seen.insert(item.key).second)
+                continue;
+
+            SceneTileEntry& entry = m_sceneTiles[item.key];
+            entry.lastUsedMs = now;
+            if (entry.bitmap || entry.loading)
+                continue;
+            if (entry.failed && now < entry.lastAttemptMs + 2500)
+                continue;
+            if (m_sceneTileBuildsInFlight >= kMaxSceneTileBuildsInFlight ||
+                requested >= kMaxSceneTileRequestsPerPaint)
+            {
+                break;
+            }
+
+            auto request = BuildSceneTileRequest(item.key);
+            entry.loading = true;
+            entry.failed = false;
+            entry.lastAttemptMs = now;
+            ++m_sceneTileBuildsInFlight;
+            ++requested;
+
+            HWND hwnd = m_hwnd;
+            ScheduleMapTask([hwnd, request = std::move(request)]() mutable {
+                auto result = RenderSceneTileOnWorker(std::move(request));
+                SceneTileBuildResult* rawResult = result.release();
+                if (!PostMessageW(hwnd, WM_APP_SCENE_TILE_READY, 0, reinterpret_cast<LPARAM>(rawResult)))
+                    delete rawResult;
+                });
+        }
+    }
+
+    void AdoptSceneTileResult(std::unique_ptr<SceneTileBuildResult> result)
+    {
+        if (!result || result->generation != m_sceneTileGeneration)
+            return;
+
+        if (m_sceneTileBuildsInFlight > 0)
+            --m_sceneTileBuildsInFlight;
+
+        auto it = m_sceneTiles.find(result->key);
+        if (it == m_sceneTiles.end())
+            it = m_sceneTiles.emplace(result->key, SceneTileEntry{}).first;
+
+        it->second.loading = false;
+        it->second.lastUsedMs = GetTickCount64();
+
+        if (!result->success || result->pixels.empty()) {
+            it->second.failed = true;
+            it->second.lastAttemptMs = GetTickCount64();
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+            return;
+        }
+
+        EnsureDeviceResources();
         if (!m_rt)
             return;
 
-        const D2D1_SIZE_U pixelSize = m_rt->GetPixelSize();
-        if (pixelSize.width == 0 || pixelSize.height == 0)
-            return;
-
-        ComPtr<ID2D1Bitmap>& targetBitmap = avoidCurrentBitmapSource ? m_sceneBitmapBack : m_sceneBitmap;
-
-        if (!targetBitmap ||
-            m_sceneBitmapWidth != static_cast<int>(pixelSize.width) ||
-            m_sceneBitmapHeight != static_cast<int>(pixelSize.height))
-        {
-            targetBitmap.Reset();
-            D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(m_rt->GetPixelFormat());
-            if (FAILED(m_rt->CreateBitmap(pixelSize, nullptr, 0, &props, &targetBitmap)))
-                return;
-
-            m_sceneBitmapWidth = static_cast<int>(pixelSize.width);
-            m_sceneBitmapHeight = static_cast<int>(pixelSize.height);
-        }
-
-        D2D1_POINT_2U destPoint = D2D1::Point2U(0, 0);
-        D2D1_RECT_U srcRect = D2D1::RectU(0, 0, pixelSize.width, pixelSize.height);
-        if (FAILED(targetBitmap->CopyFromRenderTarget(&destPoint, m_rt.Get(), &srcRect))) {
-            InvalidateSceneCache();
+        D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            96.0f,
+            96.0f);
+        ComPtr<ID2D1Bitmap> bitmap;
+        HRESULT hr = m_rt->CreateBitmap(
+            D2D1::SizeU(static_cast<UINT32>(result->tileSize), static_cast<UINT32>(result->tileSize)),
+            result->pixels.data(),
+            static_cast<UINT32>(result->tileSize * 4),
+            props,
+            &bitmap);
+        if (FAILED(hr) || !bitmap) {
+            it->second.failed = true;
+            it->second.lastAttemptMs = GetTickCount64();
+            InvalidateRect(m_hwnd, nullptr, FALSE);
             return;
         }
 
-        if (avoidCurrentBitmapSource)
-            m_sceneBitmap.Swap(m_sceneBitmapBack);
-
-        m_sceneCacheDirty = false;
-        m_sceneBitmapZoom = m_zoom;
-        m_sceneBitmapCenterWorld = view.centerWorld;
+        it->second.bitmap = bitmap;
+        it->second.failed = false;
+        PruneSceneTileCache();
+        InvalidateRect(m_hwnd, nullptr, FALSE);
     }
 
-    bool IsSceneCacheCurrent(const ViewState& view, bool allowDirty = false) const
+    void PruneSceneTileCache()
+    {
+        if (m_sceneTiles.size() <= kMaxSceneTileCacheEntries)
+            return;
+
+        std::vector<std::pair<SceneTileKey, ULONGLONG>> candidates;
+        candidates.reserve(m_sceneTiles.size());
+        for (const auto& [key, entry] : m_sceneTiles) {
+            if (!entry.loading)
+                candidates.push_back({ key, entry.lastUsedMs });
+        }
+
+        std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+            return a.second < b.second;
+            });
+
+        size_t toRemove = m_sceneTiles.size() - kMaxSceneTileCacheEntries;
+        for (const auto& candidate : candidates) {
+            if (toRemove == 0)
+                break;
+            m_sceneTiles.erase(candidate.first);
+            --toRemove;
+        }
+    }
+
+    void ClearSceneTileCache()
+    {
+        ++m_sceneTileGeneration;
+        m_sceneTiles.clear();
+        m_sceneTileBuildsInFlight = 0;
+    }
+
+    bool QueueSceneCacheRebuild(const ViewState& view)
+    {
+        if (m_sceneCacheBuildInFlight)
+            return true;
+
+        auto request = BuildAsyncSceneCacheRequest(view);
+        if (!request)
+            return false;
+
+        m_sceneCacheBuildInFlight = true;
+        HWND hwnd = m_hwnd;
+        ScheduleMapTask([hwnd, request = std::move(request)]() mutable {
+            auto result = RenderSceneCacheOnWorker(std::move(request));
+            SceneCacheBuildResult* rawResult = result.release();
+            if (!PostMessageW(hwnd, WM_APP_SCENE_CACHE_READY, 0, reinterpret_cast<LPARAM>(rawResult)))
+                delete rawResult;
+            });
+        return true;
+    }
+
+    void AdoptAsyncSceneCacheResult(std::unique_ptr<SceneCacheBuildResult> result)
+    {
+        m_sceneCacheBuildInFlight = false;
+        if (!result || !result->success || result->pixels.empty()) {
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+            return;
+        }
+
+        EnsureDeviceResources();
+        if (!m_rt)
+            return;
+
+        const ViewState view = BuildViewState();
+        if (result->viewportWidth != view.width ||
+            result->viewportHeight != view.height ||
+            result->zoom != m_zoom ||
+            result->displayWorldMap != m_displayWorldMap ||
+            !SceneCacheResultCoversView(*result, view))
+        {
+            m_sceneCacheDirty = true;
+            QueueSceneCacheRebuild(view);
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+            return;
+        }
+
+        D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            96.0f,
+            96.0f);
+        ComPtr<ID2D1Bitmap> bitmap;
+        HRESULT hr = m_rt->CreateBitmap(
+            D2D1::SizeU(static_cast<UINT32>(result->cacheWidth), static_cast<UINT32>(result->cacheHeight)),
+            result->pixels.data(),
+            static_cast<UINT32>(result->cacheWidth * 4),
+            props,
+            &bitmap);
+        if (FAILED(hr) || !bitmap) {
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+            return;
+        }
+
+        m_sceneBitmap = bitmap;
+        m_sceneBitmapBack.Reset();
+        m_sceneBitmapWidth = result->cacheWidth;
+        m_sceneBitmapHeight = result->cacheHeight;
+        m_sceneViewportWidth = result->viewportWidth;
+        m_sceneViewportHeight = result->viewportHeight;
+        m_sceneCacheDirty = false;
+        m_sceneCacheRefreshPending = false;
+        m_sceneCacheAllowDirtyUntilMs = 0;
+        m_sceneCacheLastRebuildMs = GetTickCount64();
+        KillTimer(m_hwnd, kSceneCacheRefreshTimer);
+        m_sceneBitmapZoom = result->zoom;
+        m_sceneBitmapCenterWorld = result->centerWorld;
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+
+    bool RebuildSceneCache(const ViewState& view)
+    {
+        if (!m_rt)
+            return false;
+
+        const int cacheW = MaxValue(1, view.width + kSceneCachePanMarginPixels * 2);
+        const int cacheH = MaxValue(1, view.height + kSceneCachePanMarginPixels * 2);
+
+        ComPtr<ID2D1BitmapRenderTarget> cacheTarget;
+        D2D1_SIZE_F desiredSize = D2D1::SizeF(static_cast<float>(cacheW), static_cast<float>(cacheH));
+        D2D1_SIZE_U desiredPixels = D2D1::SizeU(static_cast<UINT32>(cacheW), static_cast<UINT32>(cacheH));
+        D2D1_PIXEL_FORMAT pixelFormat = D2D1::PixelFormat(
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            D2D1_ALPHA_MODE_PREMULTIPLIED);
+        HRESULT hr = m_rt->CreateCompatibleRenderTarget(
+            &desiredSize,
+            &desiredPixels,
+            &pixelFormat,
+            D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+            &cacheTarget);
+        if (FAILED(hr) || !cacheTarget)
+            return false;
+
+        ComPtr<ID2D1RenderTarget> previousTarget = m_rt;
+        ComPtr<ID2D1RenderTarget> cacheRenderTarget;
+        cacheTarget.As(&cacheRenderTarget);
+        m_rt = cacheRenderTarget;
+
+        const ViewState cacheView = BuildViewStateForSize(cacheW, cacheH);
+        const ViewState cacheOverlayView = BuildViewStateForSize(cacheW, cacheH, 220.0);
+        const ViewState cacheBoundaryView = BuildViewStateForSize(cacheW, cacheH, kBoundaryDrawMarginPixels);
+
+        m_rt->BeginDraw();
+        m_rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        m_rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+        DrawMapGeographyBase(cacheOverlayView, cacheBoundaryView);
+        hr = m_rt->EndDraw();
+
+        ComPtr<ID2D1Bitmap> bitmap;
+        if (SUCCEEDED(hr))
+            hr = cacheTarget->GetBitmap(&bitmap);
+
+        m_rt = previousTarget;
+
+        if (FAILED(hr) || !bitmap) {
+            InvalidateSceneCache();
+            return false;
+        }
+
+        m_sceneBitmap = bitmap;
+        m_sceneBitmapBack.Reset();
+        m_sceneBitmapWidth = cacheW;
+        m_sceneBitmapHeight = cacheH;
+        m_sceneViewportWidth = view.width;
+        m_sceneViewportHeight = view.height;
+        m_sceneCacheDirty = false;
+        m_sceneCacheRefreshPending = false;
+        m_sceneCacheAllowDirtyUntilMs = 0;
+        m_sceneCacheLastRebuildMs = GetTickCount64();
+        KillTimer(m_hwnd, kSceneCacheRefreshTimer);
+        m_sceneBitmapZoom = m_zoom;
+        m_sceneBitmapCenterWorld = cacheView.centerWorld;
+        return true;
+    }
+
+    bool IsSceneCacheCurrent(const ViewState& view, bool allowDirty = false, bool allowScaled = false) const
     {
         if (!m_rt || !m_sceneBitmap || m_sceneBitmapWidth <= 0 || m_sceneBitmapHeight <= 0)
             return false;
         if (m_sceneCacheDirty && !allowDirty)
             return false;
 
-        const D2D1_SIZE_U pixelSize = m_rt->GetPixelSize();
-        if (m_sceneBitmapWidth != static_cast<int>(pixelSize.width) ||
-            m_sceneBitmapHeight != static_cast<int>(pixelSize.height) ||
-            m_zoom != m_sceneBitmapZoom)
-        {
-            return false;
-        }
-
-        const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
-        double dx = m_sceneBitmapCenterWorld.x - view.centerWorld.x;
-        if (dx > worldSize * 0.5)
-            dx -= worldSize;
-        else if (dx < -worldSize * 0.5)
-            dx += worldSize;
-
-        const double dy = m_sceneBitmapCenterWorld.y - view.centerWorld.y;
-        return std::abs(dx) < 0.5 && std::abs(dy) < 0.5;
+        D2D1_RECT_F dest{};
+        double scale = 1.0;
+        return GetSceneCachePlacement(view, allowScaled, dest, scale) && SceneCacheCoversView(view, dest);
     }
 
     bool IsOverlayUiDragActive() const
@@ -5102,53 +6330,140 @@ private:
             m_draggingNotificationHistoryContent;
     }
 
-    bool DrawCachedScene(const ViewState& view, D2D1_RECT_F* destOut = nullptr)
+    bool DrawCachedScene(const ViewState& view, bool allowScaled, D2D1_RECT_F* destOut = nullptr, bool requireFullCoverage = true)
     {
         if (!m_rt || !m_sceneBitmap || m_sceneBitmapWidth <= 0 || m_sceneBitmapHeight <= 0)
             return false;
 
-        // Reuse the cached scene for same-zoom panning only. Scaling the cached
-        // composite during wheel zoom changes translucent fill colours, especially
-        // at close zoom levels, so zoom frames are rendered live.
-        if (m_zoom != m_sceneBitmapZoom)
+        D2D1_RECT_F dest{};
+        double scale = 1.0;
+        if (!GetSceneCachePlacement(view, allowScaled, dest, scale))
+            return false;
+        if (requireFullCoverage && !SceneCacheCoversView(view, dest))
             return false;
 
-        const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
-        double dx = m_sceneBitmapCenterWorld.x - view.centerWorld.x;
-        if (dx > worldSize * 0.5)
-            dx -= worldSize;
-        else if (dx < -worldSize * 0.5)
-            dx += worldSize;
-
-        const double dy = m_sceneBitmapCenterWorld.y - view.centerWorld.y;
-        if (std::abs(dx) > view.width * 0.75 || std::abs(dy) > view.height * 0.75)
+        const D2D1_RECT_F viewport = D2D1::RectF(
+            0.0f,
+            0.0f,
+            static_cast<float>(view.width),
+            static_cast<float>(view.height));
+        const D2D1_RECT_F drawDest = D2D1::RectF(
+            MaxValue(viewport.left, dest.left),
+            MaxValue(viewport.top, dest.top),
+            MinValue(viewport.right, dest.right),
+            MinValue(viewport.bottom, dest.bottom));
+        if (drawDest.right <= drawDest.left || drawDest.bottom <= drawDest.top)
             return false;
 
-        const float scaledWidth = static_cast<float>(m_sceneBitmapWidth);
-        const float scaledHeight = static_cast<float>(m_sceneBitmapHeight);
-        const float centerX = static_cast<float>(view.width * 0.5 + dx);
-        const float centerY = static_cast<float>(view.height * 0.5 + dy);
-        const D2D1_RECT_F dest = D2D1::RectF(
-            centerX - scaledWidth * 0.5f,
-            centerY - scaledHeight * 0.5f,
-            centerX + scaledWidth * 0.5f,
-            centerY + scaledHeight * 0.5f);
+        const D2D1_RECT_F sourceRect = D2D1::RectF(
+            ClampValue(static_cast<float>((drawDest.left - dest.left) / scale), 0.0f, static_cast<float>(m_sceneBitmapWidth)),
+            ClampValue(static_cast<float>((drawDest.top - dest.top) / scale), 0.0f, static_cast<float>(m_sceneBitmapHeight)),
+            ClampValue(static_cast<float>((drawDest.right - dest.left) / scale), 0.0f, static_cast<float>(m_sceneBitmapWidth)),
+            ClampValue(static_cast<float>((drawDest.bottom - dest.top) / scale), 0.0f, static_cast<float>(m_sceneBitmapHeight)));
+        if (sourceRect.right <= sourceRect.left || sourceRect.bottom <= sourceRect.top)
+            return false;
 
-        m_rt->DrawBitmap(m_sceneBitmap.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+        const D2D1_BITMAP_INTERPOLATION_MODE interpolation =
+            (m_zoom == m_sceneBitmapZoom)
+            ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+            : D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR;
+        m_rt->DrawBitmap(
+            m_sceneBitmap.Get(),
+            drawDest,
+            1.0f,
+            interpolation,
+            sourceRect);
         if (destOut)
             *destOut = dest;
         return true;
     }
 
-    void DrawSceneOverlays(const ViewState& overlayView, const ViewState& boundaryView)
+    void DrawMapGeographyBase(const ViewState& overlayView, const ViewState& boundaryView)
     {
         if (!m_displayWorldMap) {
             DrawUkBoundary(boundaryView);
-            DrawRoadDepictions(overlayView);
-            DrawCityAnchors(overlayView);
+            DrawRoadDepictionLines(overlayView);
         }
         else
             DrawWorldBoundary(boundaryView);
+    }
+
+    void DrawMapStaticLabels(const ViewState& overlayView)
+    {
+        if (m_displayWorldMap)
+            return;
+
+        DrawRoadDepictionLabels(overlayView);
+        DrawCityAnchors(overlayView);
+    }
+
+    void DrawWorldBoundaryPreview(const ViewState& view)
+    {
+        if (m_worldBoundaryRings.empty()) {
+            DrawWorldBaseMap(view);
+            return;
+        }
+
+        struct VisibleWorldPreviewRing
+        {
+            BoundaryRing* ring = nullptr;
+            BoundaryLod* lod = nullptr;
+        };
+
+        std::vector<VisibleWorldPreviewRing> visibleRings;
+        std::vector<BoundaryRenderSource> visibleSources;
+        visibleRings.reserve(64);
+        visibleSources.reserve(64);
+
+        for (BoundaryRing& ring : m_worldBoundaryRings) {
+            if (!RingIntersectsView(ring, view))
+                continue;
+
+            BoundaryLod* lod = WorldBoundaryLodForZoom(ring);
+            BoundaryRenderSource source = (lod && lod->points.size() >= 3)
+                ? MakeBoundaryRenderSource(*lod)
+                : MakeBoundaryRenderSource(ring);
+            if (!BoundarySourceIntersectsView(source, view))
+                continue;
+
+            visibleSources.push_back(source);
+            visibleRings.push_back({ &ring, lod });
+        }
+
+        DrawHighZoomBoundaryFill(view, visibleSources);
+
+        for (VisibleWorldPreviewRing& item : visibleRings) {
+            if (item.lod && item.lod->points.size() >= 3)
+                DrawBoundaryRingVisibleStroke(*item.lod, view);
+            else if (item.ring)
+                DrawBoundaryRingVisibleStroke(*item.ring, view);
+        }
+    }
+
+    void DrawMapGeographyPreview(const ViewState& overlayView, const ViewState& boundaryView)
+    {
+        if (!m_displayWorldMap) {
+            DrawUkBoundary(boundaryView);
+            DrawRoadDepictionLines(overlayView);
+            return;
+        }
+
+        DrawWorldBoundaryPreview(boundaryView);
+    }
+
+    void DrawSceneBase(
+        const ViewState& tileView,
+        const ViewState& overlayView,
+        const ViewState& boundaryView,
+        bool interactive = false,
+        bool requestMissingTiles = true)
+    {
+        DrawTilesForView(tileView, interactive, nullptr, requestMissingTiles);
+        DrawMapGeographyBase(overlayView, boundaryView);
+    }
+
+    void DrawDynamicSceneOverlays(const ViewState& overlayView)
+    {
         DrawNotificationPolygons(overlayView);
         DrawEarthquakes(overlayView);
         DrawWeatherSystems(overlayView);
@@ -5210,7 +6525,7 @@ private:
         m_overlayClip = clip;
 
         m_rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        DrawSceneOverlays(overlayView, boundaryView);
+        DrawDynamicSceneOverlays(overlayView);
         m_rt->PopAxisAlignedClip();
 
         m_hasOverlayClip = hadClip;
@@ -5233,9 +6548,7 @@ private:
 
         EnsureDeviceResources();
         if (m_rt) {
-            m_rt->BeginDraw();
-            m_rt->Clear(D2D1::ColorF(kMapWaterR, kMapWaterG, kMapWaterB, 1.0f));
-
+            const ULONGLONG paintStartMs = GetTickCount64();
             const bool interactive = m_interactivePan;
             m_interactiveTileRequestsThisFrame = 0;
             const ViewState view = BuildViewState();
@@ -5244,29 +6557,74 @@ private:
             bool drewCachedScene = false;
             D2D1_RECT_F cachedSceneDest{};
             const bool allowStaleSceneForOverlayDrag = IsOverlayUiDragActive();
+            const bool allowDeferredDirtyScene =
+                m_sceneCacheDirty &&
+                m_sceneCacheAllowDirtyUntilMs != 0 &&
+                GetTickCount64() < m_sceneCacheAllowDirtyUntilMs;
+            const bool allowDirtyScene = interactive || allowStaleSceneForOverlayDrag || allowDeferredDirtyScene;
+            const bool allowScaledScene = false;
+            const bool useViewportSceneCache = !m_displayWorldMap;
+            const bool cacheCurrent =
+                useViewportSceneCache &&
+                IsSceneCacheCurrent(view, allowDirtyScene, allowScaledScene);
+            const bool useSceneTileCache = ShouldUseSceneTileCache();
+            if (useSceneTileCache)
+                QueueVisibleSceneTiles(view);
+            bool sceneTileCacheReady =
+                useSceneTileCache &&
+                !m_displayWorldMap &&
+                IsSceneTileCacheReady(view);
+            bool drawPreviewWhileCacheBuilds = false;
 
-            if (!interactive && IsSceneCacheCurrent(view, allowStaleSceneForOverlayDrag)) {
-                drewCachedScene = DrawCachedScene(view, &cachedSceneDest);
+            if (useViewportSceneCache && !interactive && !cacheCurrent && !sceneTileCacheReady) {
+                const ULONGLONG stageStartMs = GetTickCount64();
+                QueueSceneCacheRebuild(view);
+                TraceSlowPaintStage(L"QueueSceneCacheRebuild", GetTickCount64() - stageStartMs, interactive);
             }
-            else if (interactive && m_sceneBitmap && m_zoom == m_sceneBitmapZoom) {
-                drewCachedScene = DrawCachedScene(view, &cachedSceneDest);
-                if (drewCachedScene) {
-                    const std::vector<D2D1_RECT_F> exposedStrips = BuildExposedSceneStrips(view, cachedSceneDest);
-                    DrawExposedCachedSceneTiles(exposedStrips);
-                    DrawExposedCachedSceneEdges(exposedStrips, overlayView, boundaryView);
-                    m_rt->Flush();
-                    UpdateSceneCache(view, true);
-                }
+
+            m_rt->BeginDraw();
+            m_rt->Clear(D2D1::ColorF(kMapWaterR, kMapWaterG, kMapWaterB, 1.0f));
+            m_tileBitmapDecodesThisFrame = 0;
+            m_pendingTileBitmapDecode = false;
+            ULONGLONG stageStartMs = GetTickCount64();
+            DrawTiles(interactive);
+            TraceSlowPaintStage(L"DrawTiles", GetTickCount64() - stageStartMs, interactive);
+
+            stageStartMs = GetTickCount64();
+            if (useSceneTileCache) {
+                bool anySceneTileDrawn = false;
+                const bool requireCompleteSceneTiles = !m_displayWorldMap;
+                drewCachedScene = DrawSceneTileCache(
+                    view,
+                    requireCompleteSceneTiles,
+                    &sceneTileCacheReady,
+                    &anySceneTileDrawn);
+
+                if (m_displayWorldMap && !drewCachedScene)
+                    drewCachedScene = true;
             }
-
-            if (!drewCachedScene) {
-                DrawTiles(interactive);
-                DrawSceneOverlays(overlayView, boundaryView);
-
-                m_rt->Flush();
-                UpdateSceneCache(view);
+            else if (useViewportSceneCache && IsSceneCacheCurrent(view, allowDirtyScene, allowScaledScene)) {
+                drewCachedScene = DrawCachedScene(view, allowScaledScene, &cachedSceneDest);
             }
+            else if (useViewportSceneCache && m_sceneBitmap && m_zoom == m_sceneBitmapZoom) {
+                drewCachedScene = DrawCachedScene(view, allowScaledScene, &cachedSceneDest, false);
+            }
+            TraceSlowPaintStage(L"DrawCachedScene", GetTickCount64() - stageStartMs, interactive);
 
+            if (!drewCachedScene || drawPreviewWhileCacheBuilds) {
+                stageStartMs = GetTickCount64();
+                if (drawPreviewWhileCacheBuilds)
+                    DrawMapGeographyPreview(overlayView, boundaryView);
+                else
+                    DrawMapGeographyBase(overlayView, boundaryView);
+                TraceSlowPaintStage(L"DrawMapGeography", GetTickCount64() - stageStartMs, interactive);
+            }
+            DrawMapStaticLabels(overlayView);
+            stageStartMs = GetTickCount64();
+            DrawDynamicSceneOverlays(overlayView);
+            TraceSlowPaintStage(L"DrawDynamicSceneOverlays", GetTickCount64() - stageStartMs, interactive);
+
+            stageStartMs = GetTickCount64();
             DrawMapChrome();
             DrawAlertOverlay(overlayView);
             DrawNoteInterface(view);
@@ -5275,10 +6633,17 @@ private:
             DrawResponderChat(view);
             UpdateFpsSample();
             DrawFpsCounter();
+            TraceSlowPaintStage(L"DrawMapUi", GetTickCount64() - stageStartMs, interactive);
 
+            stageStartMs = GetTickCount64();
             HRESULT hr = m_rt->EndDraw();
+            TraceSlowPaintStage(L"EndDraw", GetTickCount64() - stageStartMs, interactive);
             if (hr == D2DERR_RECREATE_TARGET)
                 DiscardDeviceResources();
+            else if (m_pendingTileBitmapDecode && !interactive)
+                InvalidateRect(m_hwnd, nullptr, FALSE);
+
+            TraceSlowPaintStage(L"TotalPaint", GetTickCount64() - paintStartMs, interactive);
         }
 
         EndPaint(m_hwnd, &ps);
@@ -5572,9 +6937,7 @@ private:
             return &ring.worldLods[2];
         if (m_zoom <= 9)
             return &ring.worldLods[1];
-        if (m_zoom <= 13)
-            return &ring.worldLods[0];
-        return nullptr;
+        return &ring.worldLods[0];
     }
 
     template <typename BoundaryLike>
@@ -5582,7 +6945,7 @@ private:
     {
         if (!g_d2dFactory || ring.points.size() < 3)
             return false;
-        if (ring.fillGeometry && ring.fillGeometryZoom == m_zoom)
+        if (ring.fillGeometry)
             return true;
 
         ComPtr<ID2D1PathGeometry> geom;
@@ -5595,21 +6958,39 @@ private:
 
         sink->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
 
-        WorldPoint first = GeoToWorld(ring.points[0].lat, ring.points[0].lon, m_zoom);
+        constexpr double baseWorldSize = 256.0;
+        constexpr double halfBaseWorld = baseWorldSize * 0.5;
+
+        WorldPoint first = GeoToWorld(ring.points[0].lat, ring.points[0].lon, 0);
+        double previousX = first.x;
+        ring.geometryMinX = ring.geometryMaxX = first.x;
+        ring.geometryMinY = ring.geometryMaxY = first.y;
         sink->BeginFigure(D2D1::Point2F(static_cast<float>(first.x), static_cast<float>(first.y)), D2D1_FIGURE_BEGIN_FILLED);
 
-        for (size_t i = 1; i < ring.points.size(); ++i) {
-            WorldPoint p = GeoToWorld(ring.points[i].lat, ring.points[i].lon, m_zoom);
+        const bool hasExplicitClose = ring.points.size() > 1 && SameGeoPoint(ring.points.front(), ring.points.back());
+        const size_t pointCount = ring.points.size();
+
+        for (size_t i = 1; i < pointCount; ++i) {
+            WorldPoint p = GeoToWorld(ring.points[i].lat, ring.points[i].lon, 0);
+            while (p.x - previousX > halfBaseWorld)
+                p.x -= baseWorldSize;
+            while (p.x - previousX < -halfBaseWorld)
+                p.x += baseWorldSize;
+            previousX = p.x;
+            ring.geometryMinX = MinValue(ring.geometryMinX, p.x);
+            ring.geometryMaxX = MaxValue(ring.geometryMaxX, p.x);
+            ring.geometryMinY = MinValue(ring.geometryMinY, p.y);
+            ring.geometryMaxY = MaxValue(ring.geometryMaxY, p.y);
             sink->AddLine(D2D1::Point2F(static_cast<float>(p.x), static_cast<float>(p.y)));
         }
 
-        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink->EndFigure(hasExplicitClose ? D2D1_FIGURE_END_OPEN : D2D1_FIGURE_END_CLOSED);
 
         if (FAILED(sink->Close()))
             return false;
 
         ring.fillGeometry = geom;
-        ring.fillGeometryZoom = m_zoom;
+        ring.fillGeometryZoom = 0;
         return true;
     }
 
@@ -5619,18 +7000,45 @@ private:
         if (!m_rt || !EnsureBoundaryFillGeometry(ring))
             return;
 
+        const double scale = static_cast<double>(1 << m_zoom);
+        const double worldSize = 256.0 * scale;
+        const double viewLeft = view.centerWorld.x - view.width * 0.5;
+        const double viewRight = view.centerWorld.x + view.width * 0.5;
+        const double viewTop = view.centerWorld.y - view.height * 0.5;
+        const double viewBottom = view.centerWorld.y + view.height * 0.5;
+        const double geomTop = ring.geometryMinY * scale;
+        const double geomBottom = ring.geometryMaxY * scale;
+        if (geomBottom < viewTop - 4.0 || geomTop > viewBottom + 4.0)
+            return;
+
         D2D1_MATRIX_3X2_F oldTransform{};
         m_rt->GetTransform(&oldTransform);
-        const D2D1_MATRIX_3X2_F translation = D2D1::Matrix3x2F::Translation(
-            static_cast<float>(-view.centerWorld.x + view.width * 0.5),
-            static_cast<float>(-view.centerWorld.y + view.height * 0.5));
-        m_rt->SetTransform(translation);
 
-        if (m_outlineFillBrush)
-            m_rt->FillGeometry(ring.fillGeometry.Get(), m_outlineFillBrush.Get());
+        const int minCopy = static_cast<int>(std::floor((viewLeft - ring.geometryMaxX * scale) / worldSize)) - 1;
+        const int maxCopy = static_cast<int>(std::ceil((viewRight - ring.geometryMinX * scale) / worldSize)) + 1;
+        for (int copy = minCopy; copy <= maxCopy; ++copy) {
+            const double shiftX = static_cast<double>(copy) * worldSize;
+            const double geomLeft = ring.geometryMinX * scale + shiftX;
+            const double geomRight = ring.geometryMaxX * scale + shiftX;
+            if (geomRight < viewLeft - 4.0 || geomLeft > viewRight + 4.0)
+                continue;
 
-        if (m_outlineStrokeBrush)
-            m_rt->DrawGeometry(ring.fillGeometry.Get(), m_outlineStrokeBrush.Get(), 2.0f);
+            const double dx = -view.centerWorld.x + view.width * 0.5 + shiftX;
+            const double dy = -view.centerWorld.y + view.height * 0.5;
+            const D2D1_MATRIX_3X2_F transform = D2D1::Matrix3x2F(
+                static_cast<float>(scale), 0.0f,
+                0.0f, static_cast<float>(scale),
+                static_cast<float>(dx), static_cast<float>(dy));
+            m_rt->SetTransform(transform);
+
+            if (m_outlineFillBrush)
+                m_rt->FillGeometry(ring.fillGeometry.Get(), m_outlineFillBrush.Get());
+
+            if (m_outlineStrokeBrush) {
+                const float strokeWidth = static_cast<float>(2.0 / MaxValue(scale, 1.0));
+                m_rt->DrawGeometry(ring.fillGeometry.Get(), m_outlineStrokeBrush.Get(), strokeWidth);
+            }
+        }
 
         m_rt->SetTransform(oldTransform);
     }
@@ -5659,8 +7067,25 @@ private:
             if (!LongitudeRangesIntersect(view, segment.minLon, segment.maxLon))
                 continue;
 
-            const D2D1_POINT_2F a = GeoToScreen(view, segment.a.lat, segment.a.lon);
-            const D2D1_POINT_2F b = GeoToScreen(view, segment.b.lat, segment.b.lon);
+            const double worldSize = 256.0 * static_cast<double>(1 << m_zoom);
+            const double halfWorld = worldSize * 0.5;
+            WorldPoint worldA = GeoToWorld(segment.a.lat, segment.a.lon, m_zoom);
+            WorldPoint worldB = GeoToWorld(segment.b.lat, segment.b.lon, m_zoom);
+            while (worldA.x - view.centerWorld.x > halfWorld)
+                worldA.x -= worldSize;
+            while (worldA.x - view.centerWorld.x < -halfWorld)
+                worldA.x += worldSize;
+            while (worldB.x - worldA.x > halfWorld)
+                worldB.x -= worldSize;
+            while (worldB.x - worldA.x < -halfWorld)
+                worldB.x += worldSize;
+
+            const D2D1_POINT_2F a = D2D1::Point2F(
+                static_cast<float>((worldA.x - view.centerWorld.x) + view.width * 0.5),
+                static_cast<float>((worldA.y - view.centerWorld.y) + view.height * 0.5));
+            const D2D1_POINT_2F b = D2D1::Point2F(
+                static_cast<float>((worldB.x - view.centerWorld.x) + view.width * 0.5),
+                static_cast<float>((worldB.y - view.centerWorld.y) + view.height * 0.5));
             if (m_hasOverlayClip) {
                 D2D1_RECT_F segmentRect = D2D1::RectF(
                     MinValue(a.x, b.x) - 2.0f,
@@ -5732,12 +7157,15 @@ private:
             return;
         }
 
-        const bool fillBoundary = !m_hasOverlayClip && !m_interactivePan && m_zoom <= kWorldGeometryFillMaxZoom;
         struct VisibleWorldRing
         {
             BoundaryRing* ring = nullptr;
             BoundaryLod* lod = nullptr;
         };
+        const bool broadWorldView = m_zoom <= kWorldCachedGeographyMaxZoom;
+        const bool fillBoundary =
+            !m_hasOverlayClip &&
+            (broadWorldView || (!m_interactivePan && m_zoom <= kWorldGeometryFillMaxZoom));
         std::vector<VisibleWorldRing> visibleRings;
         std::vector<BoundaryRenderSource> visibleSources;
         visibleRings.reserve(64);
@@ -5899,8 +7327,11 @@ private:
     ULONGLONG m_fpsLastSampleMs = 0;
     int m_fpsFrameCount = 0;
     double m_fpsValue = 0.0;
+    int m_tileBitmapDecodesThisFrame = 0;
+    bool m_pendingTileBitmapDecode = false;
 
-    ComPtr<ID2D1HwndRenderTarget> m_rt;
+    ComPtr<ID2D1HwndRenderTarget> m_hwndRt;
+    ComPtr<ID2D1RenderTarget> m_rt;
     ComPtr<ID2D1SolidColorBrush> m_severeBrush;
     ComPtr<ID2D1SolidColorBrush> m_moderateBrush;
     ComPtr<ID2D1SolidColorBrush> m_minorBrush;
@@ -5931,14 +7362,23 @@ private:
     ComPtr<ID2D1Bitmap> m_sceneBitmap;
     ComPtr<ID2D1Bitmap> m_sceneBitmapBack;
     bool m_sceneCacheDirty = false;
+    bool m_sceneCacheRefreshPending = false;
+    bool m_sceneCacheBuildInFlight = false;
+    ULONGLONG m_sceneCacheAllowDirtyUntilMs = 0;
+    ULONGLONG m_sceneCacheLastRebuildMs = 0;
     int m_sceneBitmapWidth = 0;
     int m_sceneBitmapHeight = 0;
+    int m_sceneViewportWidth = 0;
+    int m_sceneViewportHeight = 0;
     int m_sceneBitmapZoom = kDefaultZoom;
     WorldPoint m_sceneBitmapCenterWorld{};
     bool m_hasOverlayClip = false;
     D2D1_RECT_F m_overlayClip{};
     std::vector<BoundaryRing> m_ukBoundaryRings;
     std::vector<BoundaryRing> m_worldBoundaryRings;
+    std::unordered_map<SceneTileKey, SceneTileEntry, SceneTileKeyHash> m_sceneTiles;
+    uint64_t m_sceneTileGeneration = 1;
+    int m_sceneTileBuildsInFlight = 0;
 
     std::mutex m_tileMutex;
     std::unordered_map<TileKey, std::shared_ptr<TileEntry>, TileKeyHash> m_tiles;

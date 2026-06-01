@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <cwctype>
 #include <functional>
 #include <initializer_list>
