@@ -35,6 +35,10 @@ constexpr uint16_t kOpDeleteNote = 8;
 constexpr uint16_t kOpGetSettings = 9;
 constexpr uint16_t kOpSetSettings = 10;
 constexpr uint16_t kOpCreateAccount = 11;
+constexpr uint16_t kOpDeleteChatMessage = 12;
+constexpr uint16_t kOpKickUser = 13;
+constexpr uint16_t kOpMuteUser = 14;
+constexpr uint16_t kOpSendPrivateMessage = 15;
 
 static void WriteU16(std::vector<BYTE>& out, uint16_t value)
 {
@@ -402,7 +406,9 @@ static bool ReadNote(BinaryReader& reader, MapNote& note)
 
 static bool ReadChat(BinaryReader& reader, ChatMessage& message)
 {
-    return reader.Text(message.author) &&
+    return reader.Text(message.id) &&
+        reader.Text(message.author) &&
+        reader.Text(message.username) &&
         reader.Text(message.position) &&
         reader.Text(message.text) &&
         reader.Text(message.timestamp);
@@ -410,11 +416,25 @@ static bool ReadChat(BinaryReader& reader, ChatMessage& message)
 
 static bool ReadOnlineUser(BinaryReader& reader, OnlineUser& user)
 {
-    return reader.Text(user.displayName) &&
+    return reader.Text(user.id) &&
+        reader.Text(user.displayName) &&
         reader.Text(user.username) &&
         reader.Text(user.position) &&
         reader.Text(user.pod) &&
         reader.Text(user.lastSeen);
+}
+
+static bool ReadPrivateMessage(BinaryReader& reader, PrivateMessage& message)
+{
+    return reader.Text(message.id) &&
+        reader.Text(message.senderUsername) &&
+        reader.Text(message.senderDisplayName) &&
+        reader.Text(message.senderPosition) &&
+        reader.Text(message.recipientUsername) &&
+        reader.Text(message.recipientDisplayName) &&
+        reader.Text(message.recipientPosition) &&
+        reader.Text(message.text) &&
+        reader.Text(message.timestamp);
 }
 }
 
@@ -538,6 +558,22 @@ bool BinaryPollCollaboration(const std::wstring& serverBaseUrl, const ClientSess
         resultOut.users.push_back(std::move(user));
     }
 
+    if (!reader.U32(count) || count > 10000) {
+        resultOut.error = L"Binary private-message payload was invalid.";
+        resultOut.protocolAvailable = true;
+        return false;
+    }
+    resultOut.privateMessages.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        PrivateMessage message;
+        if (!ReadPrivateMessage(reader, message)) {
+            resultOut.error = L"Binary private-message record was incomplete.";
+            resultOut.protocolAvailable = true;
+            return false;
+        }
+        resultOut.privateMessages.push_back(std::move(message));
+    }
+
     uint32_t version = 0;
     if (reader.U32(version))
         resultOut.version = version;
@@ -561,6 +597,44 @@ bool BinaryClearChat(const std::wstring& serverBaseUrl, const ClientSession& ses
     WriteSessionToken(request, session);
     std::vector<BYTE> payload;
     return FinishCall(kOpClearChat, request, resultOut, payload, serverBaseUrl);
+}
+
+bool BinaryDeleteChatMessage(const std::wstring& serverBaseUrl, const ClientSession& session, const std::wstring& messageId, BinaryCallResult& resultOut)
+{
+    BinaryWriter request;
+    WriteSessionToken(request, session);
+    request.Text(messageId);
+    std::vector<BYTE> payload;
+    return FinishCall(kOpDeleteChatMessage, request, resultOut, payload, serverBaseUrl);
+}
+
+bool BinaryKickUser(const std::wstring& serverBaseUrl, const ClientSession& session, const std::wstring& username, BinaryCallResult& resultOut)
+{
+    BinaryWriter request;
+    WriteSessionToken(request, session);
+    request.Text(username);
+    std::vector<BYTE> payload;
+    return FinishCall(kOpKickUser, request, resultOut, payload, serverBaseUrl);
+}
+
+bool BinaryMuteUser(const std::wstring& serverBaseUrl, const ClientSession& session, const std::wstring& username, uint32_t minutes, BinaryCallResult& resultOut)
+{
+    BinaryWriter request;
+    WriteSessionToken(request, session);
+    request.Text(username);
+    request.U32(minutes);
+    std::vector<BYTE> payload;
+    return FinishCall(kOpMuteUser, request, resultOut, payload, serverBaseUrl);
+}
+
+bool BinarySendPrivateMessage(const std::wstring& serverBaseUrl, const ClientSession& session, const std::wstring& recipientUsername, const std::wstring& text, BinaryCallResult& resultOut)
+{
+    BinaryWriter request;
+    WriteSessionToken(request, session);
+    request.Text(recipientUsername);
+    request.Text(text);
+    std::vector<BYTE> payload;
+    return FinishCall(kOpSendPrivateMessage, request, resultOut, payload, serverBaseUrl);
 }
 
 bool BinaryCreateNote(const std::wstring& serverBaseUrl, const ClientSession& session, const MapNote& note, MapNote& serverNoteOut, BinaryCallResult& resultOut)

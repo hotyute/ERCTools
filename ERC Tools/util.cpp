@@ -61,6 +61,16 @@ std::filesystem::path GetWorldBoundaryCachePath()
     return GetTrafficEnglandCacheFolder() / L"natural_earth_admin0_50m.geojson";
 }
 
+std::filesystem::path GetRoadDepictionsCachePath()
+{
+    return GetTrafficEnglandCacheFolder() / L"os_open_roads.geojson";
+}
+
+std::filesystem::path GetPopulatedPlacesCachePath()
+{
+    return GetTrafficEnglandCacheFolder() / L"natural_earth_populated_places_10m.geojson";
+}
+
 std::filesystem::path GetLaneImageCachePath(const std::wstring& imageUrl)
 {
     std::filesystem::path folder = GetTrafficEnglandCacheFolder() / L"lane_images";

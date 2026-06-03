@@ -23,7 +23,12 @@ public:
     using NotificationHistoryActivateCallback = std::function<void(const AppNotification&)>;
     using NotificationHistoryDeleteCallback = std::function<void(size_t index)>;
     using ChatSendCallback = std::function<void(const std::wstring& text)>;
+    using PrivateChatSendCallback = std::function<void(const std::wstring& recipientUsername, const std::wstring& text)>;
     using ChatClearCallback = std::function<void()>;
+    using ChatMessageActionCallback = std::function<void(const ChatMessage& message, const std::wstring& action)>;
+    using UserActionCallback = std::function<void(const OnlineUser& user, const std::wstring& action)>;
+    using PanelCloseCallback = std::function<void(const std::wstring& panelName)>;
+    using MapDisplayModeCallback = std::function<void(bool displayWorldMap)>;
 
     MapView();
     ~MapView();
@@ -48,13 +53,20 @@ public:
     void SetNotificationHistoryActivateCallback(NotificationHistoryActivateCallback cb);
     void SetNotificationHistoryDeleteCallback(NotificationHistoryDeleteCallback cb);
     void SetChatSendCallback(ChatSendCallback cb);
+    void SetPrivateChatSendCallback(PrivateChatSendCallback cb);
     void SetChatClearCallback(ChatClearCallback cb);
+    void SetChatMessageActionCallback(ChatMessageActionCallback cb);
+    void SetUserActionCallback(UserActionCallback cb);
+    void SetPanelCloseCallback(PanelCloseCallback cb);
+    void SetMapDisplayModeCallback(MapDisplayModeCallback cb);
     void SetChatClearEnabled(bool enabled);
     void SetAlerts(const std::vector<TrafficAlert>& alerts);
     void SetIncidentOverlayVisible(bool visible);
     void SetNotes(const std::vector<MapNote>& notes);
     void SetChatMessages(const std::vector<ChatMessage>& messages);
+    void SetPrivateMessages(const std::vector<PrivateMessage>& messages);
     void SetOnlineUsers(const std::vector<OnlineUser>& users);
+    void OpenPrivateChat(const OnlineUser& user);
     void SetUsersVisible(bool visible);
     void SetNotificationPolygons(const std::vector<GeoPolygon>& polygons);
     void SetActiveNotificationPolygonIndex(size_t index);
@@ -71,6 +83,12 @@ public:
     void SetFloodOverlayVisible(bool visible);
     void SetAreaLabelsVisible(bool visible);
     void SetRoadDepictionsVisible(bool visible);
+    bool LoadRoadDepictionsFromFile(
+        const std::filesystem::path& path,
+        std::wstring* errorOut = nullptr,
+        const std::unordered_set<std::wstring>* allowedLabels = nullptr);
+    std::vector<std::wstring> RoadDepictionLabels() const;
+    void SetHiddenRoadDepictions(const std::unordered_set<std::wstring>& hiddenRoadLabels);
     void SetDisplayWorldMap(bool visible);
     void SetFpsCounterVisible(bool visible);
     void SetToolbarVisible(bool visible);

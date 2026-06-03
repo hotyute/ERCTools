@@ -101,6 +101,10 @@ constexpr uint16_t kBinaryDeleteNote = 8;
 constexpr uint16_t kBinaryGetSettings = 9;
 constexpr uint16_t kBinarySetSettings = 10;
 constexpr uint16_t kBinaryCreateAccount = 11;
+constexpr uint16_t kBinaryDeleteChatMessage = 12;
+constexpr uint16_t kBinaryKickUser = 13;
+constexpr uint16_t kBinaryMuteUser = 14;
+constexpr uint16_t kBinarySendPrivateMessage = 15;
 
 struct BinaryResponse
 {
@@ -839,7 +843,7 @@ public:
 
         std::lock_guard<std::mutex> sessionLock(m_sessionCreateMutex);
         OdbcConnection db(m_config.databaseConnectionString);
-        if (!EnsureSessionContextColumns(db, errorOut))
+        if (!EnsureCollaborationSchema(db, errorOut))
             return false;
         if (!PurgeStaleSessions(db, errorOut))
             return false;
@@ -859,6 +863,8 @@ public:
             errorOut);
         if (!ok)
             return false;
+        LogUserEvent(db, user, user, L"login", L"", errorOut);
+        errorOut.clear();
         tokenOut = Utf8ToWide(token);
         return true;
     }
@@ -924,17 +930,103 @@ public:
         }
 
         OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+
+        UserRecord user;
+        auto rows = db.Query(
+            L"SELECT u.id, u.username, COALESCE(NULLIF(s.session_display_name, ''), u.display_name), "
+            L"COALESCE(NULLIF(s.session_position, ''), u.position), COALESCE(NULLIF(s.session_pod, ''), u.pod) "
+            L"FROM user_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? LIMIT 1",
+            { Utf8ToWide(tokenHash) },
+            errorOut);
+        if (!errorOut.empty())
+            return false;
+        if (!rows.empty() && rows.front().size() >= 5) {
+            const auto& row = rows.front();
+            user = UserRecord{ row[0], row[1], row[2], row[3], row[4] };
+            LogUserEvent(db, user, user, L"logout", L"", errorOut);
+            errorOut.clear();
+        }
+
         return db.Execute(
             L"DELETE FROM user_sessions WHERE token_hash = ?",
             { Utf8ToWide(tokenHash) },
             errorOut);
     }
 
+    bool KickUser(const UserRecord& actor, const std::wstring& username, std::wstring& errorOut)
+    {
+        UserRecord target;
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        if (!FindUserByUsername(db, username, target, errorOut))
+            return false;
+        if (!CanManageTarget(actor, target, errorOut))
+            return false;
+
+        LogUserEvent(db, actor, target, L"kick", L"", errorOut);
+        errorOut.clear();
+        return db.Execute(L"DELETE FROM user_sessions WHERE user_id = ?", { target.id }, errorOut);
+    }
+
+    bool MuteUser(const UserRecord& actor, const std::wstring& username, uint32_t minutes, std::wstring& errorOut)
+    {
+        UserRecord target;
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        if (!FindUserByUsername(db, username, target, errorOut))
+            return false;
+        if (!CanManageTarget(actor, target, errorOut))
+            return false;
+
+        minutes = std::clamp<uint32_t>(minutes == 0 ? 15 : minutes, 1, 24 * 60);
+        bool ok = db.Execute(
+            L"UPDATE users SET muted_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? MINUTE), muted_by = ?, muted_at = CURRENT_TIMESTAMP WHERE id = ?",
+            { std::to_wstring(minutes), actor.id, target.id },
+            errorOut);
+        if (ok) {
+            LogUserEvent(db, actor, target, L"mute", std::to_wstring(minutes) + L" minute(s)", errorOut);
+            errorOut.clear();
+        }
+        return ok;
+    }
+
+    json UserLoginTimes(std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return json::array();
+        auto rows = db.Query(
+            L"SELECT event_type, username, display_name, position, pod, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s'), actor_username, details "
+            L"FROM user_session_audit ORDER BY created_at DESC LIMIT 200",
+            {},
+            errorOut);
+        json items = json::array();
+        for (const auto& row : rows) {
+            if (row.size() < 8)
+                continue;
+            items.push_back({
+                { "event", WideToUtf8(row[0]) },
+                { "username", WideToUtf8(row[1]) },
+                { "displayName", WideToUtf8(row[2]) },
+                { "position", WideToUtf8(row[3]) },
+                { "pod", WideToUtf8(row[4]) },
+                { "timestamp", WideToUtf8(row[5]) },
+                { "actor", WideToUtf8(row[6]) },
+                { "details", WideToUtf8(row[7]) }
+                });
+        }
+        return items;
+    }
+
     json OnlineUsers(std::wstring& errorOut)
     {
         OdbcConnection db(m_config.databaseConnectionString);
-        if (!EnsureSessionContextColumns(db, errorOut)) {
-            errorOut = L"Database session schema check failed: " + errorOut;
+        if (!EnsureCollaborationSchema(db, errorOut)) {
+            errorOut = L"Database collaboration schema check failed: " + errorOut;
             return json::array();
         }
         if (!PurgeStaleSessions(db, errorOut)) {
@@ -944,6 +1036,7 @@ public:
 
         const std::wstring sql = std::wstring(
             L"SELECT "
+            L"u.id, "
             L"COALESCE(NULLIF(s.session_display_name, ''), u.display_name), "
             L"u.username, "
             L"COALESCE(NULLIF(s.session_position, ''), u.position), "
@@ -967,14 +1060,15 @@ public:
 
         json users = json::array();
         for (const auto& row : rows) {
-            if (row.size() < 5)
+            if (row.size() < 6)
                 continue;
             users.push_back({
-                { "displayName", WideToUtf8(row[0]) },
-                { "username", WideToUtf8(row[1]) },
-                { "position", WideToUtf8(row[2]) },
-                { "pod", WideToUtf8(row[3]) },
-                { "lastSeen", WideToUtf8(row[4]) }
+                { "id", WideToUtf8(row[0]) },
+                { "displayName", WideToUtf8(row[1]) },
+                { "username", WideToUtf8(row[2]) },
+                { "position", WideToUtf8(row[3]) },
+                { "pod", WideToUtf8(row[4]) },
+                { "lastSeen", WideToUtf8(row[5]) }
                 });
         }
         return users;
@@ -983,18 +1077,25 @@ public:
     json ChatMessages(std::wstring& errorOut)
     {
         OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut)) {
+            errorOut = L"Database collaboration schema check failed: " + errorOut;
+            return json::array();
+        }
         auto rows = db.Query(
-            L"SELECT c.author, c.body, DATE_FORMAT(c.created_at, '%Y-%m-%d %H:%i:%s'), COALESCE(u.position, '') "
-            L"FROM chat_messages c LEFT JOIN users u ON u.id = c.user_id ORDER BY c.created_at DESC LIMIT 100",
+            L"SELECT c.id, c.author, COALESCE(u.username, ''), c.body, DATE_FORMAT(c.created_at, '%Y-%m-%d %H:%i:%s'), COALESCE(u.position, '') "
+            L"FROM chat_messages c LEFT JOIN users u ON u.id = c.user_id "
+            L"WHERE c.deleted_at IS NULL ORDER BY c.created_at DESC LIMIT 100",
             {},
             errorOut);
         json messages = json::array();
         for (auto it = rows.rbegin(); it != rows.rend(); ++it) {
             messages.push_back({
-                { "author", WideToUtf8((*it)[0]) },
-                { "text", WideToUtf8((*it)[1]) },
-                { "timestamp", WideToUtf8((*it)[2]) },
-                { "position", WideToUtf8((*it)[3]) }
+                { "id", WideToUtf8((*it)[0]) },
+                { "author", WideToUtf8((*it)[1]) },
+                { "username", WideToUtf8((*it)[2]) },
+                { "text", WideToUtf8((*it)[3]) },
+                { "timestamp", WideToUtf8((*it)[4]) },
+                { "position", WideToUtf8((*it)[5]) }
                 });
         }
         return messages;
@@ -1004,16 +1105,152 @@ public:
     {
         std::wstring author = user.displayName.empty() ? user.username : user.displayName;
         OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        if (IsUserMuted(db, user.id, errorOut)) {
+            if (errorOut.empty())
+                errorOut = L"You are currently muted from responder chat.";
+            return false;
+        }
         return db.Execute(
             L"INSERT INTO chat_messages (user_id, author, body, created_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
             { user.id, author, text },
             errorOut);
     }
 
+    json PrivateMessages(const UserRecord& user, std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut)) {
+            errorOut = L"Database collaboration schema check failed: " + errorOut;
+            return json::array();
+        }
+
+        auto rows = db.Query(
+            L"SELECT pm.id, "
+            L"su.username, su.display_name, su.position, "
+            L"ru.username, ru.display_name, ru.position, "
+            L"pm.body, DATE_FORMAT(pm.created_at, '%Y-%m-%d %H:%i:%s') "
+            L"FROM private_messages pm "
+            L"JOIN users su ON su.id = pm.sender_user_id "
+            L"JOIN users ru ON ru.id = pm.recipient_user_id "
+            L"WHERE ((pm.sender_user_id = ? AND pm.deleted_by_sender_at IS NULL) "
+            L"OR (pm.recipient_user_id = ? AND pm.deleted_by_recipient_at IS NULL)) "
+            L"ORDER BY pm.created_at DESC LIMIT 200",
+            { user.id, user.id },
+            errorOut);
+        json messages = json::array();
+        for (auto it = rows.rbegin(); it != rows.rend(); ++it) {
+            if (it->size() < 9)
+                continue;
+            messages.push_back({
+                { "id", WideToUtf8((*it)[0]) },
+                { "senderUsername", WideToUtf8((*it)[1]) },
+                { "senderDisplayName", WideToUtf8((*it)[2]) },
+                { "senderPosition", WideToUtf8((*it)[3]) },
+                { "recipientUsername", WideToUtf8((*it)[4]) },
+                { "recipientDisplayName", WideToUtf8((*it)[5]) },
+                { "recipientPosition", WideToUtf8((*it)[6]) },
+                { "text", WideToUtf8((*it)[7]) },
+                { "timestamp", WideToUtf8((*it)[8]) }
+                });
+        }
+        return messages;
+    }
+
+    bool AddPrivateMessage(const UserRecord& sender, const std::wstring& recipientUsername, const std::wstring& text, std::wstring& errorOut)
+    {
+        std::wstring cleanText = TrimWide(text);
+        if (cleanText.empty()) {
+            errorOut = L"Private message text is required.";
+            return false;
+        }
+
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        if (IsUserMuted(db, sender.id, errorOut)) {
+            if (errorOut.empty())
+                errorOut = L"You are currently muted from messaging.";
+            return false;
+        }
+
+        UserRecord recipient;
+        if (!FindUserByUsername(db, recipientUsername, recipient, errorOut))
+            return false;
+        if (recipient.id == sender.id) {
+            errorOut = L"You cannot send a private message to yourself.";
+            return false;
+        }
+
+        return db.Execute(
+            L"INSERT INTO private_messages (sender_user_id, recipient_user_id, body, created_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            { sender.id, recipient.id, cleanText },
+            errorOut);
+    }
+
     bool ClearChatMessages(std::wstring& errorOut)
     {
         OdbcConnection db(m_config.databaseConnectionString);
-        return db.Execute(L"DELETE FROM chat_messages", {}, errorOut);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        return db.Execute(L"UPDATE chat_messages SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL", {}, errorOut);
+    }
+
+    bool DeleteChatMessage(const UserRecord& actor, const std::wstring& messageId, std::wstring& errorOut)
+    {
+        const int actorRank = PositionRank(actor.position);
+        if (actorRank < 2) {
+            errorOut = L"Only Managers, Supervisors and Administrators can delete responder chat messages.";
+            return false;
+        }
+
+        std::wstring cleanId = TrimWide(messageId);
+        if (cleanId.empty()) {
+            errorOut = L"Chat message id is required.";
+            return false;
+        }
+
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+
+        auto rows = db.Query(
+            L"SELECT c.id, COALESCE(u.id, ''), COALESCE(u.username, c.author), COALESCE(u.display_name, c.author), "
+            L"COALESCE(u.position, ''), COALESCE(u.pod, '') "
+            L"FROM chat_messages c LEFT JOIN users u ON u.id = c.user_id "
+            L"WHERE c.id = ? AND c.deleted_at IS NULL LIMIT 1",
+            { cleanId },
+            errorOut);
+        if (!errorOut.empty())
+            return false;
+        if (rows.empty()) {
+            errorOut = L"Responder chat message was not found.";
+            return false;
+        }
+
+        UserRecord target;
+        const auto& row = rows.front();
+        if (row.size() >= 6) {
+            target.id = row[1];
+            target.username = row[2];
+            target.displayName = row[3];
+            target.position = row[4];
+            target.pod = row[5];
+        }
+        const int targetRank = PositionRank(target.position);
+        if (targetRank <= 0 || actorRank <= targetRank) {
+            errorOut = L"You can only delete responder chat messages from users below your position.";
+            return false;
+        }
+
+        bool ok = db.Execute(
+            L"UPDATE chat_messages SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ? WHERE id = ? AND deleted_at IS NULL",
+            { actor.id, cleanId },
+            errorOut);
+        if (ok)
+            LogUserEvent(db, actor, target, L"chat_delete", L"message " + cleanId, errorOut);
+        return ok;
     }
 
     json Notes(std::wstring& errorOut)
@@ -1126,6 +1363,138 @@ private:
                 return false;
         }
         return true;
+    }
+
+    bool EnsureColumn(OdbcConnection& db, const std::wstring& table, const std::wstring& name, const std::wstring& ddl, std::wstring& errorOut)
+    {
+        bool exists = false;
+        if (!ColumnExists(db, table, name, exists, errorOut))
+            return false;
+        if (exists)
+            return true;
+
+        return db.Execute(L"ALTER TABLE " + table + L" ADD COLUMN " + ddl, {}, errorOut);
+    }
+
+    bool EnsureCollaborationSchema(OdbcConnection& db, std::wstring& errorOut)
+    {
+        if (!EnsureSessionContextColumns(db, errorOut))
+            return false;
+
+        if (!EnsureColumn(db, L"chat_messages", L"deleted_at", L"deleted_at TIMESTAMP NULL DEFAULT NULL", errorOut))
+            return false;
+        if (!EnsureColumn(db, L"chat_messages", L"deleted_by", L"deleted_by BIGINT UNSIGNED NULL DEFAULT NULL", errorOut))
+            return false;
+        if (!EnsureColumn(db, L"users", L"muted_until", L"muted_until TIMESTAMP NULL DEFAULT NULL", errorOut))
+            return false;
+        if (!EnsureColumn(db, L"users", L"muted_by", L"muted_by BIGINT UNSIGNED NULL DEFAULT NULL", errorOut))
+            return false;
+        if (!EnsureColumn(db, L"users", L"muted_at", L"muted_at TIMESTAMP NULL DEFAULT NULL", errorOut))
+            return false;
+
+        if (!db.Execute(
+            L"CREATE TABLE IF NOT EXISTS user_session_audit ("
+            L"id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+            L"event_type VARCHAR(32) NOT NULL,"
+            L"target_user_id BIGINT UNSIGNED NULL DEFAULT NULL,"
+            L"username VARCHAR(128) NULL DEFAULT NULL,"
+            L"display_name VARCHAR(255) NULL DEFAULT NULL,"
+            L"position VARCHAR(32) NULL DEFAULT NULL,"
+            L"pod VARCHAR(32) NULL DEFAULT NULL,"
+            L"actor_user_id BIGINT UNSIGNED NULL DEFAULT NULL,"
+            L"actor_username VARCHAR(128) NULL DEFAULT NULL,"
+            L"details VARCHAR(255) NULL DEFAULT NULL,"
+            L"created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            L"INDEX idx_user_session_audit_created (created_at),"
+            L"INDEX idx_user_session_audit_user (target_user_id)"
+            L")",
+            {},
+            errorOut))
+        {
+            return false;
+        }
+
+        return db.Execute(
+            L"CREATE TABLE IF NOT EXISTS private_messages ("
+            L"id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+            L"sender_user_id BIGINT UNSIGNED NOT NULL,"
+            L"recipient_user_id BIGINT UNSIGNED NOT NULL,"
+            L"body TEXT NOT NULL,"
+            L"created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            L"deleted_by_sender_at TIMESTAMP NULL DEFAULT NULL,"
+            L"deleted_by_recipient_at TIMESTAMP NULL DEFAULT NULL,"
+            L"INDEX idx_private_messages_pair (sender_user_id, recipient_user_id, created_at),"
+            L"INDEX idx_private_messages_recipient (recipient_user_id, created_at),"
+            L"CONSTRAINT fk_private_messages_sender FOREIGN KEY (sender_user_id) REFERENCES users(id) ON DELETE CASCADE,"
+            L"CONSTRAINT fk_private_messages_recipient FOREIGN KEY (recipient_user_id) REFERENCES users(id) ON DELETE CASCADE"
+            L")",
+            {},
+            errorOut);
+    }
+
+    bool FindUserByUsername(OdbcConnection& db, const std::wstring& username, UserRecord& userOut, std::wstring& errorOut)
+    {
+        std::wstring cleanUsername = TrimWide(username);
+        if (cleanUsername.empty()) {
+            errorOut = L"Username is required.";
+            return false;
+        }
+
+        auto rows = db.Query(
+            L"SELECT id, username, display_name, position, pod FROM users WHERE username = ? AND active = 1 LIMIT 1",
+            { cleanUsername },
+            errorOut);
+        if (!errorOut.empty())
+            return false;
+        if (rows.empty() || rows.front().size() < 5) {
+            errorOut = L"User was not found.";
+            return false;
+        }
+
+        const auto& row = rows.front();
+        userOut = UserRecord{ row[0], row[1], row[2], row[3], row[4] };
+        return true;
+    }
+
+    static bool CanManageTarget(const UserRecord& actor, const UserRecord& target, std::wstring& errorOut)
+    {
+        const int actorRank = PositionRank(actor.position);
+        const int targetRank = PositionRank(target.position);
+        if (actorRank < 2) {
+            errorOut = L"Only Managers, Supervisors and Administrators can manage users.";
+            return false;
+        }
+        if (targetRank <= 0 || actorRank <= targetRank) {
+            errorOut = L"You can only manage users below your current position.";
+            return false;
+        }
+        return true;
+    }
+
+    bool IsUserMuted(OdbcConnection& db, const std::wstring& userId, std::wstring& errorOut)
+    {
+        auto rows = db.Query(
+            L"SELECT COUNT(*) FROM users WHERE id = ? AND muted_until IS NOT NULL AND muted_until > CURRENT_TIMESTAMP",
+            { userId },
+            errorOut);
+        if (!errorOut.empty())
+            return false;
+        return !rows.empty() && !rows.front().empty() && _wtoi(rows.front().front().c_str()) > 0;
+    }
+
+    void LogUserEvent(
+        OdbcConnection& db,
+        const UserRecord& actor,
+        const UserRecord& target,
+        const std::wstring& eventType,
+        const std::wstring& details,
+        std::wstring& errorOut)
+    {
+        db.Execute(
+            L"INSERT INTO user_session_audit (event_type, target_user_id, username, display_name, position, pod, actor_user_id, actor_username, details, created_at) "
+            L"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            { eventType, target.id, target.username, target.displayName, target.position, target.pod, actor.id, actor.username, details },
+            errorOut);
     }
 
     bool CheckPodInUse(OdbcConnection& db, const std::wstring& pod, bool& inUseOut, std::wstring& errorOut)
@@ -1287,11 +1656,19 @@ public:
 
             switch (opcode) {
             case kBinaryPoll:
-                return HandleBinaryPoll(opcode, reader);
+                return HandleBinaryPoll(opcode, reader, user);
             case kBinarySendChat:
                 return HandleBinarySendChat(opcode, reader, user);
             case kBinaryClearChat:
                 return HandleBinaryClearChat(opcode, user);
+            case kBinaryDeleteChatMessage:
+                return HandleBinaryDeleteChatMessage(opcode, reader, user);
+            case kBinaryKickUser:
+                return HandleBinaryKickUser(opcode, reader, user);
+            case kBinaryMuteUser:
+                return HandleBinaryMuteUser(opcode, reader, user);
+            case kBinarySendPrivateMessage:
+                return HandleBinarySendPrivateMessage(opcode, reader, user);
             case kBinaryCreateNote:
                 return HandleBinaryCreateNote(opcode, reader, user);
             case kBinaryUpdateNote:
@@ -1332,14 +1709,24 @@ public:
 
             if (req.method == "GET" && req.path == "/api/users/online")
                 return HandleOnlineUsers();
+            if (req.method == "POST" && req.path.rfind("/api/users/", 0) == 0 && req.path.size() > std::string("/api/users/").size())
+                return HandleUserAction(req, user);
             if (req.method == "POST" && req.path == "/api/users")
                 return HandleCreateAccount(req, user);
+            if (req.method == "GET" && req.path == "/api/admin/logs")
+                return HandleAdminLogs(req, user);
             if (req.method == "GET" && req.path == "/api/chat")
                 return HandleGetChat();
             if (req.method == "POST" && req.path == "/api/chat")
                 return HandlePostChat(req, user);
+            if (req.method == "DELETE" && req.path.rfind("/api/chat/", 0) == 0)
+                return HandleDeleteChatMessage(req, user);
             if (req.method == "DELETE" && req.path == "/api/chat")
                 return HandleClearChat(user);
+            if (req.method == "GET" && req.path == "/api/private-messages")
+                return HandleGetPrivateMessages(user);
+            if (req.method == "POST" && req.path == "/api/private-messages")
+                return HandlePostPrivateMessage(req, user);
             if (req.method == "GET" && req.path == "/api/notes")
                 return HandleGetNotes();
             if (req.method == "POST" && req.path == "/api/notes")
@@ -1407,7 +1794,9 @@ private:
 
     static void WriteChatJson(BinaryWriter& writer, const json& item)
     {
+        writer.Text(JsonTextField(item, { "id", "messageId" }));
         writer.Text(JsonTextField(item, { "author", "user", "name" }));
+        writer.Text(JsonTextField(item, { "username", "login" }));
         writer.Text(JsonTextField(item, { "position", "role" }));
         writer.Text(JsonTextField(item, { "text", "message", "body" }));
         writer.Text(JsonTextField(item, { "timestamp", "time", "createdAt" }));
@@ -1425,11 +1814,25 @@ private:
 
     static void WriteOnlineUserJson(BinaryWriter& writer, const json& item)
     {
+        writer.Text(JsonTextField(item, { "id", "userId" }));
         writer.Text(JsonTextField(item, { "displayName", "display_name", "name" }));
         writer.Text(JsonTextField(item, { "username", "user" }));
         writer.Text(JsonTextField(item, { "position", "role" }));
         writer.Text(JsonTextField(item, { "pod" }));
         writer.Text(JsonTextField(item, { "lastSeen", "last_seen", "timestamp" }));
+    }
+
+    static void WritePrivateMessageJson(BinaryWriter& writer, const json& item)
+    {
+        writer.Text(JsonTextField(item, { "id", "messageId" }));
+        writer.Text(JsonTextField(item, { "senderUsername", "sender_username" }));
+        writer.Text(JsonTextField(item, { "senderDisplayName", "sender_display_name" }));
+        writer.Text(JsonTextField(item, { "senderPosition", "sender_position" }));
+        writer.Text(JsonTextField(item, { "recipientUsername", "recipient_username" }));
+        writer.Text(JsonTextField(item, { "recipientDisplayName", "recipient_display_name" }));
+        writer.Text(JsonTextField(item, { "recipientPosition", "recipient_position" }));
+        writer.Text(JsonTextField(item, { "text", "message", "body" }));
+        writer.Text(JsonTextField(item, { "timestamp", "time", "createdAt" }));
     }
 
     uint32_t CollaborationVersion() const
@@ -1498,7 +1901,7 @@ private:
         return BinaryOk(kBinaryLogin, writer);
     }
 
-    BinaryResponse HandleBinaryPoll(uint16_t opcode, BinaryReader& reader)
+    BinaryResponse HandleBinaryPoll(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
     {
         uint32_t knownVersion = 0;
         reader.U32(knownVersion);
@@ -1517,6 +1920,10 @@ private:
         if (!error.empty())
             return BinaryError(opcode, 500, "database_error", L"Online users poll failed: " + error);
 
+        json privateMessages = m_database.PrivateMessages(user, error);
+        if (!error.empty())
+            return BinaryError(opcode, 500, "database_error", L"Private message poll failed: " + error);
+
         BinaryWriter writer;
         writer.U32(chat.is_array() ? static_cast<uint32_t>(chat.size()) : 0);
         if (chat.is_array()) {
@@ -1534,6 +1941,12 @@ private:
         if (users.is_array()) {
             for (const auto& item : users)
                 WriteOnlineUserJson(writer, item);
+        }
+
+        writer.U32(privateMessages.is_array() ? static_cast<uint32_t>(privateMessages.size()) : 0);
+        if (privateMessages.is_array()) {
+            for (const auto& item : privateMessages)
+                WritePrivateMessageJson(writer, item);
         }
         writer.U32(CollaborationVersion());
         return BinaryOk(opcode, writer);
@@ -1563,6 +1976,60 @@ private:
         std::wstring error;
         if (!m_database.ClearChatMessages(error))
             return BinaryError(opcode, 500, "database_error", error);
+        NotifyCollaborationChanged();
+        return BinaryOk(opcode);
+    }
+
+    BinaryResponse HandleBinaryDeleteChatMessage(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring messageId;
+        if (!reader.Text(messageId))
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary delete-chat payload is incomplete.");
+
+        std::wstring error;
+        if (!m_database.DeleteChatMessage(user, messageId, error))
+            return BinaryError(opcode, IsDatabaseErrorMessage(error) ? 500 : 403, IsDatabaseErrorMessage(error) ? "database_error" : "forbidden", error);
+        NotifyCollaborationChanged();
+        return BinaryOk(opcode);
+    }
+
+    BinaryResponse HandleBinaryKickUser(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring username;
+        if (!reader.Text(username))
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary kick payload is incomplete.");
+
+        std::wstring error;
+        if (!m_database.KickUser(user, username, error))
+            return BinaryError(opcode, IsDatabaseErrorMessage(error) ? 500 : 403, IsDatabaseErrorMessage(error) ? "database_error" : "forbidden", error);
+        NotifyCollaborationChanged();
+        return BinaryOk(opcode);
+    }
+
+    BinaryResponse HandleBinaryMuteUser(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring username;
+        uint32_t minutes = 15;
+        if (!reader.Text(username) || !reader.U32(minutes))
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary mute payload is incomplete.");
+
+        std::wstring error;
+        if (!m_database.MuteUser(user, username, minutes, error))
+            return BinaryError(opcode, IsDatabaseErrorMessage(error) ? 500 : 403, IsDatabaseErrorMessage(error) ? "database_error" : "forbidden", error);
+        NotifyCollaborationChanged();
+        return BinaryOk(opcode);
+    }
+
+    BinaryResponse HandleBinarySendPrivateMessage(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring recipientUsername;
+        std::wstring text;
+        if (!reader.Text(recipientUsername) || !reader.Text(text))
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary private-message payload is incomplete.");
+
+        std::wstring error;
+        if (!m_database.AddPrivateMessage(user, recipientUsername, text, error))
+            return BinaryError(opcode, IsDatabaseErrorMessage(error) ? 500 : 400, IsDatabaseErrorMessage(error) ? "database_error" : "private_message_failed", error);
         NotifyCollaborationChanged();
         return BinaryOk(opcode);
     }
@@ -1873,6 +2340,84 @@ private:
             return ErrorResponse(500, error, "database_error");
         NotifyCollaborationChanged();
         return JsonResponse(200, { { "ok", true } });
+    }
+
+    HttpResponse HandleDeleteChatMessage(const HttpRequest& req, const UserRecord& user)
+    {
+        std::wstring id = Utf8ToWide(req.path.substr(std::string("/api/chat/").size()));
+        std::wstring error;
+        if (!m_database.DeleteChatMessage(user, id, error))
+            return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 403, error, IsDatabaseErrorMessage(error) ? "database_error" : "forbidden");
+        NotifyCollaborationChanged();
+        return JsonResponse(200, { { "ok", true } });
+    }
+
+    HttpResponse HandleGetPrivateMessages(const UserRecord& user)
+    {
+        std::wstring error;
+        json messages = m_database.PrivateMessages(user, error);
+        if (!error.empty())
+            return ErrorResponse(500, error, "database_error");
+        return JsonResponse(200, { { "ok", true }, { "messages", messages } });
+    }
+
+    HttpResponse HandlePostPrivateMessage(const HttpRequest& req, const UserRecord& user)
+    {
+        json body = json::parse(req.body.empty() ? "{}" : req.body);
+        std::wstring recipient = PickWide(body, { "recipient", "recipientUsername", "username", "to" });
+        std::wstring text = PickWide(body, { "text", "message", "body" });
+        std::wstring error;
+        if (!m_database.AddPrivateMessage(user, recipient, text, error))
+            return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 400, error, IsDatabaseErrorMessage(error) ? "database_error" : "private_message_failed");
+        NotifyCollaborationChanged();
+        return JsonResponse(201, { { "ok", true } });
+    }
+
+    HttpResponse HandleUserAction(const HttpRequest& req, const UserRecord& user)
+    {
+        const std::string prefix = "/api/users/";
+        std::string suffix = req.path.substr(prefix.size());
+        const size_t slash = suffix.find('/');
+        if (slash == std::string::npos)
+            return ErrorResponse(404, L"User action endpoint not found.", "not_found");
+
+        std::wstring username = Utf8ToWide(suffix.substr(0, slash));
+        std::string action = suffix.substr(slash + 1);
+        std::wstring error;
+        if (action == "kick") {
+            if (!m_database.KickUser(user, username, error))
+                return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 403, error, IsDatabaseErrorMessage(error) ? "database_error" : "forbidden");
+            NotifyCollaborationChanged();
+            return JsonResponse(200, { { "ok", true } });
+        }
+        if (action == "mute") {
+            uint32_t minutes = 15;
+            try {
+                json body = json::parse(req.body.empty() ? "{}" : req.body);
+                auto it = body.find("minutes");
+                if (it != body.end() && it->is_number_unsigned())
+                    minutes = it->get<uint32_t>();
+            }
+            catch (...) {
+            }
+            if (!m_database.MuteUser(user, username, minutes, error))
+                return ErrorResponse(IsDatabaseErrorMessage(error) ? 500 : 403, error, IsDatabaseErrorMessage(error) ? "database_error" : "forbidden");
+            NotifyCollaborationChanged();
+            return JsonResponse(200, { { "ok", true } });
+        }
+        return ErrorResponse(404, L"User action endpoint not found.", "not_found");
+    }
+
+    HttpResponse HandleAdminLogs(const HttpRequest& req, const UserRecord& user)
+    {
+        if (PositionRank(user.position) < 2)
+            return ErrorResponse(403, L"Only Managers, Supervisors and Administrators can view administrator logs.", "forbidden");
+
+        std::wstring error;
+        json rows = m_database.UserLoginTimes(error);
+        if (!error.empty())
+            return ErrorResponse(500, error, "database_error");
+        return JsonResponse(200, { { "ok", true }, { "type", "user_login_times" }, { "items", rows } });
     }
 
     HttpResponse HandleGetNotes()

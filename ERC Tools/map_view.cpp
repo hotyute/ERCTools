@@ -7,6 +7,7 @@
 #include "http.h"
 #include "map_overlay_ui.h"
 #include "parsing.h"
+#include "road_data.h"
 #include "util.h"
 #include "weather_intensity.h"
 
@@ -131,26 +132,29 @@ struct SceneTileEntry
     ComPtr<ID2D1Bitmap> bitmap;
 };
 
-struct RoadRoute
+static bool RoadDepictionLabelMatches(const std::wstring& a, const std::wstring& b)
 {
-    const wchar_t* label;
-    std::vector<GeoPoint> points;
-};
+    std::wstring left = ToLower(Trim(a));
+    std::wstring right = ToLower(Trim(b));
+    return !left.empty() && left == right;
+}
 
-static const std::vector<RoadRoute>& GetRoadRoutes()
+static bool IsRoadDepictionHidden(const std::vector<std::wstring>& hiddenRoadLabels, const std::wstring& label)
 {
-    static const std::vector<RoadRoute> routes = {
-        { L"M25", { {51.66, -0.45}, {51.69, -0.05}, {51.60, 0.29}, {51.36, 0.20}, {51.25, -0.16}, {51.34, -0.55}, {51.55, -0.57}, {51.66, -0.45} } },
-        { L"M1", { {51.55, -0.42}, {52.04, -0.76}, {52.59, -1.13}, {53.02, -1.30}, {53.46, -1.39}, {53.80, -1.55} } },
-        { L"M6", { {52.49, -1.89}, {52.74, -2.02}, {53.01, -2.18}, {53.39, -2.60}, {53.75, -2.72}, {54.05, -2.80}, {54.89, -2.94}, {55.00, -3.06} } },
-        { L"M4", { {51.50, -0.42}, {51.45, -1.00}, {51.45, -1.49}, {51.56, -2.24}, {51.54, -3.05}, {51.62, -3.94} } },
-        { L"M5", { {52.49, -1.89}, {52.19, -2.22}, {51.86, -2.24}, {51.45, -2.59}, {51.02, -3.10}, {50.72, -3.53} } },
-        { L"M62", { {53.41, -2.99}, {53.48, -2.24}, {53.67, -1.50}, {53.74, -0.33}, {53.77, -0.10} } },
-        { L"A1(M)", { {51.88, -0.21}, {52.14, -0.32}, {52.57, -0.25}, {53.14, -0.67}, {53.53, -1.12}, {54.34, -1.43}, {54.97, -1.62} } },
-        { L"A14", { {52.40, -1.00}, {52.38, -0.72}, {52.33, -0.19}, {52.25, 0.15}, {52.06, 1.16} } },
-        { L"A27", { {50.82, -1.09}, {50.84, -0.78}, {50.82, -0.37}, {50.83, -0.14}, {50.82, 0.14}, {50.77, 0.29} } }
-    };
-    return routes;
+    for (const std::wstring& hidden : hiddenRoadLabels) {
+        if (RoadDepictionLabelMatches(hidden, label))
+            return true;
+    }
+    return false;
+}
+
+static bool IsRoadDepictionHidden(const std::unordered_set<std::wstring>& hiddenRoadLabels, const std::wstring& label)
+{
+    for (const std::wstring& hidden : hiddenRoadLabels) {
+        if (RoadDepictionLabelMatches(hidden, label))
+            return true;
+    }
+    return false;
 }
 
 // Tile/cache tuning.
@@ -230,7 +234,8 @@ class MapView::Impl
     {
         None,
         NoteEditor,
-        ResponderChat
+        ResponderChat,
+        PrivateChat
     };
 
     struct PolygonPointHit
@@ -254,7 +259,12 @@ public:
     using NotificationHistoryActivateCallback = std::function<void(const AppNotification&)>;
     using NotificationHistoryDeleteCallback = std::function<void(size_t index)>;
     using ChatSendCallback = std::function<void(const std::wstring& text)>;
+    using PrivateChatSendCallback = std::function<void(const std::wstring& recipientUsername, const std::wstring& text)>;
     using ChatClearCallback = std::function<void()>;
+    using ChatMessageActionCallback = std::function<void(const ChatMessage& message, const std::wstring& action)>;
+    using UserActionCallback = std::function<void(const OnlineUser& user, const std::wstring& action)>;
+    using PanelCloseCallback = std::function<void(const std::wstring& panelName)>;
+    using MapDisplayModeCallback = std::function<void(bool displayWorldMap)>;
 
     bool Create(HWND parent, int x, int y, int w, int h)
     {
@@ -345,9 +355,34 @@ public:
         m_onChatSend = std::move(cb);
     }
 
+    void SetPrivateChatSendCallback(PrivateChatSendCallback cb)
+    {
+        m_onPrivateChatSend = std::move(cb);
+    }
+
     void SetChatClearCallback(ChatClearCallback cb)
     {
         m_onChatClear = std::move(cb);
+    }
+
+    void SetChatMessageActionCallback(ChatMessageActionCallback cb)
+    {
+        m_onChatMessageAction = std::move(cb);
+    }
+
+    void SetUserActionCallback(UserActionCallback cb)
+    {
+        m_onUserAction = std::move(cb);
+    }
+
+    void SetPanelCloseCallback(PanelCloseCallback cb)
+    {
+        m_onPanelClose = std::move(cb);
+    }
+
+    void SetMapDisplayModeCallback(MapDisplayModeCallback cb)
+    {
+        m_onMapDisplayMode = std::move(cb);
     }
 
     void SetChatClearEnabled(bool enabled)
@@ -391,9 +426,24 @@ public:
         Invalidate();
     }
 
+    void SetPrivateMessages(const std::vector<PrivateMessage>& messages)
+    {
+        m_privateMessages = messages;
+        Invalidate();
+    }
+
     void SetOnlineUsers(const std::vector<OnlineUser>& users)
     {
         m_onlineUsers = users;
+        Invalidate();
+    }
+
+    void OpenPrivateChat(const OnlineUser& user)
+    {
+        m_privateChatUser = user;
+        m_privateChatVisible = true;
+        m_privateChatDraft.clear();
+        m_privateChatInputFocused = false;
         Invalidate();
     }
 
@@ -518,6 +568,47 @@ public:
             return;
 
         m_showRoadDepictions = visible;
+        InvalidateSceneCache();
+        Invalidate();
+    }
+
+    std::vector<std::wstring> RoadDepictionLabels() const
+    {
+        std::vector<std::wstring> labels;
+        std::unordered_set<std::wstring> seen;
+        if (m_roadDepictionRoutes) {
+            labels.reserve(m_roadDepictionRoutes->size());
+            for (const RoadDepictionRoute& route : *m_roadDepictionRoutes) {
+                std::wstring label = Trim(route.label);
+                if (!label.empty() && seen.insert(ToLower(label)).second)
+                    labels.push_back(std::move(label));
+            }
+        }
+        std::sort(labels.begin(), labels.end());
+        return labels;
+    }
+
+    bool LoadRoadDepictionsFromFile(
+        const std::filesystem::path& path,
+        std::wstring* errorOut = nullptr,
+        const std::unordered_set<std::wstring>* allowedLabels = nullptr)
+    {
+        std::vector<RoadDepictionRoute> loaded;
+        if (!LoadRoadDepictionRoutesFromGeoJson(path, loaded, errorOut, allowedLabels))
+            return false;
+
+        m_roadDepictionRoutes = std::make_shared<std::vector<RoadDepictionRoute>>(std::move(loaded));
+        InvalidateSceneCache();
+        Invalidate();
+        return true;
+    }
+
+    void SetHiddenRoadDepictions(const std::unordered_set<std::wstring>& hiddenRoadLabels)
+    {
+        if (m_hiddenRoadDepictionIds == hiddenRoadLabels)
+            return;
+
+        m_hiddenRoadDepictionIds = hiddenRoadLabels;
         InvalidateSceneCache();
         Invalidate();
     }
@@ -807,9 +898,16 @@ public:
 
     void ResetView()
     {
-        m_centerLat = kDefaultCenterLat;
-        m_centerLon = kDefaultCenterLon;
-        m_zoom = kDefaultZoom;
+        if (m_displayWorldMap) {
+            m_centerLat = 0.0;
+            m_centerLon = 0.0;
+            m_zoom = kMinZoom;
+        }
+        else {
+            m_centerLat = kDefaultCenterLat;
+            m_centerLon = kDefaultCenterLon;
+            m_zoom = kDefaultZoom;
+        }
         NormalizeCenter();
         Invalidate();
     }
@@ -822,15 +920,42 @@ public:
                 pts.push_back({ alert.latitude, alert.longitude });
         }
 
+        if (m_displayWorldMap) {
+            for (const EarthquakeEvent& event : m_earthquakes) {
+                if (event.hasLocation)
+                    pts.push_back({ event.latitude, event.longitude });
+            }
+
+            for (const WeatherSystemEvent& system : m_weatherSystems) {
+                if (system.hasLocation)
+                    pts.push_back({ system.latitude, system.longitude });
+                for (const WeatherForecastPoint& point : system.forecastTrack) {
+                    if (point.hasLocation)
+                        pts.push_back({ point.latitude, point.longitude });
+                }
+            }
+
+            for (const WeatherWarningEvent& warning : m_weatherWarnings) {
+                if (warning.hasLocation)
+                    pts.push_back({ warning.latitude, warning.longitude });
+                if (m_showWeatherWarningPolygons) {
+                    for (const GeoPoint& point : warning.polygon)
+                        pts.push_back(point);
+                }
+            }
+
+            for (const FloodEvent& flood : m_floods) {
+                if (flood.hasLocation)
+                    pts.push_back({ flood.latitude, flood.longitude });
+            }
+        }
+
         if (pts.empty()) {
-            m_centerLat = kDefaultCenterLat;
-            m_centerLon = kDefaultCenterLon;
-            m_zoom = kDefaultZoom;
-            Invalidate();
+            ResetView();
             return;
         }
 
-        FitToPoints(pts, 12);
+        FitToPoints(pts, m_displayWorldMap ? 5 : 12);
     }
 
     static bool SameGeoPoint(const GeoPoint& a, const GeoPoint& b)
@@ -1069,6 +1194,7 @@ private:
             }
             ClampToolbarPanelOffsets(BuildViewState());
             ClampUsersPanelOffsets(BuildViewState());
+            ClampPrivateChatPanelOffsets(BuildViewState());
             return 0;
 
         case WM_PAINT:
@@ -1131,6 +1257,10 @@ private:
             SetFocus(m_hwnd);
             m_hoverPoint = POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             m_leftButtonDown = true;
+            if (HandleOverlayContextMenuPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
+            if (HandlePrivateChatPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
             if (HandleUsersPanelPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             if (HandleResponderChatPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
@@ -1138,6 +1268,7 @@ private:
             if (HandleNotificationPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             if (HitUsersPanelInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
+                HitPrivateChatInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
                 HitResponderChatInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
                 HitNotificationInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
                 SetCapture(m_hwnd);
@@ -1186,13 +1317,13 @@ private:
             return 0;
 
         case WM_RBUTTONDOWN:
+            if (HandleUserContextRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
+            if (HandleChatContextRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
             if (HandleNotificationHistoryRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
-            if (m_notificationContextMenuVisible) {
-                m_notificationContextMenuVisible = false;
-                m_notificationContextMenuIndex = static_cast<size_t>(-1);
-                Invalidate();
-            }
+            HideOverlayContextMenus();
             if (HandlePolygonRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             break;
@@ -1206,7 +1337,11 @@ private:
             return 0;
 
         case WM_KEYDOWN:
-            if (m_overlayInputFocus == OverlayInputFocus::ResponderChat) {
+            if (m_overlayInputFocus == OverlayInputFocus::PrivateChat) {
+                if (HandlePrivateChatKeyDown(wParam))
+                    return 0;
+            }
+            else if (m_overlayInputFocus == OverlayInputFocus::ResponderChat) {
                 if (HandleResponderChatKeyDown(wParam))
                     return 0;
             }
@@ -1217,7 +1352,11 @@ private:
             break;
 
         case WM_CHAR:
-            if (m_overlayInputFocus == OverlayInputFocus::ResponderChat) {
+            if (m_overlayInputFocus == OverlayInputFocus::PrivateChat) {
+                if (HandlePrivateChatChar(wParam))
+                    return 0;
+            }
+            else if (m_overlayInputFocus == OverlayInputFocus::ResponderChat) {
                 if (HandleResponderChatChar(wParam))
                     return 0;
             }
@@ -1337,6 +1476,8 @@ private:
         WorldPoint centerWorld{};
         ViewState boundaryView{};
         std::vector<SceneCacheRingSnapshot> rings;
+        std::shared_ptr<const std::vector<RoadDepictionRoute>> roadRoutes;
+        std::vector<std::wstring> hiddenRoadDepictionIds;
     };
 
     struct SceneCacheBuildResult
@@ -1361,6 +1502,8 @@ private:
         WorldPoint tileCenterWorld{};
         ViewState boundaryView{};
         std::vector<SceneCacheRingSnapshot> rings;
+        std::shared_ptr<const std::vector<RoadDepictionRoute>> roadRoutes;
+        std::vector<std::wstring> hiddenRoadDepictionIds;
     };
 
     struct SceneTileBuildResult
@@ -1519,6 +1662,15 @@ private:
                 return true;
         }
         return false;
+    }
+
+    static bool RoadRouteIntersectsView(const ViewState& view, const RoadDepictionRoute& route)
+    {
+        if (route.points.size() < 2)
+            return false;
+        if (route.maxLat < view.minLat || route.minLat > view.maxLat)
+            return false;
+        return AnyPointInViewStatic(view, route.points);
     }
 
     static bool RectsIntersect(const D2D1_RECT_F& a, const D2D1_RECT_F& b)
@@ -1941,23 +2093,43 @@ private:
         return D2D1::RectF(panel.left + 12.0f, panel.top + 44.0f, panel.left + 12.0f + buttonW, panel.top + 44.0f + buttonH);
     }
 
+    D2D1_RECT_F BuildMapDisplayUkButtonRect() const
+    {
+        const D2D1_RECT_F panel = BuildToolbarPanelRect();
+        return D2D1::RectF(panel.left + 12.0f, panel.top + 134.0f, panel.left + 132.0f, panel.top + 166.0f);
+    }
+
+    D2D1_RECT_F BuildMapDisplayWorldButtonRect() const
+    {
+        const D2D1_RECT_F panel = BuildToolbarPanelRect();
+        return D2D1::RectF(panel.left + 142.0f, panel.top + 134.0f, panel.left + 262.0f, panel.top + 166.0f);
+    }
+
     D2D1_RECT_F BuildToolbarPanelRect() const
     {
         const float left = 18.0f + m_toolbarPanelOffsetX;
         const float top = 18.0f + m_toolbarPanelOffsetY;
-        return D2D1::RectF(left, top, left + 274.0f, top + 130.0f);
+        return D2D1::RectF(left, top, left + 274.0f, top + 178.0f);
+    }
+
+    D2D1_RECT_F BuildToolbarCloseButtonRect() const
+    {
+        const D2D1_RECT_F panel = BuildToolbarPanelRect();
+        return D2D1::RectF(panel.right - 34.0f, panel.top + 10.0f, panel.right - 10.0f, panel.top + 34.0f);
     }
 
     D2D1_RECT_F BuildToolbarDragRect() const
     {
         const D2D1_RECT_F panel = BuildToolbarPanelRect();
-        return D2D1::RectF(panel.left + 12.0f, panel.top, panel.right - 12.0f, panel.top + 38.0f);
+        const D2D1_RECT_F closeRect = BuildToolbarCloseButtonRect();
+        return D2D1::RectF(panel.left + 12.0f, panel.top, closeRect.left - 6.0f, panel.top + 38.0f);
     }
 
     void SetOverlayInputFocus(OverlayInputFocus focus)
     {
         m_overlayInputFocus = focus;
         m_responderChatInputFocused = focus == OverlayInputFocus::ResponderChat;
+        m_privateChatInputFocused = focus == OverlayInputFocus::PrivateChat;
         Invalidate();
     }
 
@@ -2200,6 +2372,16 @@ private:
             const D2D1_RECT_F fitButton = BuildFitAlertsButtonRect();
             const D2D1_RECT_F resetButton = BuildResetViewButtonRect();
             const D2D1_RECT_F refreshButton = BuildRefreshButtonRect();
+            const D2D1_RECT_F ukButton = BuildMapDisplayUkButtonRect();
+            const D2D1_RECT_F worldButton = BuildMapDisplayWorldButtonRect();
+            const D2D1_RECT_F closeButton = BuildToolbarCloseButtonRect();
+            if (PointInRect(x, y, closeButton)) {
+                ClearOverlayInputFocus();
+                if (m_onPanelClose)
+                    m_onPanelClose(L"map_controls");
+                Invalidate();
+                return true;
+            }
             if (PointInRect(x, y, BuildToolbarDragRect())) {
                 ClearOverlayInputFocus();
                 SetCapture(m_hwnd);
@@ -2231,6 +2413,28 @@ private:
                 m_addNoteMode = !m_addNoteMode;
                 if (m_addNoteMode)
                     CancelNoteEditor();
+                Invalidate();
+                return true;
+            }
+
+            if (PointInRect(x, y, ukButton)) {
+                if (m_displayWorldMap) {
+                    if (m_onMapDisplayMode)
+                        m_onMapDisplayMode(false);
+                    else
+                        SetDisplayWorldMap(false);
+                }
+                Invalidate();
+                return true;
+            }
+
+            if (PointInRect(x, y, worldButton)) {
+                if (!m_displayWorldMap) {
+                    if (m_onMapDisplayMode)
+                        m_onMapDisplayMode(true);
+                    else
+                        SetDisplayWorldMap(true);
+                }
                 Invalidate();
                 return true;
             }
@@ -2418,6 +2622,20 @@ private:
             return;
         }
 
+        if (m_draggingPrivateChatPanel && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            POINT pt{ x, y };
+            const int dx = pt.x - m_lastMouse.x;
+            const int dy = pt.y - m_lastMouse.y;
+            if (dx != 0 || dy != 0) {
+                m_privateChatOffsetX += static_cast<float>(dx);
+                m_privateChatOffsetY += static_cast<float>(dy);
+                ClampPrivateChatPanelOffsets(BuildViewState());
+                m_lastMouse = pt;
+                Invalidate();
+            }
+            return;
+        }
+
         if (m_draggingNotificationHistoryScrollbar && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
             SetNotificationHistoryScrollFromThumbY(static_cast<float>(y), m_notificationHistoryScrollbarDragOffset);
             return;
@@ -2530,6 +2748,16 @@ private:
             return;
         }
 
+        if (m_draggingPrivateChatPanel) {
+            m_draggingPrivateChatPanel = false;
+            m_notificationUiMouseDown = false;
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            Invalidate();
+            return;
+        }
+
         if (m_draggingNotificationHistoryScrollbar) {
             m_draggingNotificationHistoryScrollbar = false;
             m_notificationHistoryScrollbarDragOffset = 0.0f;
@@ -2562,7 +2790,7 @@ private:
             return;
         }
 
-        if (m_notificationUiMouseDown || HitUsersPanelInterface(x, y) || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
+        if (m_notificationUiMouseDown || HitUsersPanelInterface(x, y) || HitPrivateChatInterface(x, y) || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y)) {
             m_notificationUiMouseDown = false;
             m_dragging = false;
             m_interactivePan = false;
@@ -2603,7 +2831,7 @@ private:
         if (TryActivateNotificationHistoryItem(x, y))
             return;
 
-        if (HitUsersPanelInterface(x, y) || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y))
+        if (HitUsersPanelInterface(x, y) || HitPrivateChatInterface(x, y) || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y))
             return;
 
         GeoPoint geo = ScreenToGeo(x, y);
@@ -2616,6 +2844,8 @@ private:
         ScreenToClient(m_hwnd, &pt);
 
         if (HitUsersPanelInterface(pt.x, pt.y))
+            return;
+        if (HitPrivateChatInterface(pt.x, pt.y))
             return;
         if (HitResponderChatInterface(pt.x, pt.y))
             return;
@@ -3560,10 +3790,33 @@ private:
 
     bool HitAnyOverlayInterface(int x, int y) const
     {
-        return HitUsersPanelInterface(x, y) ||
+        return HitOverlayContextMenu(x, y) ||
+            HitPrivateChatInterface(x, y) ||
+            HitUsersPanelInterface(x, y) ||
             HitResponderChatInterface(x, y) ||
             HitNotificationInterface(x, y) ||
             HitNoteInterface(x, y);
+    }
+
+    bool HitOverlayContextMenu(int x, int y) const
+    {
+        return (m_notificationContextMenuVisible && PointInRect(x, y, m_notificationContextMenuRect)) ||
+            (m_chatContextMenuVisible && PointInRect(x, y, m_chatContextMenuRect)) ||
+            (m_userContextMenuVisible && PointInRect(x, y, m_userContextMenuRect));
+    }
+
+    void HideOverlayContextMenus()
+    {
+        if (!m_notificationContextMenuVisible && !m_chatContextMenuVisible && !m_userContextMenuVisible)
+            return;
+
+        m_notificationContextMenuVisible = false;
+        m_notificationContextMenuIndex = static_cast<size_t>(-1);
+        m_chatContextMenuVisible = false;
+        m_chatContextMenuIndex = static_cast<size_t>(-1);
+        m_userContextMenuVisible = false;
+        m_userContextMenuIndex = static_cast<size_t>(-1);
+        Invalidate();
     }
 
     struct ResponderChatLayout
@@ -3581,9 +3834,21 @@ private:
     {
         D2D1_RECT_F panelRect{};
         D2D1_RECT_F toggleRect{};
+        D2D1_RECT_F closeRect{};
         D2D1_RECT_F dragRect{};
         D2D1_RECT_F contentRect{};
         float progress = 0.0f;
+        bool hasPanel = false;
+    };
+
+    struct PrivateChatLayout
+    {
+        D2D1_RECT_F panelRect{};
+        D2D1_RECT_F closeRect{};
+        D2D1_RECT_F dragRect{};
+        D2D1_RECT_F contentRect{};
+        D2D1_RECT_F inputRect{};
+        D2D1_RECT_F sendRect{};
         bool hasPanel = false;
     };
 
@@ -3656,10 +3921,15 @@ private:
         const float left = openLeft - offset;
         const float top = openTop;
         layout.panelRect = D2D1::RectF(left, top, left + clippedPanelW, top + clippedPanelH);
-        layout.toggleRect = D2D1::RectF(
+        layout.closeRect = D2D1::RectF(
             layout.panelRect.right - kOverlayTogglePadding - kOverlayToggleSize,
             layout.panelRect.top + 10.0f,
             layout.panelRect.right - kOverlayTogglePadding,
+            layout.panelRect.top + 10.0f + kOverlayToggleSize);
+        layout.toggleRect = D2D1::RectF(
+            layout.closeRect.left - kOverlayTogglePadding - kOverlayToggleSize,
+            layout.panelRect.top + 10.0f,
+            layout.closeRect.left - kOverlayTogglePadding,
             layout.panelRect.top + 10.0f + kOverlayToggleSize);
         layout.dragRect = D2D1::RectF(
             layout.panelRect.left + kOverlayUiPadding,
@@ -3671,6 +3941,31 @@ private:
             layout.panelRect.top + 58.0f,
             layout.panelRect.right - kOverlayUiPadding,
             layout.panelRect.bottom - kOverlayUiPadding);
+        layout.hasPanel = true;
+        return layout;
+    }
+
+    PrivateChatLayout BuildPrivateChatLayout(const ViewState& view) const
+    {
+        PrivateChatLayout layout;
+        if (!m_privateChatVisible)
+            return layout;
+
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float panelW = MinValue(390.0f, MaxValue(260.0f, width - kOverlayUiMargin * 2.0f));
+        const float panelH = MinValue(290.0f, MaxValue(210.0f, height - kOverlayUiMargin * 2.0f));
+        const float baseLeft = MaxValue(kOverlayUiMargin, (width - panelW) * 0.50f);
+        const float baseTop = MaxValue(kOverlayUiMargin, (height - panelH) * 0.22f);
+        const float left = ClampValue(baseLeft + m_privateChatOffsetX, kOverlayUiMargin, MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - panelW));
+        const float top = ClampValue(baseTop + m_privateChatOffsetY, kOverlayUiMargin, MaxValue(kOverlayUiMargin, height - kOverlayUiMargin - panelH));
+
+        layout.panelRect = D2D1::RectF(left, top, left + panelW, top + panelH);
+        layout.closeRect = D2D1::RectF(layout.panelRect.right - 34.0f, layout.panelRect.top + 10.0f, layout.panelRect.right - 10.0f, layout.panelRect.top + 34.0f);
+        layout.dragRect = D2D1::RectF(layout.panelRect.left + kOverlayUiPadding, layout.panelRect.top, layout.closeRect.left - 8.0f, layout.panelRect.top + 42.0f);
+        layout.sendRect = D2D1::RectF(layout.panelRect.right - kOverlayUiPadding - 78.0f, layout.panelRect.bottom - kOverlayUiPadding - 32.0f, layout.panelRect.right - kOverlayUiPadding, layout.panelRect.bottom - kOverlayUiPadding);
+        layout.inputRect = D2D1::RectF(layout.panelRect.left + kOverlayUiPadding, layout.sendRect.top, layout.sendRect.left - 8.0f, layout.sendRect.bottom);
+        layout.contentRect = D2D1::RectF(layout.panelRect.left + kOverlayUiPadding, layout.panelRect.top + 58.0f, layout.panelRect.right - kOverlayUiPadding, layout.inputRect.top - 10.0f);
         layout.hasPanel = true;
         return layout;
     }
@@ -3696,12 +3991,33 @@ private:
         m_usersPanelOffsetY = openTop - baseTop;
     }
 
+    void ClampPrivateChatPanelOffsets(const ViewState& view)
+    {
+        if (!m_privateChatVisible)
+            return;
+
+        const PrivateChatLayout layout = BuildPrivateChatLayout(view);
+        if (!layout.hasPanel)
+            return;
+
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float panelW = layout.panelRect.right - layout.panelRect.left;
+        const float panelH = layout.panelRect.bottom - layout.panelRect.top;
+        const float baseLeft = MaxValue(kOverlayUiMargin, (width - panelW) * 0.50f);
+        const float baseTop = MaxValue(kOverlayUiMargin, (height - panelH) * 0.22f);
+        const float left = ClampValue(layout.panelRect.left, kOverlayUiMargin, MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - panelW));
+        const float top = ClampValue(layout.panelRect.top, kOverlayUiMargin, MaxValue(kOverlayUiMargin, height - kOverlayUiMargin - panelH));
+        m_privateChatOffsetX = left - baseLeft;
+        m_privateChatOffsetY = top - baseTop;
+    }
+
     void ClampToolbarPanelOffsets(const ViewState& view)
     {
         const float width = static_cast<float>(view.width);
         const float height = static_cast<float>(view.height);
         const float panelW = 274.0f;
-        const float panelH = 130.0f;
+        const float panelH = 178.0f;
         const float baseLeft = 18.0f;
         const float baseTop = 18.0f;
         const float left = ClampValue(
@@ -3806,6 +4122,14 @@ private:
             return true;
         }
 
+        if (layout.progress > 0.04f && PointInRect(x, y, layout.closeRect)) {
+            ClearOverlayInputFocus();
+            if (m_onPanelClose)
+                m_onPanelClose(L"users");
+            Invalidate();
+            return true;
+        }
+
         if (layout.progress > 0.04f && PointInRect(x, y, layout.dragRect)) {
             ClearOverlayInputFocus();
             SetCapture(m_hwnd);
@@ -3821,6 +4145,60 @@ private:
         }
 
         return false;
+    }
+
+    bool OnlineUserIndexAtPoint(int x, int y, size_t& indexOut) const
+    {
+        const UsersPanelLayout layout = BuildUsersPanelLayout(BuildViewState());
+        if (!layout.hasPanel || layout.progress <= 0.04f || !PointInRect(x, y, layout.contentRect))
+            return false;
+
+        const float contentW = MaxValue(1.0f, layout.contentRect.right - layout.contentRect.left);
+        float rowY = layout.contentRect.top + 4.0f;
+        for (size_t i = 0; i < m_onlineUsers.size(); ++i) {
+            const OnlineUser& user = m_onlineUsers[i];
+            const std::wstring prefix = UserRolePrefixText(user);
+            const std::wstring display = UserDisplayText(user);
+            const float prefixW = prefix.empty()
+                ? 0.0f
+                : m_overlayUi.MeasureTextWidth(prefix + L" ", m_overlayUi.BodyFormat(), contentW);
+            const float bodyW = MaxValue(1.0f, contentW - prefixW);
+            const float bodyH = MaxValue(18.0f, m_overlayUi.MeasureTextHeight(display, m_overlayUi.BodyFormat(), bodyW));
+            const std::wstring sub = user.position.empty()
+                ? user.lastSeen
+                : user.position + (user.lastSeen.empty() ? L"" : L" - " + user.lastSeen);
+            const float subH = sub.empty()
+                ? 0.0f
+                : MaxValue(14.0f, m_overlayUi.MeasureTextHeight(sub, m_overlayUi.SmallFormat(), contentW));
+            const float rowH = bodyH + (subH > 0.0f ? subH + 3.0f : 0.0f) + 10.0f;
+            if (static_cast<float>(y) >= rowY && static_cast<float>(y) <= rowY + rowH) {
+                indexOut = i;
+                return true;
+            }
+            rowY += rowH;
+        }
+        return false;
+    }
+
+    bool HandleUserContextRightClick(int x, int y)
+    {
+        if (!m_onUserAction)
+            return false;
+        EnsureDeviceResources();
+        if (!m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return false;
+
+        size_t index = static_cast<size_t>(-1);
+        if (!OnlineUserIndexAtPoint(x, y, index))
+            return false;
+
+        HideOverlayContextMenus();
+        m_userContextMenuVisible = true;
+        m_userContextMenuIndex = index;
+        m_userContextMenuRect = BuildOverlayContextMenuRect(x, y, 172.0f, 116.0f);
+        ClearOverlayInputFocus();
+        Invalidate();
+        return true;
     }
 
     void DrawUsersPanel(const ViewState& view)
@@ -3846,6 +4224,7 @@ private:
 
         m_overlayUi.DrawGlassPanel(layout.panelRect, 12.0f);
         m_overlayUi.DrawButton(toggleButton);
+        m_overlayUi.DrawButton(MakeOverlayButton(L"X", layout.closeRect));
 
         D2D1_RECT_F titleRect = D2D1::RectF(
             layout.panelRect.left + kOverlayUiPadding,
@@ -3907,6 +4286,185 @@ private:
             }
         }
         m_rt->PopAxisAlignedClip();
+    }
+
+    std::wstring PrivateChatTitle() const
+    {
+        std::wstring name = m_privateChatUser.displayName.empty() ? m_privateChatUser.username : m_privateChatUser.displayName;
+        if (name.empty())
+            name = L"User";
+        return L"Private Chat - " + name;
+    }
+
+    bool PrivateMessageMatchesOpenChat(const PrivateMessage& message) const
+    {
+        const std::wstring peer = ToLower(Trim(m_privateChatUser.username));
+        if (peer.empty())
+            return false;
+        return ToLower(Trim(message.senderUsername)) == peer ||
+            ToLower(Trim(message.recipientUsername)) == peer;
+    }
+
+    std::wstring FormatPrivateMessageLine(const PrivateMessage& message) const
+    {
+        std::wstring line;
+        if (!message.timestamp.empty())
+            line += L"[" + message.timestamp + L"] ";
+        std::wstring sender = message.senderDisplayName.empty() ? message.senderUsername : message.senderDisplayName;
+        if (sender.empty())
+            sender = L"User";
+        line += sender + L": " + message.text;
+        return line;
+    }
+
+    float PrivateMessageHeight(const PrivateMessage& message, float contentW) const
+    {
+        return MaxValue(18.0f, m_overlayUi.MeasureTextHeight(FormatPrivateMessageLine(message), m_overlayUi.BodyFormat(), contentW));
+    }
+
+    bool HitPrivateChatInterface(int x, int y) const
+    {
+        const PrivateChatLayout layout = BuildPrivateChatLayout(BuildViewState());
+        return layout.hasPanel && PointInRect(x, y, layout.panelRect);
+    }
+
+    void SubmitPrivateChatDraft()
+    {
+        std::wstring text = Trim(m_privateChatDraft);
+        if (text.empty() || m_privateChatUser.username.empty())
+            return;
+
+        m_privateChatDraft.clear();
+        if (m_onPrivateChatSend)
+            m_onPrivateChatSend(m_privateChatUser.username, text);
+        Invalidate();
+    }
+
+    bool HandlePrivateChatPointerDown(int x, int y)
+    {
+        const PrivateChatLayout layout = BuildPrivateChatLayout(BuildViewState());
+        if (!layout.hasPanel || !PointInRect(x, y, layout.panelRect))
+            return false;
+
+        if (PointInRect(x, y, layout.closeRect)) {
+            m_privateChatVisible = false;
+            m_privateChatDraft.clear();
+            ClearOverlayInputFocus();
+            Invalidate();
+            return true;
+        }
+
+        if (PointInRect(x, y, layout.dragRect)) {
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            m_draggingPrivateChatPanel = true;
+            m_notificationUiMouseDown = true;
+            m_lastMouse = POINT{ x, y };
+            return true;
+        }
+
+        if (PointInRect(x, y, layout.sendRect)) {
+            SubmitPrivateChatDraft();
+            SetOverlayInputFocus(OverlayInputFocus::PrivateChat);
+            return true;
+        }
+
+        SetOverlayInputFocus(PointInRect(x, y, layout.inputRect) ? OverlayInputFocus::PrivateChat : OverlayInputFocus::None);
+        Invalidate();
+        return true;
+    }
+
+    bool HandlePrivateChatKeyDown(WPARAM key)
+    {
+        if (!m_privateChatInputFocused)
+            return false;
+
+        if (key == VK_RETURN) {
+            SubmitPrivateChatDraft();
+            return true;
+        }
+        if (key == VK_BACK) {
+            if (!m_privateChatDraft.empty())
+                m_privateChatDraft.pop_back();
+            Invalidate();
+            return true;
+        }
+        if (key == VK_ESCAPE) {
+            ClearOverlayInputFocus();
+            Invalidate();
+            return true;
+        }
+        return false;
+    }
+
+    bool HandlePrivateChatChar(WPARAM ch)
+    {
+        if (!m_privateChatInputFocused)
+            return false;
+
+        if (ch == L'\r' || ch == L'\n' || ch == 8 || ch == 27)
+            return true;
+
+        if (ch >= 32 && ch != 127 && m_privateChatDraft.size() < 512) {
+            m_privateChatDraft.push_back(static_cast<wchar_t>(ch));
+            Invalidate();
+        }
+        return true;
+    }
+
+    void DrawPrivateChat(const ViewState& view)
+    {
+        if (!m_privateChatVisible || !m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return;
+
+        const PrivateChatLayout layout = BuildPrivateChatLayout(view);
+        if (!layout.hasPanel)
+            return;
+
+        m_overlayUi.DrawGlassPanel(layout.panelRect, 12.0f);
+        m_overlayUi.DrawButton(MakeOverlayButton(L"X", layout.closeRect));
+
+        D2D1_RECT_F titleRect = D2D1::RectF(
+            layout.panelRect.left + kOverlayUiPadding,
+            layout.panelRect.top + kOverlayUiPadding - 1.0f,
+            layout.closeRect.left - 8.0f,
+            layout.panelRect.top + kOverlayUiPadding + 23.0f);
+        m_overlayUi.DrawLabel(PrivateChatTitle(), m_overlayUi.TitleFormat(), titleRect);
+        m_overlayUi.DrawSeparator(layout.panelRect.left + kOverlayUiPadding, layout.panelRect.right - kOverlayUiPadding, layout.panelRect.top + 50.0f);
+
+        const float contentW = MaxValue(1.0f, layout.contentRect.right - layout.contentRect.left);
+        m_rt->PushAxisAlignedClip(layout.contentRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        float y = layout.contentRect.bottom;
+        bool any = false;
+        for (auto it = m_privateMessages.rbegin(); it != m_privateMessages.rend(); ++it) {
+            if (!PrivateMessageMatchesOpenChat(*it))
+                continue;
+            any = true;
+            const float lineH = PrivateMessageHeight(*it, contentW);
+            y -= lineH + 7.0f;
+            if (y < layout.contentRect.top)
+                break;
+
+            ChatMessage roleProbe;
+            roleProbe.position = it->senderPosition;
+            D2D1_RECT_F lineRect = D2D1::RectF(layout.contentRect.left, y, layout.contentRect.right, y + lineH + 2.0f);
+            m_overlayUi.DrawLabel(FormatPrivateMessageLine(*it), m_overlayUi.BodyFormat(), lineRect, ChatRoleBrush(roleProbe));
+        }
+        if (!any) {
+            D2D1_RECT_F emptyRect = D2D1::RectF(layout.contentRect.left, layout.contentRect.top + 6.0f, layout.contentRect.right, layout.contentRect.top + 40.0f);
+            m_overlayUi.DrawLabel(L"No private messages yet.", m_overlayUi.BodyFormat(), emptyRect, m_overlayUi.MutedTextBrush());
+        }
+        m_rt->PopAxisAlignedClip();
+
+        OverlayTextBox input;
+        input.text = m_privateChatInputFocused && (GetTickCount64() / 550) % 2 == 0
+            ? m_privateChatDraft + L"|"
+            : m_privateChatDraft;
+        input.placeholder = L"Private message...";
+        input.bounds = layout.inputRect;
+        input.focused = m_privateChatInputFocused;
+        m_overlayUi.DrawTextBox(input);
+        m_overlayUi.DrawButton(MakeOverlayButton(L"Send", layout.sendRect, !Trim(m_privateChatDraft).empty()));
     }
 
     std::wstring ChatTimestampText(const ChatMessage& msg) const
@@ -4003,6 +4561,51 @@ private:
             }
         }
         return false;
+    }
+
+    bool ChatMessageIndexAtPoint(int x, int y, size_t& indexOut) const
+    {
+        const ResponderChatLayout layout = BuildResponderChatLayout(BuildViewState());
+        if (layout.progress <= 0.04f || !PointInRect(x, y, layout.contentRect))
+            return false;
+
+        const float contentW = MaxValue(1.0f, layout.contentRect.right - layout.contentRect.left);
+        float rowY = layout.contentRect.bottom;
+        for (size_t reverseIndex = 0; reverseIndex < m_chatMessages.size(); ++reverseIndex) {
+            const size_t index = m_chatMessages.size() - 1 - reverseIndex;
+            const ChatMessage& message = m_chatMessages[index];
+            const float lineH = ChatMessageHeight(message, contentW);
+            rowY -= lineH + 6.0f;
+            if (rowY < layout.contentRect.top)
+                break;
+            const D2D1_RECT_F lineRect = D2D1::RectF(layout.contentRect.left, rowY, layout.contentRect.right, rowY + lineH + 2.0f);
+            if (PointInRect(x, y, lineRect)) {
+                indexOut = index;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool HandleChatContextRightClick(int x, int y)
+    {
+        if (!m_onChatMessageAction)
+            return false;
+        EnsureDeviceResources();
+        if (!m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return false;
+
+        size_t index = static_cast<size_t>(-1);
+        if (!ChatMessageIndexAtPoint(x, y, index))
+            return false;
+
+        HideOverlayContextMenus();
+        m_chatContextMenuVisible = true;
+        m_chatContextMenuIndex = index;
+        m_chatContextMenuRect = BuildOverlayContextMenuRect(x, y, 132.0f, 42.0f);
+        ClearOverlayInputFocus();
+        Invalidate();
+        return true;
     }
 
     bool HitResponderChatInterface(int x, int y) const
@@ -4239,10 +4842,19 @@ private:
     D2D1_RECT_F NotificationHistoryClearRect(const D2D1_RECT_F& panelRect) const
     {
         return D2D1::RectF(
-            panelRect.right - kOverlayUiPadding - 70.0f,
+            panelRect.right - kOverlayUiPadding - 102.0f,
             panelRect.top + kOverlayUiPadding - 2.0f,
-            panelRect.right - kOverlayUiPadding,
+            panelRect.right - kOverlayUiPadding - 32.0f,
             panelRect.top + kOverlayUiPadding + 25.0f);
+    }
+
+    D2D1_RECT_F NotificationHistoryCloseRect(const D2D1_RECT_F& panelRect) const
+    {
+        return D2D1::RectF(
+            panelRect.right - kOverlayUiPadding - 24.0f,
+            panelRect.top + kOverlayUiPadding - 1.0f,
+            panelRect.right - kOverlayUiPadding,
+            panelRect.top + kOverlayUiPadding + 23.0f);
     }
 
     static std::vector<std::wstring> NotificationBodyLines(const std::wstring& body)
@@ -4420,12 +5032,10 @@ private:
         return false;
     }
 
-    D2D1_RECT_F BuildNotificationContextMenuRect(int x, int y) const
+    D2D1_RECT_F BuildOverlayContextMenuRect(int x, int y, float width, float height) const
     {
         RECT rc{};
         GetClientRect(m_hwnd, &rc);
-        const float width = 132.0f;
-        const float height = 42.0f;
         const float pad = 8.0f;
         float left = static_cast<float>(x);
         float top = static_cast<float>(y);
@@ -4434,6 +5044,60 @@ private:
         left = ClampValue(left, pad, maxLeft);
         top = ClampValue(top, pad, maxTop);
         return D2D1::RectF(left, top, left + width, top + height);
+    }
+
+    D2D1_RECT_F BuildNotificationContextMenuRect(int x, int y) const
+    {
+        return BuildOverlayContextMenuRect(x, y, 132.0f, 42.0f);
+    }
+
+    static D2D1_RECT_F ContextMenuItemRect(const D2D1_RECT_F& menuRect, int index, int count)
+    {
+        const float pad = 6.0f;
+        const float gap = 5.0f;
+        const float itemH = (menuRect.bottom - menuRect.top - pad * 2.0f - gap * MaxValue(0, count - 1)) / MaxValue(1, count);
+        const float top = menuRect.top + pad + static_cast<float>(index) * (itemH + gap);
+        return D2D1::RectF(menuRect.left + pad, top, menuRect.right - pad, top + itemH);
+    }
+
+    bool HandleOverlayContextMenuPointerDown(int x, int y)
+    {
+        if (m_chatContextMenuVisible) {
+            const bool hitMenu = PointInRect(x, y, m_chatContextMenuRect);
+            const size_t index = m_chatContextMenuIndex;
+            HideOverlayContextMenus();
+            if (hitMenu && index < m_chatMessages.size() && m_onChatMessageAction) {
+                m_onChatMessageAction(m_chatMessages[index], L"delete");
+                return true;
+            }
+            return hitMenu;
+        }
+
+        if (m_userContextMenuVisible) {
+            const bool hitMenu = PointInRect(x, y, m_userContextMenuRect);
+            const size_t index = m_userContextMenuIndex;
+            std::wstring action;
+            if (hitMenu) {
+                if (PointInRect(x, y, ContextMenuItemRect(m_userContextMenuRect, 0, 3)))
+                    action = L"private";
+                else if (PointInRect(x, y, ContextMenuItemRect(m_userContextMenuRect, 1, 3)))
+                    action = L"mute";
+                else if (PointInRect(x, y, ContextMenuItemRect(m_userContextMenuRect, 2, 3)))
+                    action = L"kick";
+            }
+
+            HideOverlayContextMenus();
+            if (!action.empty() && index < m_onlineUsers.size() && m_onUserAction) {
+                m_onUserAction(m_onlineUsers[index], action);
+                return true;
+            }
+            return hitMenu;
+        }
+
+        if (m_notificationContextMenuVisible)
+            return HandleNotificationContextMenuPointerDown(x, y);
+
+        return false;
     }
 
     bool HandleNotificationContextMenuPointerDown(int x, int y)
@@ -4478,6 +5142,14 @@ private:
 
         if (layout.historyProgress <= 0.04f || !PointInRect(x, y, layout.historyRect))
             return false;
+
+        if (PointInRect(x, y, NotificationHistoryCloseRect(layout.historyRect))) {
+            ClearOverlayInputFocus();
+            if (m_onPanelClose)
+                m_onPanelClose(L"notification_history");
+            Invalidate();
+            return true;
+        }
 
         if (PointInRect(x, y, NotificationHistoryClearRect(layout.historyRect))) {
             ClearOverlayInputFocus();
@@ -4526,7 +5198,9 @@ private:
         const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
         if (!layout.hasHistory || layout.historyProgress <= 0.04f || !PointInRect(x, y, layout.historyRect))
             return false;
-        if (PointInRect(x, y, layout.historyToggleRect) || PointInRect(x, y, NotificationHistoryClearRect(layout.historyRect)))
+        if (PointInRect(x, y, layout.historyToggleRect) ||
+            PointInRect(x, y, NotificationHistoryClearRect(layout.historyRect)) ||
+            PointInRect(x, y, NotificationHistoryCloseRect(layout.historyRect)))
             return false;
 
         const D2D1_RECT_F contentRect = NotificationHistoryContentRect(layout.historyRect);
@@ -4696,10 +5370,11 @@ private:
         D2D1_RECT_F titleRect = D2D1::RectF(
             layout.historyToggleRect.right + kOverlayTogglePadding,
             rect.top + kOverlayUiPadding - 1.0f,
-            rect.right - kOverlayUiPadding - 78.0f,
+            NotificationHistoryClearRect(rect).left - 8.0f,
             rect.top + kOverlayUiPadding + 22.0f);
         m_overlayUi.DrawLabel(L"Notification History", m_overlayUi.TitleFormat(), titleRect);
         m_overlayUi.DrawButton(MakeOverlayButton(L"Clear", NotificationHistoryClearRect(rect), !m_notificationHistory.empty()));
+        m_overlayUi.DrawButton(MakeOverlayButton(L"X", NotificationHistoryCloseRect(rect)));
 
         std::wstring countText = m_notificationHistory.empty()
             ? L"No notifications yet"
@@ -4778,11 +5453,46 @@ private:
         m_overlayUi.DrawButton(deleteButton);
     }
 
+    void DrawChatContextMenu()
+    {
+        if (!m_chatContextMenuVisible || !m_rt)
+            return;
+
+        m_overlayUi.DrawGlassPanel(m_chatContextMenuRect, 8.0f);
+        OverlayButton deleteButton = MakeOverlayButton(
+            L"Delete",
+            ContextMenuItemRect(m_chatContextMenuRect, 0, 1),
+            m_chatContextMenuIndex < m_chatMessages.size() && !m_chatMessages[m_chatContextMenuIndex].id.empty());
+        m_overlayUi.DrawButton(deleteButton);
+    }
+
+    void DrawUserContextMenu()
+    {
+        if (!m_userContextMenuVisible || !m_rt)
+            return;
+
+        m_overlayUi.DrawGlassPanel(m_userContextMenuRect, 8.0f);
+        const bool hasUser = m_userContextMenuIndex < m_onlineUsers.size();
+        m_overlayUi.DrawButton(MakeOverlayButton(L"Private message", ContextMenuItemRect(m_userContextMenuRect, 0, 3), hasUser));
+        m_overlayUi.DrawButton(MakeOverlayButton(L"Mute 15m", ContextMenuItemRect(m_userContextMenuRect, 1, 3), hasUser));
+        m_overlayUi.DrawButton(MakeOverlayButton(L"Kick", ContextMenuItemRect(m_userContextMenuRect, 2, 3), hasUser));
+    }
+
+    void DrawOverlayContextMenus()
+    {
+        if (!m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return;
+
+        DrawNotificationContextMenu();
+        DrawChatContextMenu();
+        DrawUserContextMenu();
+    }
+
     void DrawNotificationInterface(const ViewState& view)
     {
         m_hasLastActiveNotificationRect = false;
         m_hasLastNotificationHistoryRect = false;
-        if ((!m_hasActiveNotification && !m_showNotificationHistory && !m_notificationContextMenuVisible) || !m_rt)
+        if ((!m_hasActiveNotification && !m_showNotificationHistory) || !m_rt)
             return;
         if (!m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
             return;
@@ -4790,7 +5500,6 @@ private:
         const NotificationLayout layout = BuildNotificationLayout(view);
         DrawNotificationHistory(layout);
         DrawActiveNotification(layout, view);
-        DrawNotificationContextMenu();
     }
 
     void DrawAlertOverlay(const ViewState& view)
@@ -5083,15 +5792,21 @@ private:
         ID2D1Brush* roadBrush,
         ID2D1Brush* casingBrush,
         const ViewState& view,
-        int zoom)
+        int zoom,
+        const std::shared_ptr<const std::vector<RoadDepictionRoute>>& roadRoutes,
+        const std::vector<std::wstring>& hiddenRoadDepictionIds)
     {
         if (!rt || !roadBrush || !casingBrush)
+            return;
+        if (!roadRoutes)
             return;
 
         const float casingWidth = zoom >= 8 ? 7.0f : 5.0f;
         const float roadWidth = zoom >= 8 ? 4.0f : 3.0f;
-        for (const RoadRoute& route : GetRoadRoutes()) {
-            if (route.points.size() < 2 || !AnyPointInViewStatic(view, route.points))
+        for (const RoadDepictionRoute& route : *roadRoutes) {
+            if (IsRoadDepictionHidden(hiddenRoadDepictionIds, route.label))
+                continue;
+            if (!RoadRouteIntersectsView(view, route))
                 continue;
 
             for (size_t i = 1; i < route.points.size(); ++i) {
@@ -5107,11 +5822,15 @@ private:
     {
         if (!m_rt || !m_showRoadDepictions)
             return;
+        if (!m_roadDepictionRoutes)
+            return;
 
         const float casingWidth = m_zoom >= 8 ? 7.0f : 5.0f;
         const float roadWidth = m_zoom >= 8 ? 4.0f : 3.0f;
-        for (const RoadRoute& route : GetRoadRoutes()) {
-            if (route.points.size() < 2 || !AnyPointInView(view, route.points))
+        for (const RoadDepictionRoute& route : *m_roadDepictionRoutes) {
+            if (IsRoadDepictionHidden(m_hiddenRoadDepictionIds, route.label))
+                continue;
+            if (!RoadRouteIntersectsView(view, route))
                 continue;
 
             for (size_t i = 1; i < route.points.size(); ++i) {
@@ -5127,13 +5846,20 @@ private:
     {
         if (!m_rt || !m_showRoadDepictions || !m_noteTextFormat || m_zoom < 7)
             return;
+        if (!m_roadDepictionRoutes)
+            return;
 
-        for (const RoadRoute& route : GetRoadRoutes()) {
+        std::unordered_set<std::wstring> drawnLabels;
+        for (const RoadDepictionRoute& route : *m_roadDepictionRoutes) {
+            if (IsRoadDepictionHidden(m_hiddenRoadDepictionIds, route.label))
+                continue;
+            if (!drawnLabels.insert(ToLower(route.label)).second)
+                continue;
             const GeoPoint& mid = route.points[route.points.size() / 2];
             if (IsGeoPointInView(view, mid.lat, mid.lon)) {
                 D2D1_POINT_2F p = GeoToScreen(view, mid.lat, mid.lon);
                 D2D1_RECT_F rect = D2D1::RectF(p.x + 6.0f, p.y - 12.0f, p.x + 74.0f, p.y + 12.0f);
-                m_rt->DrawTextW(route.label, static_cast<UINT32>(wcslen(route.label)), m_noteTextFormat.Get(), rect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                m_rt->DrawTextW(route.label.c_str(), static_cast<UINT32>(route.label.size()), m_noteTextFormat.Get(), rect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
         }
     }
@@ -5272,7 +5998,8 @@ private:
         m_overlayUi.DrawLabel(
             L"Map Controls",
             m_overlayUi.TitleFormat(),
-            D2D1::RectF(panel.left + 12.0f, panel.top + 11.0f, panel.right - 12.0f, panel.top + 34.0f));
+            D2D1::RectF(panel.left + 12.0f, panel.top + 11.0f, BuildToolbarCloseButtonRect().left - 6.0f, panel.top + 34.0f));
+        m_overlayUi.DrawButton(MakeOverlayButton(L"X", BuildToolbarCloseButtonRect()));
 
         m_overlayUi.DrawButton(MakeOverlayButton(L"Refresh", BuildRefreshButtonRect()));
         m_overlayUi.DrawButton(MakeOverlayButton(L"Reset View", BuildResetViewButtonRect()));
@@ -5281,6 +6008,18 @@ private:
         OverlayButton addButton = MakeOverlayButton(m_addNoteMode ? L"Adding" : L"+ Note", BuildAddNoteButtonRect());
         addButton.hot = addButton.hot || m_addNoteMode;
         m_overlayUi.DrawButton(addButton);
+
+        m_overlayUi.DrawLabel(
+            L"Map Display",
+            m_overlayUi.SmallFormat(),
+            D2D1::RectF(panel.left + 12.0f, panel.top + 119.0f, panel.right - 12.0f, panel.top + 134.0f),
+            m_overlayUi.MutedTextBrush());
+        OverlayButton ukButton = MakeOverlayButton(L"UK", BuildMapDisplayUkButtonRect());
+        ukButton.hot = ukButton.hot || !m_displayWorldMap;
+        m_overlayUi.DrawButton(ukButton);
+        OverlayButton worldButton = MakeOverlayButton(L"World", BuildMapDisplayWorldButtonRect());
+        worldButton.hot = worldButton.hot || m_displayWorldMap;
+        m_overlayUi.DrawButton(worldButton);
 
         if (m_addNoteMode) {
             D2D1_RECT_F promptRect = BuildAddNotePromptRect();
@@ -5649,7 +6388,9 @@ private:
                                 roadBrush.Get(),
                                 roadCasingBrush.Get(),
                                 request->boundaryView,
-                                request->zoom);
+                                request->zoom,
+                                request->roadRoutes,
+                                request->hiddenRoadDepictionIds);
                         }
 
                         hr = rt->EndDraw();
@@ -5764,7 +6505,9 @@ private:
                                 roadBrush.Get(),
                                 roadCasingBrush.Get(),
                                 request->boundaryView,
-                                request->key.z);
+                                request->key.z,
+                                request->roadRoutes,
+                                request->hiddenRoadDepictionIds);
                         }
 
                         hr = rt->EndDraw();
@@ -5817,6 +6560,8 @@ private:
         request->viewportHeight = view.height;
         request->displayWorldMap = m_displayWorldMap;
         request->includeRoadDepictions = !m_displayWorldMap && m_showRoadDepictions;
+        request->roadRoutes = m_roadDepictionRoutes;
+        request->hiddenRoadDepictionIds.assign(m_hiddenRoadDepictionIds.begin(), m_hiddenRoadDepictionIds.end());
 
         const ViewState cacheView = BuildViewStateForSize(request->cacheWidth, request->cacheHeight);
         request->centerWorld = cacheView.centerWorld;
@@ -5981,6 +6726,8 @@ private:
         request->generation = m_sceneTileGeneration;
         request->tileSize = kSceneTileSize;
         request->includeRoadDepictions = !key.world && m_showRoadDepictions;
+        request->roadRoutes = m_roadDepictionRoutes;
+        request->hiddenRoadDepictionIds.assign(m_hiddenRoadDepictionIds.begin(), m_hiddenRoadDepictionIds.end());
 
         const double tileLeft = static_cast<double>(key.x) * kSceneTileSize;
         const double tileTop = static_cast<double>(key.y) * kSceneTileSize;
@@ -6326,6 +7073,7 @@ private:
         return m_notificationUiMouseDown ||
             m_draggingToolbarPanel ||
             m_draggingUsersPanel ||
+            m_draggingPrivateChatPanel ||
             m_draggingNotificationHistoryScrollbar ||
             m_draggingNotificationHistoryContent;
     }
@@ -6630,7 +7378,9 @@ private:
             DrawNoteInterface(view);
             DrawNotificationInterface(view);
             DrawUsersPanel(view);
+            DrawPrivateChat(view);
             DrawResponderChat(view);
+            DrawOverlayContextMenus();
             UpdateFpsSample();
             DrawFpsCounter();
             TraceSlowPaintStage(L"DrawMapUi", GetTickCount64() - stageStartMs, interactive);
@@ -7209,6 +7959,7 @@ private:
     std::vector<TrafficAlert> m_alerts;
     std::vector<MapNote> m_notes;
     std::vector<ChatMessage> m_chatMessages;
+    std::vector<PrivateMessage> m_privateMessages;
     std::vector<OnlineUser> m_onlineUsers;
     std::vector<GeoPolygon> m_notificationPolygons;
     std::vector<GeoPoint> m_draftPolygon;
@@ -7230,7 +7981,12 @@ private:
     NotificationHistoryActivateCallback m_onNotificationHistoryActivate;
     NotificationHistoryDeleteCallback m_onNotificationHistoryDelete;
     ChatSendCallback m_onChatSend;
+    PrivateChatSendCallback m_onPrivateChatSend;
     ChatClearCallback m_onChatClear;
+    ChatMessageActionCallback m_onChatMessageAction;
+    UserActionCallback m_onUserAction;
+    PanelCloseCallback m_onPanelClose;
+    MapDisplayModeCallback m_onMapDisplayMode;
 
     int m_zoom = kDefaultZoom;
     double m_centerLat = kDefaultCenterLat;
@@ -7287,12 +8043,21 @@ private:
     bool m_showFloodOverlayLabels = false;
     bool m_showAreaLabels = true;
     bool m_showRoadDepictions = false;
+    std::shared_ptr<const std::vector<RoadDepictionRoute>> m_roadDepictionRoutes =
+        std::make_shared<std::vector<RoadDepictionRoute>>(BuiltInRoadDepictionRoutes());
+    std::unordered_set<std::wstring> m_hiddenRoadDepictionIds;
     bool m_displayWorldMap = false;
     bool m_showFpsCounter = false;
     bool m_showToolbarPanel = true;
     bool m_notificationContextMenuVisible = false;
     size_t m_notificationContextMenuIndex = static_cast<size_t>(-1);
     D2D1_RECT_F m_notificationContextMenuRect{};
+    bool m_chatContextMenuVisible = false;
+    size_t m_chatContextMenuIndex = static_cast<size_t>(-1);
+    D2D1_RECT_F m_chatContextMenuRect{};
+    bool m_userContextMenuVisible = false;
+    size_t m_userContextMenuIndex = static_cast<size_t>(-1);
+    D2D1_RECT_F m_userContextMenuRect{};
     bool m_draggingNotificationHistoryScrollbar = false;
     bool m_draggingNotificationHistoryContent = false;
     bool m_responderChatCollapsed = false;
@@ -7314,6 +8079,13 @@ private:
     bool m_draggingUsersPanel = false;
     float m_usersPanelOffsetX = 0.0f;
     float m_usersPanelOffsetY = 0.0f;
+    bool m_privateChatVisible = false;
+    bool m_privateChatInputFocused = false;
+    bool m_draggingPrivateChatPanel = false;
+    OnlineUser m_privateChatUser;
+    std::wstring m_privateChatDraft;
+    float m_privateChatOffsetX = 0.0f;
+    float m_privateChatOffsetY = 0.0f;
     bool m_draggingToolbarPanel = false;
     float m_toolbarPanelOffsetX = 0.0f;
     float m_toolbarPanelOffsetY = 0.0f;
@@ -7469,9 +8241,34 @@ void MapView::SetChatSendCallback(ChatSendCallback cb)
     m_impl->SetChatSendCallback(std::move(cb));
 }
 
+void MapView::SetPrivateChatSendCallback(PrivateChatSendCallback cb)
+{
+    m_impl->SetPrivateChatSendCallback(std::move(cb));
+}
+
 void MapView::SetChatClearCallback(ChatClearCallback cb)
 {
     m_impl->SetChatClearCallback(std::move(cb));
+}
+
+void MapView::SetChatMessageActionCallback(ChatMessageActionCallback cb)
+{
+    m_impl->SetChatMessageActionCallback(std::move(cb));
+}
+
+void MapView::SetUserActionCallback(UserActionCallback cb)
+{
+    m_impl->SetUserActionCallback(std::move(cb));
+}
+
+void MapView::SetPanelCloseCallback(PanelCloseCallback cb)
+{
+    m_impl->SetPanelCloseCallback(std::move(cb));
+}
+
+void MapView::SetMapDisplayModeCallback(MapDisplayModeCallback cb)
+{
+    m_impl->SetMapDisplayModeCallback(std::move(cb));
 }
 
 void MapView::SetChatClearEnabled(bool enabled)
@@ -7499,9 +8296,19 @@ void MapView::SetChatMessages(const std::vector<ChatMessage>& messages)
     m_impl->SetChatMessages(messages);
 }
 
+void MapView::SetPrivateMessages(const std::vector<PrivateMessage>& messages)
+{
+    m_impl->SetPrivateMessages(messages);
+}
+
 void MapView::SetOnlineUsers(const std::vector<OnlineUser>& users)
 {
     m_impl->SetOnlineUsers(users);
+}
+
+void MapView::OpenPrivateChat(const OnlineUser& user)
+{
+    m_impl->OpenPrivateChat(user);
 }
 
 void MapView::SetUsersVisible(bool visible)
@@ -7582,6 +8389,24 @@ void MapView::SetAreaLabelsVisible(bool visible)
 void MapView::SetRoadDepictionsVisible(bool visible)
 {
     m_impl->SetRoadDepictionsVisible(visible);
+}
+
+bool MapView::LoadRoadDepictionsFromFile(
+    const std::filesystem::path& path,
+    std::wstring* errorOut,
+    const std::unordered_set<std::wstring>* allowedLabels)
+{
+    return m_impl->LoadRoadDepictionsFromFile(path, errorOut, allowedLabels);
+}
+
+std::vector<std::wstring> MapView::RoadDepictionLabels() const
+{
+    return m_impl->RoadDepictionLabels();
+}
+
+void MapView::SetHiddenRoadDepictions(const std::unordered_set<std::wstring>& hiddenRoadLabels)
+{
+    m_impl->SetHiddenRoadDepictions(hiddenRoadLabels);
 }
 
 void MapView::SetDisplayWorldMap(bool visible)

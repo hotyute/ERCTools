@@ -48,6 +48,12 @@
     <ClCompile Include="parsing.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="populated_places.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="road_data.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="time_filters.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -102,6 +108,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="parsing.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="populated_places.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="road_data.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="time_filters.h">

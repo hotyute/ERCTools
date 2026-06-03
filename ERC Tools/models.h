@@ -145,7 +145,9 @@ struct AppNotification
 
 struct ChatMessage
 {
+    std::wstring id;
     std::wstring author;
+    std::wstring username;
     std::wstring position;
     std::wstring text;
     std::wstring timestamp;
@@ -153,11 +155,25 @@ struct ChatMessage
 
 struct OnlineUser
 {
+    std::wstring id;
     std::wstring displayName;
     std::wstring username;
     std::wstring position;
     std::wstring pod;
     std::wstring lastSeen;
+};
+
+struct PrivateMessage
+{
+    std::wstring id;
+    std::wstring senderUsername;
+    std::wstring senderDisplayName;
+    std::wstring senderPosition;
+    std::wstring recipientUsername;
+    std::wstring recipientDisplayName;
+    std::wstring recipientPosition;
+    std::wstring text;
+    std::wstring timestamp;
 };
 
 struct MapNote

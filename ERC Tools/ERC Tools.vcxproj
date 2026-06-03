@@ -30,6 +30,8 @@
     <ClCompile Include="map_overlay_ui.cpp" />
     <ClCompile Include="map_view.cpp" />
     <ClCompile Include="parsing.cpp" />
+    <ClCompile Include="populated_places.cpp" />
+    <ClCompile Include="road_data.cpp" />
     <ClCompile Include="time_filters.cpp" />
     <ClCompile Include="util.cpp" />
     <ClCompile Include="weather_data.cpp" />
@@ -50,6 +52,8 @@
     <ClInclude Include="map_view.h" />
     <ClInclude Include="models.h" />
     <ClInclude Include="parsing.h" />
+    <ClInclude Include="populated_places.h" />
+    <ClInclude Include="road_data.h" />
     <ClInclude Include="time_filters.h" />
     <ClInclude Include="util.h" />
     <ClInclude Include="weather_data.h" />

@@ -11,11 +11,13 @@
 #include "http.h"
 #include "map_view.h"
 #include "parsing.h"
+#include "populated_places.h"
 #include "time_filters.h"
 #include "util.h"
 #include "weather_data.h"
 #include "weather_intensity.h"
 
+#include <iomanip>
 #include <richedit.h>
 
 #ifndef MSFTEDIT_CLASS
@@ -89,6 +91,12 @@ constexpr int IDM_WEATHER_WARNING_POLYGONS = 2041;
 constexpr int IDM_WEATHER_SYSTEM_FORECASTS = 2042;
 constexpr int IDM_VIEW_FPS_COUNTER = 2043;
 constexpr int IDM_VIEW_MAP_CONTROLS = 2044;
+constexpr int IDM_FILE_ADMIN_LOG = 2045;
+constexpr int IDM_ABOUT_APP = 2046;
+constexpr int IDM_ABOUT_LEGEND = 2047;
+constexpr int IDM_VIEW_ROAD_DEPICTIONS_SHOW = 2048;
+constexpr int IDM_VIEW_ROAD_DEPICTIONS_LIST = 2049;
+constexpr int IDM_FILE_CACHE_MANAGER = 2050;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -110,6 +118,7 @@ constexpr int IDC_SETTINGS_SYNC_LOCAL_RADIO = 2118;
 constexpr int IDC_SETTINGS_SYNC_SERVER_RADIO = 2119;
 constexpr int IDC_SETTINGS_WORLD_BOUNDARY_BTN = 2120;
 constexpr int IDC_SETTINGS_PUSH_REMOTE_BTN = 2121;
+constexpr int IDC_SETTINGS_ROADS_BTN = 2122;
 constexpr int IDC_INCIDENT_FILTERS_TITLE_LABEL = 2201;
 constexpr int IDC_INCIDENT_FILTERS_DESC_LABEL = 2202;
 constexpr int IDC_INCIDENT_FILTERS_SEVERITY_LABEL = 2203;
@@ -171,12 +180,14 @@ constexpr int IDC_EARTHQUAKE_LIST_CLOSE_BTN = 2506;
 constexpr int IDC_EARTHQUAKE_LIST_PERIOD_COMBO = 2507;
 constexpr int IDC_EARTHQUAKE_LIST_DATE_RADIO = 2508;
 constexpr int IDC_EARTHQUAKE_LIST_PERIOD_RADIO = 2509;
+constexpr int IDC_EARTHQUAKE_LIST_POPULATED_RADIUS_EDIT = 2510;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_MAG_EDIT = 2521;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN = 2522;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_TIME_EDIT = 2523;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_COMBO = 2524;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_DATE_RADIO = 2525;
 constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_RADIO = 2526;
+constexpr int IDC_EARTHQUAKE_NOTIFICATIONS_POPULATED_RADIUS_EDIT = 2527;
 constexpr int IDC_WEATHER_SYSTEMS_LIST_LISTVIEW = 2541;
 constexpr int IDC_WEATHER_SYSTEMS_LIST_REFRESH_BTN = 2542;
 constexpr int IDC_WEATHER_SYSTEMS_LIST_CLOSE_BTN = 2543;
@@ -220,6 +231,24 @@ constexpr int IDC_ACCOUNT_CREATOR_ACTIVE = 2645;
 constexpr int IDC_ACCOUNT_CREATOR_CREATE = 2646;
 constexpr int IDC_ACCOUNT_CREATOR_CLOSE = 2647;
 constexpr int IDC_ACCOUNT_CREATOR_STATUS = 2648;
+constexpr int IDC_ADMIN_LOG_TYPE_COMBO = 2661;
+constexpr int IDC_ADMIN_LOG_LIST = 2662;
+constexpr int IDC_ADMIN_LOG_REFRESH_BTN = 2663;
+constexpr int IDC_ADMIN_LOG_CLOSE_BTN = 2664;
+constexpr int IDC_ROAD_DEPICTIONS_LIST = 2681;
+constexpr int IDC_ROAD_DEPICTIONS_ALL_BTN = 2682;
+constexpr int IDC_ROAD_DEPICTIONS_NONE_BTN = 2683;
+constexpr int IDC_ROAD_DEPICTIONS_CLOSE_BTN = 2684;
+constexpr int IDC_ROAD_DEPICTIONS_ROAD_EDIT = 2685;
+constexpr int IDC_ROAD_DEPICTIONS_ADD_BTN = 2686;
+constexpr int IDC_ROAD_DEPICTIONS_REMOVE_BTN = 2687;
+constexpr int IDC_CACHE_UK_BOUNDARY_BTN = 2701;
+constexpr int IDC_CACHE_WORLD_BOUNDARY_BTN = 2702;
+constexpr int IDC_CACHE_ROADS_BTN = 2703;
+constexpr int IDC_CACHE_POPULATED_PLACES_BTN = 2704;
+constexpr int IDC_CACHE_CLOSE_BTN = 2705;
+constexpr int IDC_CACHE_STATUS_LABEL = 2706;
+constexpr int IDC_CACHE_PROGRESS = 2707;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
 constexpr const wchar_t* kIncidentNotificationsClassName = L"TrafficEnglandIncidentNotificationsWindow";
@@ -235,11 +264,18 @@ constexpr const wchar_t* kFloodsListClassName = L"ERCToolsFloodsListWindow";
 constexpr const wchar_t* kTemplatesWizardClassName = L"TrafficEnglandTemplatesWizardWindow";
 constexpr const wchar_t* kTemplatesEditorClassName = L"TrafficEnglandTemplatesEditorWindow";
 constexpr const wchar_t* kAccountCreatorClassName = L"ERCToolsAccountCreatorWindow";
+constexpr const wchar_t* kAdminLogClassName = L"ERCToolsAdminLogWindow";
+constexpr const wchar_t* kRoadDepictionsClassName = L"ERCToolsRoadDepictionsWindow";
+constexpr const wchar_t* kLegendClassName = L"ERCToolsLegendWindow";
+constexpr const wchar_t* kCacheManagerClassName = L"ERCToolsCacheManagerWindow";
 constexpr UINT WM_APP_NOTIFY_ICON = WM_APP + 20;
 constexpr UINT WM_APP_UPDATE_READY = WM_APP + 21;
 constexpr UINT WM_APP_SETTINGS_SYNC_READY = WM_APP + 22;
 constexpr UINT WM_APP_WEATHER_WARNINGS_READY = WM_APP + 23;
 constexpr UINT WM_APP_FLOODS_READY = WM_APP + 24;
+constexpr UINT WM_APP_ADMIN_LOG_READY = WM_APP + 25;
+constexpr UINT WM_APP_ROAD_DEPICTIONS_READY = WM_APP + 26;
+constexpr UINT WM_APP_POPULATED_PLACES_READY = WM_APP + 27;
 constexpr UINT kNotificationIconId = 1;
 constexpr UINT_PTR kAlertRefreshTimerId = 1;
 constexpr UINT_PTR kServerPollTimerId = 2;
@@ -250,6 +286,10 @@ constexpr UINT kServerPollIntervalMs = 2000;
 constexpr const wchar_t* kWeatherSystemsSourceUrl = L"https://www.tropicalstormrisk.com/tracker/dynamic/main.html";
 constexpr const wchar_t* kWeatherWarningsSourceUrl = L"https://weather.metoffice.gov.uk/warnings-and-advice/uk-warnings";
 constexpr const wchar_t* kFloodsSourceUrl = L"https://environment.data.gov.uk/flood-monitoring/id/floods?_view=full";
+constexpr const wchar_t* kOpenRoadsFeatureQueryUrl = L"https://services.arcgis.com/qHLhLQrcvEnxjtPr/arcgis/rest/services/OS_OpenRoads/FeatureServer/1/query";
+constexpr const wchar_t* kPopulatedPlacesSourceUrl = L"https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_populated_places_simple.geojson";
+static std::atomic_bool g_roadDepictionsDownloadInProgress{ false };
+static std::atomic_bool g_populatedPlacesDownloadInProgress{ false };
 
 struct FeedResult
 {
@@ -264,12 +304,35 @@ enum class BoundaryDownloadKind
     World
 };
 
+enum class CacheActivity
+{
+    Boundary,
+    RoadDepictions,
+    PopulatedPlaces
+};
+
 struct BoundaryDownloadResult
 {
     BoundaryDownloadKind kind = BoundaryDownloadKind::Uk;
     bool ok = false;
     std::wstring error;
     std::filesystem::path filePath;
+};
+
+struct RoadDepictionsDownloadResult
+{
+    bool ok = false;
+    std::wstring error;
+    std::filesystem::path filePath;
+    size_t featureCount = 0;
+};
+
+struct PopulatedPlacesDownloadResult
+{
+    bool ok = false;
+    std::wstring error;
+    std::filesystem::path filePath;
+    std::vector<PopulatedPlace> places;
 };
 
 struct EarthquakeResult
@@ -316,6 +379,10 @@ enum class ServerAction
     UpdateNote,
     DeleteNote,
     ClearChat,
+    DeleteChatMessage,
+    KickUser,
+    MuteUser,
+    SendPrivateMessage,
     CreateAccount
 };
 
@@ -326,9 +393,11 @@ struct ServerResult
     bool chatOk = false;
     bool notesOk = false;
     bool usersOk = false;
+    bool privateMessagesOk = false;
     uint32_t collaborationVersion = 0;
     std::wstring error;
     std::vector<ChatMessage> chat;
+    std::vector<PrivateMessage> privateMessages;
     std::vector<MapNote> notes;
     std::vector<OnlineUser> users;
 };
@@ -339,6 +408,25 @@ struct GlobalSettingsResult
     bool push = false;
     std::wstring error;
     json settings;
+};
+
+struct AdminLogEntry
+{
+    std::wstring event;
+    std::wstring username;
+    std::wstring displayName;
+    std::wstring position;
+    std::wstring pod;
+    std::wstring timestamp;
+    std::wstring actor;
+    std::wstring details;
+};
+
+struct AdminLogResult
+{
+    bool ok = false;
+    std::wstring error;
+    std::vector<AdminLogEntry> entries;
 };
 
 struct ReportTemplate
@@ -957,6 +1045,227 @@ static void ScheduleBackgroundTask(Fn&& fn)
     std::thread(std::forward<Fn>(fn)).detach();
 }
 
+static std::wstring UrlEncodeUtf8(const std::wstring& value)
+{
+    const std::string utf8 = WideToUtf8(value);
+    std::ostringstream encoded;
+    encoded << std::uppercase << std::hex;
+    for (unsigned char ch : utf8) {
+        if ((ch >= 'A' && ch <= 'Z') ||
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') ||
+            ch == '-' || ch == '_' || ch == '.' || ch == '~')
+        {
+            encoded << static_cast<char>(ch);
+        }
+        else {
+            encoded << '%' << std::setw(2) << std::setfill('0') << static_cast<int>(ch);
+        }
+    }
+    return Utf8ToWide(encoded.str());
+}
+
+static std::wstring NormalizeRoadDepictionRoadLabel(std::wstring label)
+{
+    label = Trim(label);
+    std::wstring normalised;
+    normalised.reserve(label.size());
+    bool pendingSpace = false;
+    for (wchar_t ch : label) {
+        if (iswspace(ch)) {
+            pendingSpace = !normalised.empty();
+            continue;
+        }
+        if (pendingSpace && !normalised.empty())
+            normalised.push_back(L' ');
+        pendingSpace = false;
+        normalised.push_back(static_cast<wchar_t>(towupper(ch)));
+    }
+    return Trim(normalised);
+}
+
+static std::vector<std::wstring> DefaultRoadDepictionRoadLabels()
+{
+    return {
+        L"M1", L"M4", L"M5", L"M6", L"M25", L"M62",
+        L"A1(M)", L"A14", L"A27"
+    };
+}
+
+static std::vector<std::wstring> NormaliseRoadDepictionRoadLabels(std::vector<std::wstring> labels)
+{
+    std::vector<std::wstring> out;
+    std::unordered_set<std::wstring> seen;
+    out.reserve(labels.size());
+    for (std::wstring& label : labels) {
+        label = NormalizeRoadDepictionRoadLabel(std::move(label));
+        if (label.empty())
+            continue;
+        if (seen.insert(ToLower(label)).second)
+            out.push_back(std::move(label));
+    }
+    std::sort(out.begin(), out.end(), [](const std::wstring& a, const std::wstring& b) {
+        return ToLower(a) < ToLower(b);
+        });
+    return out;
+}
+
+static std::unordered_set<std::wstring> RoadDepictionRoadSet(const std::vector<std::wstring>& labels)
+{
+    std::unordered_set<std::wstring> out;
+    for (const std::wstring& label : labels) {
+        std::wstring normalised = NormalizeRoadDepictionRoadLabel(label);
+        if (!normalised.empty())
+            out.insert(normalised);
+    }
+    return out;
+}
+
+static std::wstring BuildOpenRoadsWhereClause(const std::vector<std::wstring>& roads)
+{
+    std::wstring where;
+    for (const std::wstring& road : roads) {
+        std::wstring safeRoad = NormalizeRoadDepictionRoadLabel(road);
+        if (safeRoad.empty())
+            continue;
+        size_t quote = 0;
+        while ((quote = safeRoad.find(L'\'', quote)) != std::wstring::npos) {
+            safeRoad.insert(quote, 1, L'\'');
+            quote += 2;
+        }
+        if (!where.empty())
+            where += L" OR ";
+        where += L"roadNumber='";
+        where += safeRoad;
+        where += L"'";
+    }
+    return where.empty() ? L"1=0" : where;
+}
+
+static std::wstring BuildOpenRoadsDownloadPageUrl(const std::vector<std::wstring>& roads, size_t offset, size_t pageSize)
+{
+    return std::wstring(kOpenRoadsFeatureQueryUrl) +
+        L"?where=" + UrlEncodeUtf8(BuildOpenRoadsWhereClause(roads)) +
+        L"&outFields=roadNumber"
+        L"&returnGeometry=true"
+        L"&outSR=4326"
+        L"&f=geojson"
+        L"&geometryPrecision=5"
+        L"&orderByFields=OBJECTID"
+        L"&resultRecordCount=" + std::to_wstring(pageSize) +
+        L"&resultOffset=" + std::to_wstring(offset);
+}
+
+static bool DownloadOpenRoadsGeoJsonToFile(
+    const std::filesystem::path& cachePath,
+    const std::vector<std::wstring>& roads,
+    size_t& featureCountOut,
+    std::wstring& errorOut)
+{
+    featureCountOut = 0;
+    if (roads.empty()) {
+        errorOut = L"Add at least one road in the Road Depictions window before downloading.";
+        return false;
+    }
+
+    const size_t pageSize = 2000;
+    std::filesystem::path tempPath = cachePath;
+    tempPath += L".tmp";
+
+    std::ofstream out(tempPath, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        errorOut = L"Could not open the road depictions cache for writing.";
+        return false;
+    }
+
+    out << "{\"type\":\"FeatureCollection\",\"name\":\"OS Open Roads selected roads\",\"features\":[";
+
+    bool firstFeature = true;
+    const size_t roadsPerQuery = 24;
+    for (size_t start = 0; start < roads.size(); start += roadsPerQuery) {
+        const size_t end = std::min(start + roadsPerQuery, roads.size());
+        std::vector<std::wstring> roadChunk(roads.begin() + static_cast<std::ptrdiff_t>(start), roads.begin() + static_cast<std::ptrdiff_t>(end));
+
+        for (size_t offset = 0; ; ) {
+            std::string body;
+            std::wstring pageError;
+            if (!HttpGetText(BuildOpenRoadsDownloadPageUrl(roadChunk, offset, pageSize), body, pageError)) {
+                errorOut = L"OS Open Roads download failed at offset " + std::to_wstring(offset) + L": " + pageError;
+                out.close();
+                std::error_code ec;
+                std::filesystem::remove(tempPath, ec);
+                return false;
+            }
+
+            json root;
+            try {
+                root = json::parse(body.empty() ? "{}" : body);
+            }
+            catch (const std::exception& e) {
+                errorOut = L"OS Open Roads response could not be parsed: " + Utf8ToWide(e.what());
+                out.close();
+                std::error_code ec;
+                std::filesystem::remove(tempPath, ec);
+                return false;
+            }
+
+            auto featuresIt = root.find("features");
+            if (featuresIt == root.end() || !featuresIt->is_array()) {
+                errorOut = L"OS Open Roads response did not contain a GeoJSON feature list.";
+                out.close();
+                std::error_code ec;
+                std::filesystem::remove(tempPath, ec);
+                return false;
+            }
+
+            const size_t pageCount = featuresIt->size();
+            if (pageCount == 0)
+                break;
+
+            for (const json& feature : *featuresIt) {
+                if (!firstFeature)
+                    out << ',';
+                out << feature.dump();
+                firstFeature = false;
+                ++featureCountOut;
+            }
+
+            if (!out.good()) {
+                errorOut = L"Could not write all road depictions to the local cache.";
+                out.close();
+                std::error_code ec;
+                std::filesystem::remove(tempPath, ec);
+                return false;
+            }
+
+            offset += pageCount;
+            if (pageCount < pageSize)
+                break;
+        }
+    }
+
+    out << "]}";
+    out.close();
+    if (!out.good()) {
+        errorOut = L"Could not finalise the road depictions cache.";
+        std::error_code ec;
+        std::filesystem::remove(tempPath, ec);
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(cachePath, ec);
+    ec.clear();
+    std::filesystem::rename(tempPath, cachePath, ec);
+    if (ec) {
+        errorOut = L"Could not replace the road depictions cache: " + Utf8ToWide(ec.message());
+        std::filesystem::remove(tempPath, ec);
+        return false;
+    }
+
+    return true;
+}
+
 static bool TryParseRefreshIntervalMilliseconds(const std::wstring& text, UINT& millisecondsOut)
 {
     std::wstring value = ToLower(Trim(text));
@@ -1180,6 +1489,27 @@ static double KnotsToMph(double knots)
     return knots * 1.150779448;
 }
 
+static double MilesToKm(double miles)
+{
+    return miles / 0.621371192237334;
+}
+
+static double KmToMiles(double km)
+{
+    return km * 0.621371192237334;
+}
+
+static std::wstring FormatMilesSettingText(double miles)
+{
+    wchar_t buffer[32]{};
+    const double rounded = std::round(miles);
+    if (std::fabs(miles - rounded) < 0.05)
+        swprintf_s(buffer, L"%.0f", rounded);
+    else
+        swprintf_s(buffer, L"%.1f", miles);
+    return buffer;
+}
+
 static bool TryExtractAlertDelayMinutes(const TrafficAlert& alert, double& minutesOut)
 {
     std::wstring delayText = ExtractLabeledNotificationField(alert.description, L"Delay");
@@ -1281,7 +1611,9 @@ static std::vector<ChatMessage> ParseChatMessages(const json& root)
             continue;
 
         ChatMessage msg;
+        msg.id = PickString(item, { "id", "messageId" });
         msg.author = PickString(item, { "author", "user", "name" });
+        msg.username = PickString(item, { "username", "login" });
         msg.position = PickString(item, { "position", "role" });
         msg.text = PickString(item, { "text", "message", "body" });
         msg.timestamp = PickString(item, { "timestamp", "time", "createdAt" });
@@ -1311,6 +1643,7 @@ static std::vector<OnlineUser> ParseOnlineUsers(const json& root)
             continue;
 
         OnlineUser user;
+        user.id = PickString(item, { "id", "userId" });
         user.displayName = PickString(item, { "displayName", "display_name", "name" });
         user.username = PickString(item, { "username", "user" });
         user.position = PickString(item, { "position", "role" });
@@ -1320,6 +1653,71 @@ static std::vector<OnlineUser> ParseOnlineUsers(const json& root)
             out.push_back(std::move(user));
     }
 
+    return out;
+}
+
+static std::vector<PrivateMessage> ParsePrivateMessages(const json& root)
+{
+    std::vector<PrivateMessage> out;
+    const json* arr = nullptr;
+    if (root.is_array())
+        arr = &root;
+    else if (root.contains("privateMessages") && root["privateMessages"].is_array())
+        arr = &root["privateMessages"];
+    else if (root.contains("messages") && root["messages"].is_array())
+        arr = &root["messages"];
+
+    if (!arr)
+        return out;
+
+    for (const auto& item : *arr) {
+        if (!item.is_object())
+            continue;
+
+        PrivateMessage msg;
+        msg.id = PickString(item, { "id", "messageId" });
+        msg.senderUsername = PickString(item, { "senderUsername", "sender_username" });
+        msg.senderDisplayName = PickString(item, { "senderDisplayName", "sender_display_name" });
+        msg.senderPosition = PickString(item, { "senderPosition", "sender_position" });
+        msg.recipientUsername = PickString(item, { "recipientUsername", "recipient_username" });
+        msg.recipientDisplayName = PickString(item, { "recipientDisplayName", "recipient_display_name" });
+        msg.recipientPosition = PickString(item, { "recipientPosition", "recipient_position" });
+        msg.text = PickString(item, { "text", "message", "body" });
+        msg.timestamp = PickString(item, { "timestamp", "time", "createdAt" });
+        if (!msg.text.empty())
+            out.push_back(std::move(msg));
+    }
+
+    return out;
+}
+
+static std::vector<AdminLogEntry> ParseAdminLogEntries(const json& root)
+{
+    std::vector<AdminLogEntry> out;
+    const json* arr = nullptr;
+    if (root.is_array())
+        arr = &root;
+    else if (root.contains("items") && root["items"].is_array())
+        arr = &root["items"];
+    else if (root.contains("logs") && root["logs"].is_array())
+        arr = &root["logs"];
+    if (!arr)
+        return out;
+
+    for (const auto& item : *arr) {
+        if (!item.is_object())
+            continue;
+        AdminLogEntry entry;
+        entry.event = PickString(item, { "event", "eventType", "type" });
+        entry.username = PickString(item, { "username", "user" });
+        entry.displayName = PickString(item, { "displayName", "display_name", "name" });
+        entry.position = PickString(item, { "position", "role" });
+        entry.pod = PickString(item, { "pod" });
+        entry.timestamp = PickString(item, { "timestamp", "time", "createdAt" });
+        entry.actor = PickString(item, { "actor", "actorUsername" });
+        entry.details = PickString(item, { "details", "message" });
+        out.push_back(std::move(entry));
+    }
     return out;
 }
 
@@ -1685,6 +2083,18 @@ private:
             OnGlobalSettingsSyncReady(reinterpret_cast<GlobalSettingsResult*>(lParam));
             return 0;
 
+        case WM_APP_ADMIN_LOG_READY:
+            OnAdminLogReady(reinterpret_cast<AdminLogResult*>(lParam));
+            return 0;
+
+        case WM_APP_ROAD_DEPICTIONS_READY:
+            OnRoadDepictionsReady(reinterpret_cast<RoadDepictionsDownloadResult*>(lParam));
+            return 0;
+
+        case WM_APP_POPULATED_PLACES_READY:
+            OnPopulatedPlacesReady(reinterpret_cast<PopulatedPlacesDownloadResult*>(lParam));
+            return 0;
+
         case WM_CLOSE:
             LogoutOnlineSession(L"client_closed");
             DestroyWindow(m_hwnd);
@@ -1728,7 +2138,7 @@ private:
     {
         INITCOMMONCONTROLSEX icc{};
         icc.dwSize = sizeof(icc);
-        icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES | ICC_BAR_CLASSES;
+        icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES | ICC_BAR_CLASSES | ICC_PROGRESS_CLASS;
         InitCommonControlsEx(&icc);
 
         EnableModernWindowFrame(m_hwnd);
@@ -1875,6 +2285,12 @@ private:
         if (!m_map.LoadWorldBoundaryFromFile(GetWorldBoundaryCachePath(), &worldBoundaryError)) {
             OutputDebugStringW((L"World boundary cache load: " + worldBoundaryError + L"\n").c_str());
         }
+        std::wstring roadDepictionsError;
+        std::unordered_set<std::wstring> allowedRoadDepictions = RoadDepictionRoadSet(m_roadDepictionRoadLabels);
+        if (!m_map.LoadRoadDepictionsFromFile(GetRoadDepictionsCachePath(), &roadDepictionsError, &allowedRoadDepictions)) {
+            OutputDebugStringW((L"Road depictions cache load: " + roadDepictionsError + L"\n").c_str());
+        }
+        LoadPopulatedPlacesCache(false);
 
         m_map.SetSelectCallback([this](const std::wstring& id) {
             SelectAlertById(id, true);
@@ -1915,8 +2331,23 @@ private:
         m_map.SetChatSendCallback([this](const std::wstring& text) {
             SendChatTextAsync(text);
             });
+        m_map.SetPrivateChatSendCallback([this](const std::wstring& recipientUsername, const std::wstring& text) {
+            SendPrivateMessageAsync(recipientUsername, text);
+            });
         m_map.SetChatClearCallback([this]() {
             ClearResponderChatAsync();
+            });
+        m_map.SetChatMessageActionCallback([this](const ChatMessage& message, const std::wstring& action) {
+            HandleResponderChatMessageAction(message, action);
+            });
+        m_map.SetUserActionCallback([this](const OnlineUser& user, const std::wstring& action) {
+            HandleOnlineUserAction(user, action);
+            });
+        m_map.SetPanelCloseCallback([this](const std::wstring& panelName) {
+            HandleMapOverlayPanelClose(panelName);
+            });
+        m_map.SetMapDisplayModeCallback([this](bool displayWorldMap) {
+            SetMapDisplayMode(displayWorldMap);
             });
         m_map.SetChatClearEnabled(CanClearResponderChat());
         m_map.SetNotificationPolygons(m_incidentNotificationRegions);
@@ -1930,10 +2361,12 @@ private:
         m_map.SetFloodOverlayVisible(m_showFloods && m_showFloodOverlayLabels);
         m_map.SetAreaLabelsVisible(m_showAreaLabels);
         m_map.SetRoadDepictionsVisible(m_showRoadDepictions);
+        m_map.SetHiddenRoadDepictions(m_hiddenRoadDepictionIds);
         m_map.SetDisplayWorldMap(m_displayWorldMap);
         m_map.SetFpsCounterVisible(m_showFpsCounter);
         m_map.SetToolbarVisible(m_showMapControls);
         RenderChatHistory();
+        RenderPrivateMessages();
         RenderOnlineUsers();
         RenderNotificationHistory();
 
@@ -2059,12 +2492,20 @@ private:
             ShowSettingsWindow();
             break;
 
+        case IDM_FILE_CACHE_MANAGER:
+            ShowCacheManagerWindow();
+            break;
+
         case IDM_FILE_USERS:
             ToggleUsersOverlay();
             break;
 
         case IDM_FILE_ACCOUNT_CREATOR:
             ShowAccountCreatorWindow();
+            break;
+
+        case IDM_FILE_ADMIN_LOG:
+            ShowAdminLogWindow();
             break;
 
         case IDM_FILE_LOGOUT:
@@ -2220,6 +2661,10 @@ private:
             ToggleRoadDepictions();
             break;
 
+        case IDM_VIEW_ROAD_DEPICTIONS_LIST:
+            ShowRoadDepictionsWindow();
+            break;
+
         case IDM_VIEW_FPS_COUNTER:
             ToggleFpsCounter();
             break;
@@ -2229,7 +2674,12 @@ private:
             break;
 
         case IDM_ABOUT:
+        case IDM_ABOUT_APP:
             ShowAboutDialog();
+            break;
+
+        case IDM_ABOUT_LEGEND:
+            ShowLegendWindow();
             break;
         }
     }
@@ -2390,6 +2840,27 @@ private:
     bool CanManageAccounts() const
     {
         return CurrentPositionRank() >= 3;
+    }
+
+    int PositionRankText(const std::wstring& position) const
+    {
+        std::wstring role = ToLower(Trim(position));
+        if (role == L"administrator" || role == L"admin")
+            return 4;
+        if (role == L"supervisor" || role == L"sup")
+            return 3;
+        if (role == L"manager" || role == L"mgr")
+            return 2;
+        if (role == L"erc")
+            return 1;
+        return 0;
+    }
+
+    bool CanModerateUser(const OnlineUser& user) const
+    {
+        const int current = CurrentPositionRank();
+        const int target = PositionRankText(user.position);
+        return current >= 2 && target > 0 && current > target;
     }
 
     void LogoutOnlineSession(const std::wstring& reason = L"client_closed")
@@ -2635,10 +3106,36 @@ private:
             readBool("showFloodOverlayLabels", m_showFloodOverlayLabels);
             readBool("showAreaLabels", m_showAreaLabels);
             readBool("showRoadDepictions", m_showRoadDepictions);
+            auto hiddenRoadDepictionsIt = settings->find("hiddenRoadDepictions");
+            if (hiddenRoadDepictionsIt != settings->end() && hiddenRoadDepictionsIt->is_array()) {
+                m_hiddenRoadDepictionIds.clear();
+                for (const json& item : *hiddenRoadDepictionsIt) {
+                    if (item.is_string())
+                        m_hiddenRoadDepictionIds.insert(NormalizeRoadDepictionRoadLabel(Utf8ToWide(item.get<std::string>())));
+                }
+            }
+            auto roadDepictionRoadsIt = settings->find("roadDepictionRoads");
+            if (roadDepictionRoadsIt != settings->end() && roadDepictionRoadsIt->is_array()) {
+                std::vector<std::wstring> labels;
+                for (const json& item : *roadDepictionRoadsIt) {
+                    if (item.is_string())
+                        labels.push_back(Utf8ToWide(item.get<std::string>()));
+                }
+                labels = NormaliseRoadDepictionRoadLabels(std::move(labels));
+                if (!labels.empty())
+                    m_roadDepictionRoadLabels = std::move(labels);
+            }
             readString("earthquakeListMagnitudeText", m_earthquakeListMagnitudeText);
             readString("earthquakeListTimeText", m_earthquakeListTimeText);
             readBool("earthquakeListUseDateFilter", m_earthquakeListUseDateFilter);
             readString("earthquakeListPeriodText", m_earthquakeListPeriodText);
+            readString("earthquakeListPopulatedRadiusText", m_earthquakeListPopulatedRadiusText);
+            readDouble("earthquakeListPopulatedRadiusMiles", m_earthquakeListPopulatedRadiusMiles);
+            double parsedListRadius = 0.0;
+            if (TryParseDoubleText(m_earthquakeListPopulatedRadiusText, parsedListRadius))
+                m_earthquakeListPopulatedRadiusMiles = MaxValue(0.0, parsedListRadius);
+            else if (m_earthquakeListPopulatedRadiusText.empty() && m_earthquakeListPopulatedRadiusMiles > 0.0)
+                m_earthquakeListPopulatedRadiusText = FormatMilesSettingText(m_earthquakeListPopulatedRadiusMiles);
             readString("weatherSystemsListForecastText", m_weatherSystemsListForecastText);
             readString("weatherWarningsListPeriodText", m_weatherWarningsListPeriodText);
             readString("floodsListPeriodText", m_floodsListPeriodText);
@@ -2663,9 +3160,27 @@ private:
             readString("earthquakeNotificationTimeText", m_earthquakeNotificationTimeText);
             readBool("earthquakeNotificationUseDateFilter", m_earthquakeNotificationUseDateFilter);
             readString("earthquakeNotificationPeriodText", m_earthquakeNotificationPeriodText);
+            readString("earthquakeNotificationPopulatedRadiusText", m_earthquakeNotificationPopulatedRadiusText);
+            const bool hasNotificationRadiusMiles = settings->find("earthquakeNotificationPopulatedRadiusMiles") != settings->end();
+            if (hasNotificationRadiusMiles) {
+                readDouble("earthquakeNotificationPopulatedRadiusMiles", m_earthquakeNotificationPopulatedRadiusMiles);
+            }
+            else {
+                double legacyRadiusKm = 0.0;
+                readDouble("earthquakeNotificationPopulatedRadiusKm", legacyRadiusKm);
+                if (legacyRadiusKm > 0.0) {
+                    m_earthquakeNotificationPopulatedRadiusMiles = KmToMiles(legacyRadiusKm);
+                    m_earthquakeNotificationPopulatedRadiusText = FormatMilesSettingText(m_earthquakeNotificationPopulatedRadiusMiles);
+                }
+            }
             double parsedMag = 0.0;
             if (TryParseDoubleText(m_earthquakeNotificationMagnitudeText, parsedMag))
                 m_earthquakeNotificationMagnitude = parsedMag;
+            double parsedRadius = 0.0;
+            if (TryParseDoubleText(m_earthquakeNotificationPopulatedRadiusText, parsedRadius))
+                m_earthquakeNotificationPopulatedRadiusMiles = MaxValue(0.0, parsedRadius);
+            else if (m_earthquakeNotificationPopulatedRadiusText.empty() && m_earthquakeNotificationPopulatedRadiusMiles > 0.0)
+                m_earthquakeNotificationPopulatedRadiusText = FormatMilesSettingText(m_earthquakeNotificationPopulatedRadiusMiles);
             readString("weatherSystemNotificationWindText", m_weatherSystemNotificationWindText);
             const bool hasWindMphSetting = settings->find("weatherSystemNotificationWindMph") != settings->end();
             const bool hasLegacyWindKnotsSetting = settings->find("weatherSystemNotificationWindKnots") != settings->end();
@@ -2987,10 +3502,18 @@ private:
             settings["showFloodOverlayLabels"] = m_showFloodOverlayLabels;
             settings["showAreaLabels"] = m_showAreaLabels;
             settings["showRoadDepictions"] = m_showRoadDepictions;
+            settings["roadDepictionRoads"] = json::array();
+            for (const std::wstring& id : m_roadDepictionRoadLabels)
+                settings["roadDepictionRoads"].push_back(WideToUtf8(id));
+            settings["hiddenRoadDepictions"] = json::array();
+            for (const std::wstring& id : m_hiddenRoadDepictionIds)
+                settings["hiddenRoadDepictions"].push_back(WideToUtf8(id));
             settings["earthquakeListMagnitudeText"] = WideToUtf8(m_earthquakeListMagnitudeText);
             settings["earthquakeListTimeText"] = WideToUtf8(m_earthquakeListTimeText);
             settings["earthquakeListUseDateFilter"] = m_earthquakeListUseDateFilter;
             settings["earthquakeListPeriodText"] = WideToUtf8(m_earthquakeListPeriodText);
+            settings["earthquakeListPopulatedRadiusText"] = WideToUtf8(m_earthquakeListPopulatedRadiusText);
+            settings["earthquakeListPopulatedRadiusMiles"] = m_earthquakeListPopulatedRadiusMiles;
             settings["weatherSystemsListForecastText"] = WideToUtf8(m_weatherSystemsListForecastText);
             settings["weatherWarningsListPeriodText"] = WideToUtf8(m_weatherWarningsListPeriodText);
             settings["floodsListPeriodText"] = WideToUtf8(m_floodsListPeriodText);
@@ -3012,6 +3535,9 @@ private:
             settings["earthquakeNotificationTimeText"] = WideToUtf8(m_earthquakeNotificationTimeText);
             settings["earthquakeNotificationUseDateFilter"] = m_earthquakeNotificationUseDateFilter;
             settings["earthquakeNotificationPeriodText"] = WideToUtf8(m_earthquakeNotificationPeriodText);
+            settings["earthquakeNotificationPopulatedRadiusText"] = WideToUtf8(m_earthquakeNotificationPopulatedRadiusText);
+            settings["earthquakeNotificationPopulatedRadiusMiles"] = m_earthquakeNotificationPopulatedRadiusMiles;
+            settings["earthquakeNotificationPopulatedRadiusKm"] = MilesToKm(m_earthquakeNotificationPopulatedRadiusMiles);
             settings["weatherSystemNotificationWindText"] = WideToUtf8(m_weatherSystemNotificationWindText);
             settings["weatherSystemNotificationWindMph"] = m_weatherSystemNotificationWindMph;
 
@@ -4188,6 +4714,8 @@ private:
             m_earthquakeListTimeText.clear();
             m_earthquakeListUseDateFilter = false;
             m_earthquakeListPeriodText = L"All";
+            m_earthquakeListPopulatedRadiusText.clear();
+            m_earthquakeListPopulatedRadiusMiles = 0.0;
             m_earthquakeFilterRegion.clear();
             if (m_earthquakeListMagnitudeEdit)
                 SetWindowTextSafe(m_earthquakeListMagnitudeEdit, m_earthquakeListMagnitudeText);
@@ -4195,6 +4723,8 @@ private:
                 SetWindowTextSafe(m_earthquakeListTimeEdit, m_earthquakeListTimeText);
             if (m_earthquakeListPeriodCombo)
                 PopulatePeriodCombo(m_earthquakeListPeriodCombo, m_earthquakeListPeriodText);
+            if (m_earthquakeListPopulatedRadiusEdit)
+                SetWindowTextSafe(m_earthquakeListPopulatedRadiusEdit, m_earthquakeListPopulatedRadiusText);
             SyncEarthquakeListDateModeControls();
             ApplyEarthquakeListFilters();
             row = FindEventIndexByKey(m_filteredEarthquakes, sourceId, [this](const EarthquakeEvent& event) {
@@ -4335,6 +4865,12 @@ private:
             m_map.SetChatMessages(m_chatMessages);
     }
 
+    void RenderPrivateMessages()
+    {
+        if (m_map.Hwnd())
+            m_map.SetPrivateMessages(m_privateMessages);
+    }
+
     void RenderOnlineUsers()
     {
         if (m_map.Hwnd())
@@ -4368,10 +4904,12 @@ private:
                 result->chat = std::move(binary.chat);
                 result->notes = std::move(binary.notes);
                 result->users = std::move(binary.users);
+                result->privateMessages = std::move(binary.privateMessages);
                 result->collaborationVersion = binary.version;
                 result->chatOk = true;
                 result->notesOk = true;
                 result->usersOk = true;
+                result->privateMessagesOk = true;
                 result->ok = true;
                 if (!g_appQuitting.load() && IsWindow(hwnd))
                     PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
@@ -4438,6 +4976,24 @@ private:
             }
             else if (result->error.empty()) {
                 result->error = L"Online users poll failed: " + usersError;
+            }
+
+            std::string privateBody;
+            std::wstring privateError;
+            if (HttpGetTextWithHeaders(AppendPath(server, L"/api/private-messages"), authHeaders, privateBody, privateError)) {
+                try {
+                    result->privateMessages = ParsePrivateMessages(json::parse(privateBody));
+                    result->privateMessagesOk = true;
+                    result->ok = true;
+                }
+                catch (const std::exception& e) {
+                    if (!result->error.empty())
+                        result->error += L" ";
+                    result->error += L"Private message parse failed: " + Utf8ToWide(e.what());
+                }
+            }
+            else if (result->error.empty()) {
+                result->error = L"Private message poll failed: " + privateError;
             }
 
             if (g_appQuitting.load() || !IsWindow(hwnd)) {
@@ -4520,7 +5076,7 @@ private:
             return;
 
         std::wstring author = SessionDisplayName();
-        ChatMessage local{ author, m_session.position, text, L"pending" };
+        ChatMessage local{ L"", author, m_session.username, m_session.position, text, L"pending" };
         m_chatMessages.push_back(local);
         RenderChatHistory();
 
@@ -4551,6 +5107,67 @@ private:
             std::wstring error;
             std::string body = "{\"author\":" + JsonEscape(author) + ",\"text\":" + JsonEscape(text) + "}";
             result->ok = HttpPostJsonTextWithHeaders(AppendPath(server, L"/api/chat"), body, authHeaders, response, error);
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            });
+    }
+
+    void SendPrivateMessageAsync(const std::wstring& recipientUsername, const std::wstring& inputText)
+    {
+        std::wstring recipient = Trim(recipientUsername);
+        std::wstring text = Trim(inputText);
+        if (recipient.empty() || text.empty())
+            return;
+
+        auto peer = std::find_if(m_onlineUsers.begin(), m_onlineUsers.end(), [&](const OnlineUser& user) {
+            return ToLower(Trim(user.username)) == ToLower(recipient);
+            });
+
+        PrivateMessage local;
+        local.id = L"local-private-" + std::to_wstring(GetTickCount64());
+        local.senderUsername = m_session.username;
+        local.senderDisplayName = SessionDisplayName();
+        local.senderPosition = m_session.position;
+        local.recipientUsername = recipient;
+        if (peer != m_onlineUsers.end()) {
+            local.recipientDisplayName = peer->displayName;
+            local.recipientPosition = peer->position;
+        }
+        local.text = text;
+        local.timestamp = IsOnlineMode() ? L"pending" : L"";
+        m_privateMessages.push_back(local);
+        RenderPrivateMessages();
+
+        if (!IsOnlineMode()) {
+            SetStatusText(L"Offline mode: private message kept locally.");
+            return;
+        }
+
+        std::wstring server = ServerBaseUrl();
+        HWND hwnd = m_hwnd;
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session, recipient, text]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::SendPrivateMessage;
+            BinaryCallResult binary;
+            if (BinarySendPrivateMessage(server, session, recipient, text, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
+            std::string response;
+            std::wstring error;
+            std::string body = "{\"recipient\":" + JsonEscape(recipient) + ",\"text\":" + JsonEscape(text) + "}";
+            result->ok = HttpPostJsonTextWithHeaders(AppendPath(server, L"/api/private-messages"), body, authHeaders, response, error);
             result->error = error;
             if (!g_appQuitting.load() && IsWindow(hwnd))
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
@@ -4602,6 +5219,182 @@ private:
             std::string response;
             std::wstring error;
             result->ok = HttpDeleteTextWithHeaders(AppendPath(server, L"/api/chat"), authHeaders, response, error);
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            });
+    }
+
+    void HandleResponderChatMessageAction(const ChatMessage& message, const std::wstring& action)
+    {
+        if (ToLower(Trim(action)) != L"delete")
+            return;
+
+        if (CurrentPositionRank() < 2) {
+            SetStatusText(L"Only Managers, Supervisors and Administrators can delete responder chat messages.");
+            return;
+        }
+        if (message.id.empty()) {
+            SetStatusText(L"That responder message is local or pending and cannot be deleted remotely yet.");
+            return;
+        }
+        const int targetRank = PositionRankText(message.position);
+        if (targetRank > 0 && CurrentPositionRank() <= targetRank) {
+            SetStatusText(L"You can only delete responder messages from users below your current position.");
+            return;
+        }
+
+        DeleteResponderChatMessageAsync(message.id);
+    }
+
+    void HandleOnlineUserAction(const OnlineUser& user, const std::wstring& action)
+    {
+        std::wstring cleanAction = ToLower(Trim(action));
+        if (cleanAction == L"private") {
+            m_map.OpenPrivateChat(user);
+            SetStatusText(L"Private chat opened with " + (user.displayName.empty() ? user.username : user.displayName) + L".");
+            return;
+        }
+
+        if (!CanModerateUser(user)) {
+            SetStatusText(L"You can only mute or kick users below your current position.");
+            return;
+        }
+
+        if (cleanAction == L"mute") {
+            MuteOnlineUserAsync(user.username, 15);
+            return;
+        }
+        if (cleanAction == L"kick") {
+            KickOnlineUserAsync(user.username);
+            return;
+        }
+    }
+
+    void HandleMapOverlayPanelClose(const std::wstring& panelName)
+    {
+        std::wstring panel = ToLower(Trim(panelName));
+        if (panel == L"users") {
+            m_showUsersOverlay = false;
+            m_map.SetUsersVisible(false);
+            UpdateNotificationHistoryMenu();
+            SaveSettings();
+        }
+        else if (panel == L"notification_history") {
+            m_showNotificationHistory = false;
+            m_map.SetNotificationHistoryVisible(false);
+            UpdateNotificationHistoryMenu();
+            SaveSettings();
+        }
+        else if (panel == L"map_controls") {
+            m_showMapControls = false;
+            m_map.SetToolbarVisible(false);
+            UpdateNotificationHistoryMenu();
+            SaveSettings();
+        }
+    }
+
+    void DeleteResponderChatMessageAsync(const std::wstring& messageId)
+    {
+        if (!IsOnlineMode()) {
+            m_chatMessages.erase(std::remove_if(m_chatMessages.begin(), m_chatMessages.end(), [&](const ChatMessage& msg) {
+                return msg.id == messageId;
+                }), m_chatMessages.end());
+            RenderChatHistory();
+            SetStatusText(L"Responder chat message deleted locally.");
+            return;
+        }
+
+        HWND hwnd = m_hwnd;
+        std::wstring server = ServerBaseUrl();
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session, messageId]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::DeleteChatMessage;
+            BinaryCallResult binary;
+            if (BinaryDeleteChatMessage(server, session, messageId, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
+            std::string response;
+            std::wstring error;
+            result->ok = HttpDeleteTextWithHeaders(AppendPath(server, L"/api/chat/") + UrlEncodePathSegment(messageId), authHeaders, response, error);
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            });
+    }
+
+    void KickOnlineUserAsync(const std::wstring& username)
+    {
+        if (username.empty())
+            return;
+        HWND hwnd = m_hwnd;
+        std::wstring server = ServerBaseUrl();
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session, username]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::KickUser;
+            BinaryCallResult binary;
+            if (BinaryKickUser(server, session, username, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
+            std::string response;
+            std::wstring error;
+            result->ok = HttpPostJsonTextWithHeaders(AppendPath(server, L"/api/users/") + UrlEncodePathSegment(username) + L"/kick", "{}", authHeaders, response, error);
+            result->error = error;
+            if (!g_appQuitting.load() && IsWindow(hwnd))
+                PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+            else
+                delete result;
+            });
+    }
+
+    void MuteOnlineUserAsync(const std::wstring& username, uint32_t minutes)
+    {
+        if (username.empty())
+            return;
+        HWND hwnd = m_hwnd;
+        std::wstring server = ServerBaseUrl();
+        std::wstring authHeaders = BearerAuthHeader(m_session);
+        ClientSession session = m_session;
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session, username, minutes]() {
+            auto* result = new ServerResult{};
+            result->action = ServerAction::MuteUser;
+            BinaryCallResult binary;
+            if (BinaryMuteUser(server, session, username, minutes, binary) || binary.protocolAvailable) {
+                result->ok = binary.ok;
+                result->error = binary.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+
+            std::string response;
+            std::wstring error;
+            std::string body = "{\"minutes\":" + std::to_string(minutes) + "}";
+            result->ok = HttpPostJsonTextWithHeaders(AppendPath(server, L"/api/users/") + UrlEncodePathSegment(username) + L"/mute", body, authHeaders, response, error);
             result->error = error;
             if (!g_appQuitting.load() && IsWindow(hwnd))
                 PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
@@ -4855,6 +5648,11 @@ private:
                 RenderChatHistory();
             }
 
+            if (result->privateMessagesOk) {
+                m_privateMessages = std::move(result->privateMessages);
+                RenderPrivateMessages();
+            }
+
             if (result->notesOk) {
                 ReconcilePendingNoteEdits(result->notes);
                 ApplyLocalNoteOverrides(result->notes);
@@ -4876,6 +5674,12 @@ private:
             SetStatusText(result->ok ? L"Chat message sent." : L"Chat send failed; kept locally.");
             PollServerAsync();
         }
+        else if (result->action == ServerAction::SendPrivateMessage) {
+            SetStatusText(result->ok
+                ? L"Private message sent."
+                : (result->error.empty() ? L"Private message send failed; kept locally." : L"Private message send failed: " + result->error));
+            PollServerAsync();
+        }
         else if (result->action == ServerAction::ClearChat) {
             if (result->ok) {
                 m_chatMessages.clear();
@@ -4885,6 +5689,24 @@ private:
             else {
                 SetStatusText(result->error.empty() ? L"Responder chat clear failed." : L"Responder chat clear failed: " + result->error);
             }
+            PollServerAsync();
+        }
+        else if (result->action == ServerAction::DeleteChatMessage) {
+            SetStatusText(result->ok
+                ? L"Responder chat message deleted."
+                : (result->error.empty() ? L"Responder chat message delete failed." : L"Responder chat message delete failed: " + result->error));
+            PollServerAsync();
+        }
+        else if (result->action == ServerAction::KickUser) {
+            SetStatusText(result->ok
+                ? L"User kicked from the collaboration server."
+                : (result->error.empty() ? L"Kick failed." : L"Kick failed: " + result->error));
+            PollServerAsync();
+        }
+        else if (result->action == ServerAction::MuteUser) {
+            SetStatusText(result->ok
+                ? L"User muted from responder chat."
+                : (result->error.empty() ? L"Mute failed." : L"Mute failed: " + result->error));
             PollServerAsync();
         }
         else if (result->action == ServerAction::SendNote) {
@@ -4932,12 +5754,14 @@ private:
     {
         if (g_boundaryDownloadInProgress.exchange(true)) {
             SetStatusText(L"Boundary download already in progress...");
+            SetCacheManagerStatus(L"Boundary download already in progress...");
             return;
         }
 
         SetStatusText(kind == BoundaryDownloadKind::World
             ? L"Downloading world boundaries from geoBoundaries..."
             : L"Downloading UK boundary from geoBoundaries...");
+        SetCacheManagerActivity(CacheActivity::Boundary, true);
 
         HWND hwnd = m_hwnd;
         const std::wstring sourceUrl = kind == BoundaryDownloadKind::World ? kWorldBoundarySourceUrl : kUkBoundarySourceUrl;
@@ -4980,12 +5804,14 @@ private:
     void OnBoundaryReady(BoundaryDownloadResult* result)
     {
         g_boundaryDownloadInProgress.store(false);
+        SetCacheManagerActivity(CacheActivity::Boundary, false);
 
         if (!result)
             return;
 
         if (!result->ok) {
             SetStatusText(result->error);
+            SetCacheManagerStatus(result->error);
             delete result;
             return;
         }
@@ -4998,13 +5824,392 @@ private:
             SetStatusText(result->kind == BoundaryDownloadKind::World
                 ? L"World boundaries downloaded and loaded."
                 : L"UK boundary downloaded and loaded.");
+            SetCacheManagerStatus(result->kind == BoundaryDownloadKind::World
+                ? L"World boundaries refreshed."
+                : L"UK boundary refreshed.");
         }
         else {
             SetStatusText(L"Boundary downloaded, but could not load it.");
+            SetCacheManagerStatus(L"Boundary downloaded, but could not load.");
             OutputDebugStringW((L"Boundary load failed: " + loadError + L"\n").c_str());
         }
 
         delete result;
+    }
+
+    bool LoadPopulatedPlacesCache(bool reportStatus)
+    {
+        m_populatedPlacesLoadAttempted = true;
+
+        const std::filesystem::path cachePath = GetPopulatedPlacesCachePath();
+        if (!std::filesystem::exists(cachePath)) {
+            if (reportStatus)
+                SetStatusText(L"Populated places cache is not available yet.");
+            return false;
+        }
+
+        std::vector<PopulatedPlace> places;
+        std::wstring error;
+        if (!LoadPopulatedPlacesFromFile(cachePath, places, &error)) {
+            m_populatedPlacesLoaded = false;
+            OutputDebugStringW((L"Populated places cache load: " + error + L"\n").c_str());
+            if (reportStatus)
+                SetStatusText(error.empty() ? L"Populated places cache could not be loaded." : error);
+            return false;
+        }
+
+        m_populatedPlaces = std::move(places);
+        m_populatedPlacesLoaded = !m_populatedPlaces.empty();
+        if (reportStatus) {
+            SetStatusText(L"Loaded " + std::to_wstring(m_populatedPlaces.size()) + L" populated place(s).");
+        }
+        return m_populatedPlacesLoaded;
+    }
+
+    void EnsurePopulatedPlacesAvailableAsync(bool reportStatus, bool forceRefresh = false)
+    {
+        if (!forceRefresh && m_populatedPlacesLoaded && !m_populatedPlaces.empty())
+            return;
+
+        if (!forceRefresh && !m_populatedPlacesLoadAttempted && LoadPopulatedPlacesCache(reportStatus))
+            return;
+
+        if (!forceRefresh && m_populatedPlacesDownloadAttempted && !reportStatus)
+            return;
+
+        if (g_populatedPlacesDownloadInProgress.exchange(true)) {
+            if (reportStatus)
+                SetStatusText(L"Populated places download already in progress...");
+            if (reportStatus)
+                SetCacheManagerStatus(L"Populated places download already in progress...");
+            return;
+        }
+
+        m_populatedPlacesDownloadAttempted = true;
+        if (reportStatus) {
+            SetStatusText(L"Downloading populated places for earthquake radius checks...");
+            SetCacheManagerActivity(CacheActivity::PopulatedPlaces, true);
+        }
+
+        HWND hwnd = m_hwnd;
+        const std::filesystem::path cachePath = GetPopulatedPlacesCachePath();
+        ScheduleBackgroundTask([hwnd, cachePath]() {
+            auto* result = new PopulatedPlacesDownloadResult{};
+            result->filePath = cachePath;
+
+            std::string body;
+            std::wstring error;
+            if (!HttpGetText(kPopulatedPlacesSourceUrl, body, error)) {
+                result->ok = false;
+                result->error = L"Populated places download failed: " + error;
+            }
+            else {
+                std::wstring parseError;
+                std::vector<PopulatedPlace> places = ParsePopulatedPlacesGeoJson(body, &parseError);
+                if (places.empty()) {
+                    result->ok = false;
+                    result->error = parseError.empty()
+                        ? L"Populated places download did not contain usable places."
+                        : parseError;
+                }
+                else {
+                    std::wstring saveError;
+                    if (!SavePopulatedPlacesToFile(cachePath, body, &saveError)) {
+                        result->ok = false;
+                        result->error = saveError.empty()
+                            ? L"Populated places downloaded but could not be saved locally."
+                            : saveError;
+                    }
+                    else {
+                        result->ok = true;
+                        result->places = std::move(places);
+                    }
+                }
+            }
+
+            if (g_appQuitting.load() || !IsWindow(hwnd)) {
+                delete result;
+                g_populatedPlacesDownloadInProgress.store(false);
+                return;
+            }
+
+            if (!PostMessageW(hwnd, WM_APP_POPULATED_PLACES_READY, 0, reinterpret_cast<LPARAM>(result))) {
+                delete result;
+                g_populatedPlacesDownloadInProgress.store(false);
+            }
+            });
+    }
+
+    void OnPopulatedPlacesReady(PopulatedPlacesDownloadResult* result)
+    {
+        g_populatedPlacesDownloadInProgress.store(false);
+        SetCacheManagerActivity(CacheActivity::PopulatedPlaces, false);
+
+        std::unique_ptr<PopulatedPlacesDownloadResult> owned(result);
+        if (!result)
+            return;
+
+        if (!result->ok) {
+            m_populatedPlacesLoaded = false;
+            OutputDebugStringW((result->error + L"\n").c_str());
+            SetCacheManagerStatus(result->error.empty() ? L"Populated places refresh failed." : result->error);
+            if (m_earthquakeListPopulatedRadiusMiles > 0.0 ||
+                m_earthquakeNotificationPopulatedRadiusMiles > 0.0)
+            {
+                SetStatusText(result->error);
+            }
+            return;
+        }
+
+        m_populatedPlaces = std::move(result->places);
+        if (m_populatedPlaces.empty())
+            LoadPopulatedPlacesCache(false);
+        else
+            m_populatedPlacesLoaded = true;
+
+        SetStatusText(L"Loaded " + std::to_wstring(m_populatedPlaces.size()) + L" populated place(s) for earthquake radius checks.");
+        SetCacheManagerStatus(L"Populated places refreshed: " + std::to_wstring(m_populatedPlaces.size()) + L" place(s).");
+        ApplyEarthquakeListFilters();
+        if (!m_allEarthquakes.empty())
+            NotifyForMatchingEarthquakes(m_allEarthquakes);
+    }
+
+    void DownloadRoadDepictionsAsync()
+    {
+        if (g_roadDepictionsDownloadInProgress.exchange(true)) {
+            SetStatusText(L"OS Open Roads download already in progress...");
+            SetCacheManagerStatus(L"OS Open Roads download already in progress...");
+            return;
+        }
+
+        SyncRoadDepictionRoadLabelsFromList();
+        std::vector<std::wstring> roads = NormaliseRoadDepictionRoadLabels(m_roadDepictionRoadLabels);
+        if (roads.empty()) {
+            g_roadDepictionsDownloadInProgress.store(false);
+            SetStatusText(L"Add roads in Road Depictions before downloading OS Open Roads.");
+            MessageBoxW(m_hwnd, L"Add at least one road in the Road Depictions window before downloading OS Open Roads.", L"Road Depictions", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        SetStatusText(L"Downloading OS Open Roads for selected road depictions...");
+        SetCacheManagerActivity(CacheActivity::RoadDepictions, true);
+
+        HWND hwnd = m_hwnd;
+        const std::filesystem::path cachePath = GetRoadDepictionsCachePath();
+
+        ScheduleBackgroundTask([hwnd, cachePath, roads = std::move(roads)]() {
+            auto* result = new RoadDepictionsDownloadResult{};
+            result->filePath = cachePath;
+
+            size_t featureCount = 0;
+            std::wstring error;
+            if (DownloadOpenRoadsGeoJsonToFile(cachePath, roads, featureCount, error)) {
+                result->ok = true;
+                result->featureCount = featureCount;
+            }
+            else {
+                result->ok = false;
+                result->error = error.empty() ? L"OS Open Roads download failed." : error;
+            }
+
+            if (g_appQuitting.load() || !IsWindow(hwnd)) {
+                delete result;
+                g_roadDepictionsDownloadInProgress.store(false);
+                return;
+            }
+
+            if (!PostMessageW(hwnd, WM_APP_ROAD_DEPICTIONS_READY, 0, reinterpret_cast<LPARAM>(result))) {
+                delete result;
+                g_roadDepictionsDownloadInProgress.store(false);
+            }
+            });
+    }
+
+    void OnRoadDepictionsReady(RoadDepictionsDownloadResult* result)
+    {
+        g_roadDepictionsDownloadInProgress.store(false);
+        SetCacheManagerActivity(CacheActivity::RoadDepictions, false);
+
+        std::unique_ptr<RoadDepictionsDownloadResult> holder(result);
+        if (!result)
+            return;
+
+        if (!result->ok) {
+            SetStatusText(result->error.empty() ? L"OS Open Roads download failed." : result->error);
+            SetCacheManagerStatus(result->error.empty() ? L"OS Open Roads refresh failed." : result->error);
+            return;
+        }
+
+        std::wstring loadError;
+        std::unordered_set<std::wstring> allowedRoadDepictions = RoadDepictionRoadSet(m_roadDepictionRoadLabels);
+        if (!m_map.LoadRoadDepictionsFromFile(result->filePath, &loadError, &allowedRoadDepictions)) {
+            SetStatusText(L"OS Open Roads downloaded, but could not be loaded.");
+            SetCacheManagerStatus(L"OS Open Roads downloaded, but could not load.");
+            OutputDebugStringW((L"OS Open Roads load failed: " + loadError + L"\n").c_str());
+            return;
+        }
+
+        RenderRoadDepictionsList();
+        SetStatusText(L"OS Open Roads selected roads downloaded and loaded (" + std::to_wstring(result->featureCount) + L" features).");
+        SetCacheManagerStatus(L"OS Open Roads refreshed: " + std::to_wstring(result->featureCount) + L" feature(s).");
+    }
+
+    static LRESULT CALLBACK CacheManagerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleCacheManagerMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleCacheManagerMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateCacheManagerControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnCacheManagerCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowCacheManagerWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = CacheManagerWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kCacheManagerClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_cacheManagerWnd || !IsWindow(m_cacheManagerWnd)) {
+            m_cacheManagerWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kCacheManagerClassName,
+                L"Data Caches",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                430,
+                390,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        ShowWindow(m_cacheManagerWnd, SW_SHOW);
+        SetForegroundWindow(m_cacheManagerWnd);
+    }
+
+    void CreateCacheManagerControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Data Caches", 18, 20, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Refresh the local datasets used by the map and earthquake populated-area checks.", 18, 58, nullptr, 360);
+
+        HWND ukBoundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 112, 310, 32, parent, ControlId(IDC_CACHE_UK_BOUNDARY_BTN), m_hInst, nullptr);
+        HWND worldBoundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh world boundaries", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 152, 310, 32, parent, ControlId(IDC_CACHE_WORLD_BOUNDARY_BTN), m_hInst, nullptr);
+        HWND roads = CreateWindowExW(0, L"BUTTON", L"Download / refresh OS Open Roads", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 192, 310, 32, parent, ControlId(IDC_CACHE_ROADS_BTN), m_hInst, nullptr);
+        HWND populatedPlaces = CreateWindowExW(0, L"BUTTON", L"Download / refresh populated places", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 232, 310, 32, parent, ControlId(IDC_CACHE_POPULATED_PLACES_BTN), m_hInst, nullptr);
+        m_cacheProgressBar = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | PBS_MARQUEE, 18, 278, 372, 16, parent, ControlId(IDC_CACHE_PROGRESS), m_hInst, nullptr);
+        m_cacheStatusLabel = CreateAutoLabel(parent, IDC_CACHE_STATUS_LABEL, L"Ready.", 18, 306, nullptr, 256);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 288, 318, 102, 32, parent, ControlId(IDC_CACHE_CLOSE_BTN), m_hInst, nullptr);
+
+        for (HWND h : { ukBoundary, worldBoundary, roads, populatedPlaces, m_cacheStatusLabel, close }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+        if (m_cacheProgressBar)
+            ApplyExplorerTheme(m_cacheProgressBar);
+        UpdateCacheManagerProgressVisibility();
+        AutoFitWindowToChildren(parent);
+    }
+
+    void SetCacheManagerStatus(const std::wstring& text)
+    {
+        if (m_cacheStatusLabel)
+            SetWindowTextSafe(m_cacheStatusLabel, text);
+    }
+
+    void SetCacheManagerActivity(CacheActivity activity, bool active)
+    {
+        switch (activity) {
+        case CacheActivity::Boundary:
+            m_cacheBoundaryBusy = active;
+            break;
+        case CacheActivity::RoadDepictions:
+            m_cacheRoadDepictionsBusy = active;
+            break;
+        case CacheActivity::PopulatedPlaces:
+            m_cachePopulatedPlacesBusy = active;
+            break;
+        }
+
+        UpdateCacheManagerProgressVisibility();
+    }
+
+    bool HasActiveCacheManagerWork() const
+    {
+        return m_cacheBoundaryBusy || m_cacheRoadDepictionsBusy || m_cachePopulatedPlacesBusy;
+    }
+
+    void UpdateCacheManagerProgressVisibility()
+    {
+        if (!m_cacheProgressBar)
+            return;
+
+        const bool active = HasActiveCacheManagerWork();
+        ShowWindow(m_cacheProgressBar, active ? SW_SHOW : SW_HIDE);
+        SendMessageW(m_cacheProgressBar, PBM_SETMARQUEE, active ? TRUE : FALSE, active ? 24 : 0);
+        if (!active)
+            SendMessageW(m_cacheProgressBar, PBM_SETPOS, 0, 0);
+    }
+
+    void OnCacheManagerCommand(int id, int code)
+    {
+        if (code != BN_CLICKED)
+            return;
+
+        switch (id) {
+        case IDC_CACHE_UK_BOUNDARY_BTN:
+            SetCacheManagerStatus(L"Refreshing UK boundary...");
+            DownloadBoundaryFromGitHubAsync(BoundaryDownloadKind::Uk);
+            break;
+        case IDC_CACHE_WORLD_BOUNDARY_BTN:
+            SetCacheManagerStatus(L"Refreshing world boundaries...");
+            DownloadBoundaryFromGitHubAsync(BoundaryDownloadKind::World);
+            break;
+        case IDC_CACHE_ROADS_BTN:
+            SetCacheManagerStatus(L"Refreshing OS Open Roads...");
+            DownloadRoadDepictionsAsync();
+            break;
+        case IDC_CACHE_POPULATED_PLACES_BTN:
+            SetCacheManagerStatus(L"Refreshing populated places...");
+            EnsurePopulatedPlacesAvailableAsync(true, true);
+            break;
+        case IDC_CACHE_CLOSE_BTN:
+            ShowWindow(m_cacheManagerWnd, SW_HIDE);
+            break;
+        }
     }
 
     void CreateMainMenu()
@@ -5015,9 +6220,12 @@ private:
         HMENU earthquakesMenu = CreatePopupMenu();
         HMENU weatherMenu = CreatePopupMenu();
         HMENU viewMenu = CreatePopupMenu();
+        HMENU aboutMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_SETTINGS, L"Settings...");
+        AppendMenuW(fileMenu, MF_STRING, IDM_FILE_CACHE_MANAGER, L"Data Caches...");
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_USERS, L"Users");
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_ACCOUNT_CREATOR, L"Account Creator...");
+        AppendMenuW(fileMenu, MF_STRING, IDM_FILE_ADMIN_LOG, L"Administrator Log...");
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_LOGOUT, L"Logout");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
@@ -5115,7 +6323,10 @@ private:
         SetMenuItemInfoW(floodOverlayMenu, IDM_FLOOD_OVERLAY_SEVERITY_AREA, FALSE, &weatherOverlayInfo);
         AppendMenuW(viewMenu, m_showNotificationHistory ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_NOTIFICATION_HISTORY, L"Notification History");
         AppendMenuW(viewMenu, m_showAreaLabels ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_AREA_LABELS, L"Area Labels");
-        AppendMenuW(viewMenu, m_showRoadDepictions ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_ROAD_DEPICTIONS, L"Road Depictions");
+        HMENU roadDepictionsMenu = CreatePopupMenu();
+        AppendMenuW(roadDepictionsMenu, m_showRoadDepictions ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_ROAD_DEPICTIONS, L"Show Road Depictions");
+        AppendMenuW(roadDepictionsMenu, MF_STRING, IDM_VIEW_ROAD_DEPICTIONS_LIST, L"Choose Roads...");
+        AppendMenuW(viewMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadDepictionsMenu), L"Road Depictions");
         AppendMenuW(viewMenu, m_showFpsCounter ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_FPS_COUNTER, L"FPS Counter");
         AppendMenuW(viewMenu, m_showMapControls ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_MAP_CONTROLS, L"Map Controls");
         MENUITEMINFOW historyInfo{};
@@ -5124,15 +6335,17 @@ private:
         historyInfo.fType = MFT_RADIOCHECK;
         SetMenuItemInfoW(viewMenu, IDM_VIEW_NOTIFICATION_HISTORY, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_AREA_LABELS, FALSE, &historyInfo);
-        SetMenuItemInfoW(viewMenu, IDM_VIEW_ROAD_DEPICTIONS, FALSE, &historyInfo);
+        SetMenuItemInfoW(roadDepictionsMenu, IDM_VIEW_ROAD_DEPICTIONS, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_FPS_COUNTER, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_MAP_CONTROLS, FALSE, &historyInfo);
+        AppendMenuW(aboutMenu, MF_STRING, IDM_ABOUT_APP, L"About ERC Tools...");
+        AppendMenuW(aboutMenu, MF_STRING, IDM_ABOUT_LEGEND, L"Legend...");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"View");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(earthquakesMenu), L"Earthquakes");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(weatherMenu), L"Weather");
-        AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"About");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(aboutMenu), L"About");
         SetMenu(m_hwnd, menu);
     }
 
@@ -5143,6 +6356,814 @@ private:
             L"ERC Tools\n\nCreated by Samuel Mason.\n\nView live alerts on a UK map, collaborate with local responders, and share map notes.",
             L"About ERC Tools",
             MB_OK | MB_ICONINFORMATION);
+    }
+
+    static LRESULT CALLBACK LegendWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleLegendMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleLegendMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_PAINT:
+            PaintLegend(hwnd);
+            return 0;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowLegendWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = LegendWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kLegendClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_legendWnd || !IsWindow(m_legendWnd)) {
+            m_legendWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kLegendClassName,
+                L"ERC Tools Legend",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                560,
+                560,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        ShowWindow(m_legendWnd, SW_SHOW);
+        SetForegroundWindow(m_legendWnd);
+        InvalidateRect(m_legendWnd, nullptr, TRUE);
+    }
+
+    void PaintLegend(HWND hwnd)
+    {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        if (!hdc)
+            return;
+
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        HBRUSH background = CreateSolidBrush(kUiBackground);
+        FillRect(hdc, &client, background);
+        DeleteObject(background);
+
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, kUiText);
+
+        HGDIOBJ oldFont = SelectObject(hdc, m_headerFont ? m_headerFont : GetStockObject(DEFAULT_GUI_FONT));
+        RECT titleRect{ 24, 20, client.right - 24, 56 };
+        DrawTextW(hdc, L"Map Legend", -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+        SelectObject(hdc, m_font ? m_font : GetStockObject(DEFAULT_GUI_FONT));
+
+        auto makeBrush = [](COLORREF color) { return CreateSolidBrush(color); };
+        auto makePen = [](COLORREF color, int width = 1) { return CreatePen(PS_SOLID, width, color); };
+
+        auto scopedSelect = [](HDC dc, HGDIOBJ obj, HGDIOBJ& oldObj) {
+            oldObj = SelectObject(dc, obj);
+            };
+
+        auto drawCircle = [&](int x, int y, int radius, COLORREF fill, COLORREF outline, int outlineWidth = 1) {
+            HBRUSH brush = makeBrush(fill);
+            HPEN pen = makePen(outline, outlineWidth);
+            HGDIOBJ oldBrush = nullptr;
+            HGDIOBJ oldPen = nullptr;
+            scopedSelect(hdc, brush, oldBrush);
+            scopedSelect(hdc, pen, oldPen);
+            Ellipse(hdc, x - radius, y - radius, x + radius, y + radius);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(brush);
+            DeleteObject(pen);
+            };
+
+        auto drawLine = [&](int x1, int y1, int x2, int y2, COLORREF color, int width = 1, int style = PS_SOLID) {
+            HPEN pen = CreatePen(style, width, color);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            MoveToEx(hdc, x1, y1, nullptr);
+            LineTo(hdc, x2, y2);
+            SelectObject(hdc, oldPen);
+            DeleteObject(pen);
+            };
+
+        auto drawPin = [&](int x, int y, COLORREF color) {
+            POINT triangle[3] = { { x - 7, y + 4 }, { x, y + 23 }, { x + 7, y + 4 } };
+            HBRUSH brush = makeBrush(color);
+            HPEN pen = makePen(RGB(42, 56, 70), 1);
+            HGDIOBJ oldBrush = SelectObject(hdc, brush);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            Polygon(hdc, triangle, 3);
+            Ellipse(hdc, x - 12, y - 12, x + 12, y + 12);
+            HBRUSH inner = makeBrush(RGB(255, 255, 255));
+            SelectObject(hdc, inner);
+            Ellipse(hdc, x - 6, y - 6, x + 6, y + 6);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(inner);
+            DeleteObject(brush);
+            DeleteObject(pen);
+            };
+
+        auto drawWarningTriangle = [&](int x, int y) {
+            POINT tri[3] = { { x, y - 15 }, { x + 16, y + 13 }, { x - 16, y + 13 } };
+            HBRUSH brush = makeBrush(RGB(247, 199, 53));
+            HPEN pen = makePen(RGB(151, 112, 4), 2);
+            HGDIOBJ oldBrush = SelectObject(hdc, brush);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            Polygon(hdc, tri, 3);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(brush);
+            DeleteObject(pen);
+            SetTextColor(hdc, RGB(35, 44, 51));
+            RECT mark{ x - 4, y - 8, x + 4, y + 12 };
+            DrawTextW(hdc, L"!", -1, &mark, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SetTextColor(hdc, kUiText);
+            };
+
+        auto drawFlood = [&](int x, int y) {
+            RECT diamond{ x - 13, y - 13, x + 13, y + 13 };
+            HBRUSH brush = makeBrush(RGB(44, 143, 204));
+            HPEN pen = makePen(RGB(24, 67, 104), 2);
+            HGDIOBJ oldBrush = SelectObject(hdc, brush);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            RoundRect(hdc, diamond.left, diamond.top, diamond.right, diamond.bottom, 7, 7);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(brush);
+            DeleteObject(pen);
+            drawLine(x - 8, y + 2, x - 3, y - 2, RGB(255, 255, 255), 2);
+            drawLine(x - 3, y - 2, x + 3, y + 2, RGB(255, 255, 255), 2);
+            drawLine(x + 3, y + 2, x + 8, y - 1, RGB(255, 255, 255), 2);
+            };
+
+        auto drawWeatherSystem = [&](int x, int y) {
+            drawLine(x - 20, y + 18, x + 22, y - 18, RGB(41, 169, 135), 3);
+            drawLine(x + 22, y - 18, x + 8, y - 15, RGB(12, 113, 89), 3);
+            drawLine(x + 22, y - 18, x + 16, y - 6, RGB(12, 113, 89), 3);
+            drawCircle(x - 20, y + 18, 5, RGB(238, 219, 75), RGB(80, 84, 42), 1);
+            HPEN dotted = CreatePen(PS_DASH, 2, RGB(10, 117, 105));
+            HGDIOBJ oldPen = SelectObject(hdc, dotted);
+            HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+            Ellipse(hdc, x - 36, y + 2, x - 4, y + 34);
+            Ellipse(hdc, x + 4, y - 36, x + 50, y + 10);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(dotted);
+            drawCircle(x - 2, y - 2, 6, RGB(72, 198, 165), RGB(24, 96, 85), 1);
+            };
+
+        auto drawNote = [&](int x, int y) {
+            HBRUSH brush = makeBrush(RGB(63, 76, 93));
+            HPEN pen = makePen(RGB(111, 74, 235), 2);
+            HGDIOBJ oldBrush = SelectObject(hdc, brush);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            RoundRect(hdc, x - 22, y - 14, x + 26, y + 12, 10, 10);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(brush);
+            DeleteObject(pen);
+            drawLine(x - 22, y + 12, x - 30, y + 20, RGB(111, 74, 235), 2);
+            drawCircle(x - 31, y + 21, 5, RGB(111, 74, 235), RGB(63, 76, 93), 1);
+            };
+
+        auto drawRegion = [&](int x, int y) {
+            HPEN pen = makePen(RGB(18, 108, 199), 3);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+            Rectangle(hdc, x - 24, y - 14, x + 24, y + 18);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(pen);
+            drawCircle(x - 24, y - 14, 3, RGB(18, 108, 199), RGB(18, 108, 199), 1);
+            drawCircle(x + 24, y + 18, 3, RGB(18, 108, 199), RGB(18, 108, 199), 1);
+            };
+
+        auto drawRoad = [&](int x, int y) {
+            drawLine(x - 28, y, x + 30, y - 10, RGB(47, 72, 55), 7);
+            drawLine(x - 28, y, x + 30, y - 10, RGB(232, 222, 165), 4);
+            RECT shield{ x - 8, y - 23, x + 24, y - 4 };
+            HBRUSH brush = makeBrush(RGB(255, 255, 255));
+            HPEN pen = makePen(RGB(47, 72, 55), 1);
+            HGDIOBJ oldBrush = SelectObject(hdc, brush);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            RoundRect(hdc, shield.left, shield.top, shield.right, shield.bottom, 6, 6);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(brush);
+            DeleteObject(pen);
+            DrawTextW(hdc, L"A1", -1, &shield, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+            };
+
+        auto drawPanel = [&](int x, int y) {
+            HBRUSH brush = makeBrush(RGB(47, 61, 72));
+            HPEN pen = makePen(RGB(83, 103, 121), 1);
+            HGDIOBJ oldBrush = SelectObject(hdc, brush);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            RoundRect(hdc, x - 26, y - 15, x + 28, y + 17, 10, 10);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(brush);
+            DeleteObject(pen);
+            drawLine(x - 16, y - 4, x + 16, y - 4, RGB(126, 148, 166), 1);
+            drawLine(x - 16, y + 5, x + 16, y + 5, RGB(126, 148, 166), 1);
+            };
+
+        int y = 74;
+        auto row = [&](const wchar_t* text, const std::function<void(int, int)>& drawIcon) {
+            drawIcon(52, y + 17);
+            RECT textRect{ 96, y, client.right - 26, y + 36 };
+            DrawTextW(hdc, text, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            y += 43;
+            };
+
+        row(L"Road incidents: severity pins", [&](int x, int y0) {
+            drawPin(x - 18, y0 - 2, RGB(211, 44, 44));
+            drawPin(x + 8, y0 - 2, RGB(231, 146, 42));
+            drawPin(x + 34, y0 - 2, RGB(39, 126, 213));
+            });
+        row(L"Earthquakes: magnitude blips", [&](int x, int y0) {
+            drawCircle(x, y0, 13, RGB(187, 45, 58), RGB(117, 23, 35), 2);
+            });
+        row(L"Weather systems: centre, track, forecast rings and arrow", drawWeatherSystem);
+        row(L"Weather warnings: warning marker and optional polygon", drawWarningTriangle);
+        row(L"Floods: flood alert marker", drawFlood);
+        row(L"Notes: map note bubble and anchor", drawNote);
+        row(L"Notification regions: editable region outline", drawRegion);
+        row(L"Road depictions: OS Open Roads line and label", drawRoad);
+        row(L"Map overlay panels: draggable tool surfaces", drawPanel);
+
+        SelectObject(hdc, oldFont);
+        EndPaint(hwnd, &ps);
+    }
+
+    static LRESULT CALLBACK AdminLogWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleAdminLogMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleAdminLogMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateAdminLogControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnAdminLogCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowAdminLogWindow()
+    {
+        if (CurrentPositionRank() < 2) {
+            SetStatusText(L"Only Managers, Supervisors and Administrators can view the Administrator Log.");
+            MessageBoxW(m_hwnd, L"Only Managers, Supervisors and Administrators can view the Administrator Log.", L"Administrator Log", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        if (!IsOnlineMode()) {
+            SetStatusText(L"Administrator Log needs an online session.");
+            MessageBoxW(m_hwnd, L"The Administrator Log is tracked by the server, so it is only available in online mode.", L"Administrator Log", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSW wc{};
+            wc.lpfnWndProc = AdminLogWndProc;
+            wc.hInstance = m_hInst;
+            wc.lpszClassName = kAdminLogClassName;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            ::RegisterClassW(&wc);
+            registered = true;
+        }
+
+        if (!m_adminLogWnd) {
+            RECT rc{ 0, 0, 820, 520 };
+            AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_TOOLWINDOW);
+            m_adminLogWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kAdminLogClassName,
+                L"Administrator Log",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT, CW_USEDEFAULT,
+                rc.right - rc.left, rc.bottom - rc.top,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+            EnableModernWindowFrame(m_adminLogWnd);
+        }
+
+        ShowWindow(m_adminLogWnd, SW_SHOW);
+        SetForegroundWindow(m_adminLogWnd);
+        FetchAdminLogAsync();
+    }
+
+    void CreateAdminLogControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Administrator Log", 18, 18, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Log type", 18, 64);
+        m_adminLogTypeCombo = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"COMBOBOX",
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+            18, 90, 240, 120,
+            parent,
+            ControlId(IDC_ADMIN_LOG_TYPE_COMBO),
+            m_hInst,
+            nullptr);
+        HWND refreshBtn = CreateWindowExW(
+            0,
+            L"BUTTON",
+            L"Refresh",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON,
+            574, 88, 102, 32,
+            parent,
+            ControlId(IDC_ADMIN_LOG_REFRESH_BTN),
+            m_hInst,
+            nullptr);
+        HWND closeBtn = CreateWindowExW(
+            0,
+            L"BUTTON",
+            L"Close",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON,
+            688, 88, 102, 32,
+            parent,
+            ControlId(IDC_ADMIN_LOG_CLOSE_BTN),
+            m_hInst,
+            nullptr);
+        m_adminLogListView = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            WC_LISTVIEWW,
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+            18, 138, 772, 340,
+            parent,
+            ControlId(IDC_ADMIN_LOG_LIST),
+            m_hInst,
+            nullptr);
+
+        for (HWND h : { m_adminLogTypeCombo, refreshBtn, closeBtn, m_adminLogListView }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+
+        SendMessageW(m_adminLogTypeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"User Login Times"));
+        SendMessageW(m_adminLogTypeCombo, CB_SETCURSEL, 0, 0);
+
+        SendMessageW(m_adminLogListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_INFOTIP);
+        ListView_SetBkColor(m_adminLogListView, kUiSurface);
+        ListView_SetTextBkColor(m_adminLogListView, CLR_NONE);
+        ListView_SetTextColor(m_adminLogListView, kUiText);
+
+        struct Column { const wchar_t* title; int width; };
+        const Column columns[] = {
+            { L"Time", 142 },
+            { L"Event", 92 },
+            { L"User", 120 },
+            { L"Position", 104 },
+            { L"Pod", 76 },
+            { L"Actor", 112 },
+            { L"Details", 210 }
+        };
+        for (int i = 0; i < static_cast<int>(sizeof(columns) / sizeof(columns[0])); ++i) {
+            LVCOLUMNW col{};
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            col.pszText = const_cast<LPWSTR>(columns[i].title);
+            col.cx = columns[i].width;
+            col.iSubItem = i;
+            SendMessageW(m_adminLogListView, LVM_INSERTCOLUMNW, i, reinterpret_cast<LPARAM>(&col));
+        }
+        RenderAdminLogEntries();
+    }
+
+    void OnAdminLogCommand(int id, int code)
+    {
+        if (id == IDC_ADMIN_LOG_CLOSE_BTN && code == BN_CLICKED) {
+            if (m_adminLogWnd)
+                ShowWindow(m_adminLogWnd, SW_HIDE);
+            return;
+        }
+        if ((id == IDC_ADMIN_LOG_REFRESH_BTN && code == BN_CLICKED) ||
+            (id == IDC_ADMIN_LOG_TYPE_COMBO && code == CBN_SELCHANGE))
+        {
+            FetchAdminLogAsync();
+        }
+    }
+
+    void FetchAdminLogAsync()
+    {
+        if (!m_adminLogWnd || !IsOnlineMode())
+            return;
+
+        std::wstring server = ServerBaseUrl();
+        if (Trim(server).empty()) {
+            SetStatusText(L"Set the collaboration server before loading the Administrator Log.");
+            return;
+        }
+
+        SetStatusText(L"Loading Administrator Log...");
+        HWND hwnd = m_hwnd;
+        ClientSession session = m_session;
+        std::wstring authHeaders = BearerAuthHeader(session);
+        std::thread([hwnd, server, authHeaders]() {
+            auto* result = new AdminLogResult();
+            std::string response;
+            std::wstring error;
+            if (HttpGetTextWithHeaders(AppendPath(server, L"/api/admin/logs"), authHeaders, response, error)) {
+                try {
+                    result->entries = ParseAdminLogEntries(json::parse(response));
+                    result->ok = true;
+                }
+                catch (const std::exception& e) {
+                    result->ok = false;
+                    result->error = L"Administrator Log parse failed: " + Utf8ToWide(e.what());
+                }
+            }
+            else {
+                result->ok = false;
+                result->error = error.empty() ? L"Administrator Log fetch failed." : error;
+            }
+
+            if (g_appQuitting.load() || !IsWindow(hwnd)) {
+                delete result;
+                return;
+            }
+            if (!PostMessageW(hwnd, WM_APP_ADMIN_LOG_READY, 0, reinterpret_cast<LPARAM>(result)))
+                delete result;
+            }).detach();
+    }
+
+    void OnAdminLogReady(AdminLogResult* result)
+    {
+        if (!result)
+            return;
+        if (!result->ok) {
+            SetStatusText(result->error.empty() ? L"Administrator Log failed to load." : result->error);
+            delete result;
+            return;
+        }
+
+        m_adminLogEntries = std::move(result->entries);
+        RenderAdminLogEntries();
+        SetStatusText(L"Loaded " + std::to_wstring(m_adminLogEntries.size()) + L" Administrator Log item(s).");
+        delete result;
+    }
+
+    void RenderAdminLogEntries()
+    {
+        if (!m_adminLogListView)
+            return;
+
+        SendMessageW(m_adminLogListView, LVM_DELETEALLITEMS, 0, 0);
+        int row = 0;
+        for (const AdminLogEntry& entry : m_adminLogEntries) {
+            std::wstring user = entry.displayName.empty() ? entry.username : entry.displayName;
+            LVITEMW item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = row;
+            item.iSubItem = 0;
+            item.pszText = const_cast<LPWSTR>(entry.timestamp.c_str());
+            int inserted = static_cast<int>(SendMessageW(m_adminLogListView, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+            if (inserted < 0)
+                continue;
+
+            auto setSub = [&](int subItem, const std::wstring& text) {
+                LVITEMW sub{};
+                sub.iSubItem = subItem;
+                sub.pszText = const_cast<LPWSTR>(text.c_str());
+                SendMessageW(m_adminLogListView, LVM_SETITEMTEXTW, inserted, reinterpret_cast<LPARAM>(&sub));
+                };
+            setSub(1, entry.event);
+            setSub(2, user);
+            setSub(3, entry.position);
+            setSub(4, entry.pod);
+            setSub(5, entry.actor);
+            setSub(6, entry.details);
+            ++row;
+        }
+    }
+
+    static LRESULT CALLBACK RoadDepictionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleRoadDepictionsMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleRoadDepictionsMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateRoadDepictionsControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnRoadDepictionsCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowRoadDepictionsWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSW wc{};
+            wc.lpfnWndProc = RoadDepictionsWndProc;
+            wc.hInstance = m_hInst;
+            wc.lpszClassName = kRoadDepictionsClassName;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            ::RegisterClassW(&wc);
+            registered = true;
+        }
+
+        if (!m_roadDepictionsWnd) {
+            RECT rc{ 0, 0, 460, 505 };
+            AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_TOOLWINDOW);
+            m_roadDepictionsWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kRoadDepictionsClassName,
+                L"Road Depictions",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT, CW_USEDEFAULT,
+                rc.right - rc.left, rc.bottom - rc.top,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+            EnableModernWindowFrame(m_roadDepictionsWnd);
+        }
+
+        ShowWindow(m_roadDepictionsWnd, SW_SHOW);
+        SetForegroundWindow(m_roadDepictionsWnd);
+        RenderRoadDepictionsList();
+    }
+
+    void CreateRoadDepictionsControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Road Depictions", 18, 18, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Add roads to download; select roads to show on the map.", 18, 56, nullptr, 400);
+        m_roadDepictionsList = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"LISTBOX",
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_MULTIPLESEL | LBS_NOTIFY | WS_VSCROLL,
+            18, 92, 406, 230,
+            parent,
+            ControlId(IDC_ROAD_DEPICTIONS_LIST),
+            m_hInst,
+            nullptr);
+        CreateAutoLabel(parent, 0, L"Road", 18, 340);
+        m_roadDepictionsRoadEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"EDIT",
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            72, 334, 132, 26,
+            parent,
+            ControlId(IDC_ROAD_DEPICTIONS_ROAD_EDIT),
+            m_hInst,
+            nullptr);
+        HWND addBtn = CreateWindowExW(0, L"BUTTON", L"Add Road", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 214, 330, 102, 32, parent, ControlId(IDC_ROAD_DEPICTIONS_ADD_BTN), m_hInst, nullptr);
+        HWND removeBtn = CreateWindowExW(0, L"BUTTON", L"Remove Road", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 322, 330, 122, 32, parent, ControlId(IDC_ROAD_DEPICTIONS_REMOVE_BTN), m_hInst, nullptr);
+        HWND allBtn = CreateWindowExW(0, L"BUTTON", L"Show All", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 386, 102, 32, parent, ControlId(IDC_ROAD_DEPICTIONS_ALL_BTN), m_hInst, nullptr);
+        HWND noneBtn = CreateWindowExW(0, L"BUTTON", L"Hide All", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 128, 386, 102, 32, parent, ControlId(IDC_ROAD_DEPICTIONS_NONE_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 322, 386, 102, 32, parent, ControlId(IDC_ROAD_DEPICTIONS_CLOSE_BTN), m_hInst, nullptr);
+        for (HWND h : { m_roadDepictionsList, m_roadDepictionsRoadEdit, addBtn, removeBtn, allBtn, noneBtn, closeBtn }) {
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(h);
+        }
+        SendMessageW(m_roadDepictionsRoadEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"M25, A1(M), A14..."));
+        RenderRoadDepictionsList();
+    }
+
+    void RenderRoadDepictionsList()
+    {
+        if (!m_roadDepictionsList)
+            return;
+
+        SendMessageW(m_roadDepictionsList, LB_RESETCONTENT, 0, 0);
+        std::vector<std::wstring> labels = NormaliseRoadDepictionRoadLabels(m_roadDepictionRoadLabels);
+        m_roadDepictionRoadLabels = labels;
+        for (const std::wstring& label : labels) {
+            int idx = static_cast<int>(SendMessageW(m_roadDepictionsList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+            if (idx >= 0)
+                SendMessageW(m_roadDepictionsList, LB_SETSEL, m_hiddenRoadDepictionIds.find(label) == m_hiddenRoadDepictionIds.end(), idx);
+        }
+    }
+
+    void SyncRoadDepictionRoadLabelsFromList()
+    {
+        if (!m_roadDepictionsList)
+            return;
+
+        std::vector<std::wstring> labels;
+        const int count = static_cast<int>(SendMessageW(m_roadDepictionsList, LB_GETCOUNT, 0, 0));
+        labels.reserve(count > 0 ? static_cast<size_t>(count) : 0);
+        for (int i = 0; i < count; ++i) {
+            const int textLen = static_cast<int>(SendMessageW(m_roadDepictionsList, LB_GETTEXTLEN, i, 0));
+            if (textLen < 0)
+                continue;
+            std::wstring text(static_cast<size_t>(textLen) + 1, L'\0');
+            SendMessageW(m_roadDepictionsList, LB_GETTEXT, i, reinterpret_cast<LPARAM>(text.data()));
+            text.resize(wcsnlen_s(text.c_str(), text.size()));
+            labels.push_back(std::move(text));
+        }
+
+        m_roadDepictionRoadLabels = NormaliseRoadDepictionRoadLabels(std::move(labels));
+    }
+
+    void ApplyRoadDepictionSelectionsFromList()
+    {
+        if (!m_roadDepictionsList)
+            return;
+
+        std::unordered_set<std::wstring> hidden;
+        const int count = static_cast<int>(SendMessageW(m_roadDepictionsList, LB_GETCOUNT, 0, 0));
+        for (int i = 0; i < count; ++i) {
+            const LRESULT selected = SendMessageW(m_roadDepictionsList, LB_GETSEL, i, 0);
+            if (selected > 0)
+                continue;
+
+            const int textLen = static_cast<int>(SendMessageW(m_roadDepictionsList, LB_GETTEXTLEN, i, 0));
+            if (textLen < 0)
+                continue;
+            std::wstring text(static_cast<size_t>(textLen) + 1, L'\0');
+            SendMessageW(m_roadDepictionsList, LB_GETTEXT, i, reinterpret_cast<LPARAM>(text.data()));
+            text.resize(wcsnlen_s(text.c_str(), text.size()));
+            hidden.insert(NormalizeRoadDepictionRoadLabel(text));
+        }
+
+        m_hiddenRoadDepictionIds = std::move(hidden);
+        SyncRoadDepictionRoadLabelsFromList();
+        m_map.SetHiddenRoadDepictions(m_hiddenRoadDepictionIds);
+        SaveSettings();
+    }
+
+    void AddRoadDepictionRoadFromEdit()
+    {
+        std::wstring text = GetWindowTextString(m_roadDepictionsRoadEdit);
+        std::replace(text.begin(), text.end(), L';', L',');
+        std::replace(text.begin(), text.end(), L'\n', L',');
+        std::replace(text.begin(), text.end(), L'\r', L',');
+
+        std::vector<std::wstring> labels = m_roadDepictionRoadLabels;
+        std::wstringstream parts(text);
+        std::wstring part;
+        size_t added = 0;
+        while (std::getline(parts, part, L',')) {
+            std::wstring label = NormalizeRoadDepictionRoadLabel(part);
+            if (label.empty())
+                continue;
+            labels.push_back(label);
+            m_hiddenRoadDepictionIds.erase(label);
+            ++added;
+        }
+
+        if (added == 0) {
+            SetStatusText(L"Enter a road number to add.");
+            return;
+        }
+
+        m_roadDepictionRoadLabels = NormaliseRoadDepictionRoadLabels(std::move(labels));
+        SetWindowTextSafe(m_roadDepictionsRoadEdit, L"");
+        RenderRoadDepictionsList();
+        SaveSettings();
+        SetStatusText(added == 1 ? L"Road depiction added." : std::to_wstring(added) + L" road depictions added.");
+    }
+
+    void RemoveFocusedRoadDepictionRoad()
+    {
+        if (!m_roadDepictionsList)
+            return;
+
+        const int count = static_cast<int>(SendMessageW(m_roadDepictionsList, LB_GETCOUNT, 0, 0));
+        if (count <= 0)
+            return;
+
+        int index = static_cast<int>(SendMessageW(m_roadDepictionsList, LB_GETCARETINDEX, 0, 0));
+        if (index < 0 || index >= count) {
+            index = static_cast<int>(SendMessageW(m_roadDepictionsList, LB_GETCURSEL, 0, 0));
+        }
+        if (index < 0 || index >= count) {
+            SetStatusText(L"Choose a road to remove.");
+            return;
+        }
+
+        const int textLen = static_cast<int>(SendMessageW(m_roadDepictionsList, LB_GETTEXTLEN, index, 0));
+        if (textLen < 0)
+            return;
+        std::wstring label(static_cast<size_t>(textLen) + 1, L'\0');
+        SendMessageW(m_roadDepictionsList, LB_GETTEXT, index, reinterpret_cast<LPARAM>(label.data()));
+        label.resize(wcsnlen_s(label.c_str(), label.size()));
+        label = NormalizeRoadDepictionRoadLabel(label);
+        if (label.empty())
+            return;
+
+        m_roadDepictionRoadLabels.erase(
+            std::remove_if(
+                m_roadDepictionRoadLabels.begin(),
+                m_roadDepictionRoadLabels.end(),
+                [&](const std::wstring& item) { return ToLower(NormalizeRoadDepictionRoadLabel(item)) == ToLower(label); }),
+            m_roadDepictionRoadLabels.end());
+        m_hiddenRoadDepictionIds.erase(label);
+        RenderRoadDepictionsList();
+        SaveSettings();
+        SetStatusText(L"Road depiction removed: " + label);
+    }
+
+    void OnRoadDepictionsCommand(int id, int code)
+    {
+        if (id == IDC_ROAD_DEPICTIONS_ROAD_EDIT && code == EN_CHANGE)
+            return;
+        if (id == IDC_ROAD_DEPICTIONS_CLOSE_BTN && code == BN_CLICKED) {
+            if (m_roadDepictionsWnd)
+                ShowWindow(m_roadDepictionsWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_ROAD_DEPICTIONS_ADD_BTN && code == BN_CLICKED) {
+            AddRoadDepictionRoadFromEdit();
+            return;
+        }
+        if (id == IDC_ROAD_DEPICTIONS_REMOVE_BTN && code == BN_CLICKED) {
+            RemoveFocusedRoadDepictionRoad();
+            return;
+        }
+        if (id == IDC_ROAD_DEPICTIONS_ALL_BTN && code == BN_CLICKED) {
+            if (m_roadDepictionsList)
+                SendMessageW(m_roadDepictionsList, LB_SETSEL, TRUE, -1);
+            ApplyRoadDepictionSelectionsFromList();
+            return;
+        }
+        if (id == IDC_ROAD_DEPICTIONS_NONE_BTN && code == BN_CLICKED) {
+            if (m_roadDepictionsList)
+                SendMessageW(m_roadDepictionsList, LB_SETSEL, FALSE, -1);
+            ApplyRoadDepictionSelectionsFromList();
+            return;
+        }
+        if (id == IDC_ROAD_DEPICTIONS_LIST && code == LBN_SELCHANGE)
+            ApplyRoadDepictionSelectionsFromList();
     }
 
     static LRESULT CALLBACK IncidentFiltersWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -9099,6 +11120,38 @@ private:
         SaveSettings();
     }
 
+    void SetMapDisplayMode(bool displayWorldMap)
+    {
+        if (m_displayWorldMap == displayWorldMap)
+            return;
+
+        m_displayWorldMap = displayWorldMap;
+        m_map.SetDisplayWorldMap(m_displayWorldMap);
+        SaveSettings();
+        SetStatusText(m_displayWorldMap ? L"Map display: rest of world." : L"Map display: UK depiction.");
+    }
+
+    bool EarthquakeIsWithinPopulatedAreaRadius(const EarthquakeEvent& event, double radiusMiles) const
+    {
+        if (radiusMiles <= 0.0)
+            return true;
+        if (!event.hasLocation)
+            return false;
+
+        if (m_populatedPlacesLoaded && !m_populatedPlaces.empty()) {
+            return FindNearestPopulatedPlace(
+                m_populatedPlaces,
+                event.latitude,
+                event.longitude,
+                radiusMiles,
+                nullptr,
+                nullptr);
+        }
+
+        const_cast<MainWindow*>(this)->EnsurePopulatedPlacesAvailableAsync(false);
+        return false;
+    }
+
     bool EarthquakeMatchesNotification(const EarthquakeEvent& event) const
     {
         if (event.magnitude + 0.0001 < m_earthquakeNotificationMagnitude)
@@ -9119,6 +11172,11 @@ private:
 
         if (afterMs > 0 && event.timeMs > 0 && event.timeMs < afterMs)
             return false;
+
+        if (m_earthquakeNotificationPopulatedRadiusMiles > 0.0) {
+            if (!EarthquakeIsWithinPopulatedAreaRadius(event, m_earthquakeNotificationPopulatedRadiusMiles))
+                return false;
+        }
 
         return true;
     }
@@ -9595,7 +11653,7 @@ private:
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 1020,
-                560,
+                590,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -9618,20 +11676,24 @@ private:
         m_earthquakeListTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 210, 88, 180, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_TIME_EDIT), m_hInst, nullptr);
         m_earthquakeListPeriodRadio = CreateWindowExW(0, L"BUTTON", L"Period", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 430, 58, 96, 24, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_RADIO), m_hInst, nullptr);
         m_earthquakeListPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 430, 88, 130, 120, parent, ControlId(IDC_EARTHQUAKE_LIST_PERIOD_COMBO), m_hInst, nullptr);
-        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 598, 84, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
-        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 728, 84, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 858, 84, 102, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
-        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 154, 950, 350, parent, ControlId(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Populated area radius (mi)", 598, 58);
+        m_earthquakeListPopulatedRadiusEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 598, 88, 150, 26, parent, ControlId(IDC_EARTHQUAKE_LIST_POPULATED_RADIUS_EDIT), m_hInst, nullptr);
+        m_earthquakeListRegionBtn = CreateWindowExW(0, L"BUTTON", L"Draw region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 124, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_REGION_BTN), m_hInst, nullptr);
+        m_earthquakeListClearRegionBtn = CreateWindowExW(0, L"BUTTON", L"Clear region", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 148, 124, 118, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLEAR_REGION_BTN), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 858, 124, 102, 32, parent, ControlId(IDC_EARTHQUAKE_LIST_CLOSE_BTN), m_hInst, nullptr);
+        m_earthquakeListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 18, 166, 950, 350, parent, ControlId(IDC_EARTHQUAKE_LIST_LISTVIEW), m_hInst, nullptr);
 
-        for (HWND h : { m_earthquakeListMagnitudeEdit, m_earthquakeListDateRadio, m_earthquakeListTimeEdit, m_earthquakeListPeriodRadio, m_earthquakeListPeriodCombo, m_earthquakeListRegionBtn, m_earthquakeListClearRegionBtn, closeBtn, m_earthquakeListView }) {
+        for (HWND h : { m_earthquakeListMagnitudeEdit, m_earthquakeListDateRadio, m_earthquakeListTimeEdit, m_earthquakeListPeriodRadio, m_earthquakeListPeriodCombo, m_earthquakeListPopulatedRadiusEdit, m_earthquakeListRegionBtn, m_earthquakeListClearRegionBtn, closeBtn, m_earthquakeListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
         SendMessageW(m_earthquakeListMagnitudeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"2.5"));
         SendMessageW(m_earthquakeListTimeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"2026-05-14 09:00"));
+        SendMessageW(m_earthquakeListPopulatedRadiusEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Optional, e.g. 125"));
         PopulatePeriodCombo(m_earthquakeListPeriodCombo, m_earthquakeListPeriodText);
         SetWindowTextSafe(m_earthquakeListMagnitudeEdit, m_earthquakeListMagnitudeText);
         SetWindowTextSafe(m_earthquakeListTimeEdit, m_earthquakeListTimeText);
+        SetWindowTextSafe(m_earthquakeListPopulatedRadiusEdit, m_earthquakeListPopulatedRadiusText);
         SyncEarthquakeListDateModeControls();
         SendMessageW(m_earthquakeListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
 
@@ -9712,6 +11774,18 @@ private:
             m_earthquakeListUseDateFilter = SendMessageW(m_earthquakeListDateRadio, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (m_earthquakeListPeriodCombo)
             m_earthquakeListPeriodText = Trim(GetWindowTextString(m_earthquakeListPeriodCombo));
+        if (m_earthquakeListPopulatedRadiusEdit) {
+            std::wstring radiusText = Trim(GetWindowTextString(m_earthquakeListPopulatedRadiusEdit));
+            double parsedRadius = 0.0;
+            if (radiusText.empty()) {
+                m_earthquakeListPopulatedRadiusText.clear();
+                m_earthquakeListPopulatedRadiusMiles = 0.0;
+            }
+            else if (TryParseDoubleText(radiusText, parsedRadius) && parsedRadius >= 0.0) {
+                m_earthquakeListPopulatedRadiusText = radiusText;
+                m_earthquakeListPopulatedRadiusMiles = parsedRadius;
+            }
+        }
     }
 
     bool EarthquakeMatchesListFilters(const EarthquakeEvent& event) const
@@ -9740,6 +11814,11 @@ private:
 
         if (m_earthquakeFilterRegion.size() >= 3) {
             if (!event.hasLocation || !PointInPolygon(event.latitude, event.longitude, m_earthquakeFilterRegion))
+                return false;
+        }
+
+        if (m_earthquakeListPopulatedRadiusMiles > 0.0) {
+            if (!EarthquakeIsWithinPopulatedAreaRadius(event, m_earthquakeListPopulatedRadiusMiles))
                 return false;
         }
 
@@ -9829,6 +11908,18 @@ private:
             ApplyEarthquakeListFilters();
             return;
         }
+        if (id == IDC_EARTHQUAKE_LIST_POPULATED_RADIUS_EDIT && (code == EN_CHANGE || code == EN_KILLFOCUS)) {
+            std::wstring text = Trim(GetWindowTextString(m_earthquakeListPopulatedRadiusEdit));
+            double parsed = 0.0;
+            if (text.empty() || (TryParseDoubleText(text, parsed) && parsed >= 0.0)) {
+                ApplyEarthquakeListFilters();
+            }
+            else if (code == EN_KILLFOCUS) {
+                SetWindowTextSafe(m_earthquakeListPopulatedRadiusEdit, m_earthquakeListPopulatedRadiusText);
+                SetStatusText(L"Populated area radius should be a distance in miles, e.g. 125.");
+            }
+            return;
+        }
         if ((id == IDC_EARTHQUAKE_LIST_MAG_EDIT || id == IDC_EARTHQUAKE_LIST_TIME_EDIT) &&
             (code == EN_CHANGE || code == EN_KILLFOCUS))
         {
@@ -9902,7 +11993,7 @@ private:
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 590,
-                260,
+                310,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -9923,13 +12014,16 @@ private:
         m_earthquakeNotificationTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 170, 130, 180, 26, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_TIME_EDIT), m_hInst, nullptr);
         m_earthquakeNotificationPeriodRadio = CreateWindowExW(0, L"BUTTON", L"Period", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 382, 104, 96, 24, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_RADIO), m_hInst, nullptr);
         m_earthquakeNotificationPeriodCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 382, 130, 130, 120, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_COMBO), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 430, 178, 102, 32, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
-        for (HWND h : { m_earthquakeNotificationMagnitudeEdit, m_earthquakeNotificationDateRadio, m_earthquakeNotificationTimeEdit, m_earthquakeNotificationPeriodRadio, m_earthquakeNotificationPeriodCombo, closeBtn }) {
+        CreateAutoLabel(parent, 0, L"Populated area radius (mi)", 18, 178);
+        m_earthquakeNotificationPopulatedRadiusEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 204, 120, 26, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_POPULATED_RADIUS_EDIT), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 430, 204, 102, 32, parent, ControlId(IDC_EARTHQUAKE_NOTIFICATIONS_CLOSE_BTN), m_hInst, nullptr);
+        for (HWND h : { m_earthquakeNotificationMagnitudeEdit, m_earthquakeNotificationDateRadio, m_earthquakeNotificationTimeEdit, m_earthquakeNotificationPeriodRadio, m_earthquakeNotificationPeriodCombo, m_earthquakeNotificationPopulatedRadiusEdit, closeBtn }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
         SendMessageW(m_earthquakeNotificationMagnitudeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"4.0"));
         SendMessageW(m_earthquakeNotificationTimeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"2026-05-14 09:00"));
+        SendMessageW(m_earthquakeNotificationPopulatedRadiusEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Optional, e.g. 125"));
         PopulatePeriodCombo(m_earthquakeNotificationPeriodCombo, m_earthquakeNotificationPeriodText);
         SyncEarthquakeNotificationControls();
         AutoFitWindowToChildren(parent);
@@ -9944,6 +12038,8 @@ private:
             SetWindowTextSafe(m_earthquakeNotificationTimeEdit, m_earthquakeNotificationTimeText);
         if (m_earthquakeNotificationPeriodCombo)
             PopulatePeriodCombo(m_earthquakeNotificationPeriodCombo, m_earthquakeNotificationPeriodText.empty() ? L"All" : m_earthquakeNotificationPeriodText);
+        if (m_earthquakeNotificationPopulatedRadiusEdit)
+            SetWindowTextSafe(m_earthquakeNotificationPopulatedRadiusEdit, m_earthquakeNotificationPopulatedRadiusText);
         if (m_earthquakeNotificationDateRadio)
             SendMessageW(m_earthquakeNotificationDateRadio, BM_SETCHECK, m_earthquakeNotificationUseDateFilter ? BST_CHECKED : BST_UNCHECKED, 0);
         if (m_earthquakeNotificationPeriodRadio)
@@ -9995,6 +12091,27 @@ private:
         if (id == IDC_EARTHQUAKE_NOTIFICATIONS_PERIOD_COMBO && code == CBN_SELCHANGE) {
             m_earthquakeNotificationPeriodText = Trim(GetWindowTextString(m_earthquakeNotificationPeriodCombo));
             SaveSettings();
+            return;
+        }
+        if (id == IDC_EARTHQUAKE_NOTIFICATIONS_POPULATED_RADIUS_EDIT && (code == EN_CHANGE || code == EN_KILLFOCUS)) {
+            std::wstring text = Trim(GetWindowTextString(m_earthquakeNotificationPopulatedRadiusEdit));
+            if (text.empty()) {
+                m_earthquakeNotificationPopulatedRadiusText.clear();
+                m_earthquakeNotificationPopulatedRadiusMiles = 0.0;
+                SaveSettings();
+                return;
+            }
+
+            double parsed = 0.0;
+            if (TryParseDoubleText(text, parsed) && parsed >= 0.0) {
+                m_earthquakeNotificationPopulatedRadiusText = text;
+                m_earthquakeNotificationPopulatedRadiusMiles = parsed;
+                SaveSettings();
+            }
+            else if (code == EN_KILLFOCUS) {
+                SetWindowTextSafe(m_earthquakeNotificationPopulatedRadiusEdit, m_earthquakeNotificationPopulatedRadiusText);
+                SetStatusText(L"Populated area radius should be a distance in miles, e.g. 125.");
+            }
             return;
         }
     }
@@ -10846,7 +12963,7 @@ private:
 
         if (!m_settingsWnd || !IsWindow(m_settingsWnd)) {
             m_settingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClassName, L"Settings", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                CW_USEDEFAULT, CW_USEDEFAULT, 470, 690, m_hwnd, nullptr, m_hInst, this);
+                CW_USEDEFAULT, CW_USEDEFAULT, 470, 560, m_hwnd, nullptr, m_hInst, this);
         }
         SyncSettingsControls();
         ShowWindow(m_settingsWnd, SW_SHOW);
@@ -10864,22 +12981,17 @@ private:
         m_settingsRefreshOnRadio = CreateWindowExW(0, L"BUTTON", L"Refresh every", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 176, 120, 24, parent, ControlId(IDC_SETTINGS_REFRESH_ON_RADIO), m_hInst, nullptr);
         CreateAutoLabel(parent, IDC_SETTINGS_REFRESH_INTERVAL_LABEL, L"Interval", 18, 214);
         m_settingsRefreshIntervalEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 178, 208, 120, 26, parent, ControlId(IDC_SETTINGS_REFRESH_INTERVAL_EDIT), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_WORLD_LABEL, L"Map display", 18, 252);
-        m_settingsWorldOffRadio = CreateWindowExW(0, L"BUTTON", L"UK depiction", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 278, 130, 24, parent, ControlId(IDC_SETTINGS_WORLD_OFF_RADIO), m_hInst, nullptr);
-        m_settingsWorldOnRadio = CreateWindowExW(0, L"BUTTON", L"Display rest of world", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 278, 190, 24, parent, ControlId(IDC_SETTINGS_WORLD_ON_RADIO), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_SYNC_LABEL, L"Remote Settings", 18, 316);
-        m_settingsSyncLocalRadio = CreateWindowExW(0, L"BUTTON", L"Local settings", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 342, 130, 24, parent, ControlId(IDC_SETTINGS_SYNC_LOCAL_RADIO), m_hInst, nullptr);
-        m_settingsSyncServerRadio = CreateWindowExW(0, L"BUTTON", L"Remote Settings", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 342, 160, 24, parent, ControlId(IDC_SETTINGS_SYNC_SERVER_RADIO), m_hInst, nullptr);
-        m_settingsPushRemoteBtn = CreateWindowExW(0, L"BUTTON", L"Push Settings Remotely", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 376, 220, 32, parent, ControlId(IDC_SETTINGS_PUSH_REMOTE_BTN), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 428);
-        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 454, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 492);
-        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 518, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
-        HWND boundary = CreateWindowExW(0, L"BUTTON", L"Download / refresh UK boundary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 564, 260, 32, parent, ControlId(IDC_SETTINGS_BOUNDARY_BTN), m_hInst, nullptr);
-        m_settingsWorldBoundaryBtn = CreateWindowExW(0, L"BUTTON", L"Download / refresh World Boundaries", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 604, 310, 32, parent, ControlId(IDC_SETTINGS_WORLD_BOUNDARY_BTN), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 644, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_SYNC_LABEL, L"Remote Settings", 18, 252);
+        m_settingsSyncLocalRadio = CreateWindowExW(0, L"BUTTON", L"Local settings", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 278, 130, 24, parent, ControlId(IDC_SETTINGS_SYNC_LOCAL_RADIO), m_hInst, nullptr);
+        m_settingsSyncServerRadio = CreateWindowExW(0, L"BUTTON", L"Remote Settings", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 278, 160, 24, parent, ControlId(IDC_SETTINGS_SYNC_SERVER_RADIO), m_hInst, nullptr);
+        m_settingsPushRemoteBtn = CreateWindowExW(0, L"BUTTON", L"Push Settings Remotely", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 312, 220, 32, parent, ControlId(IDC_SETTINGS_PUSH_REMOTE_BTN), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 364);
+        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 390, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 428);
+        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 454, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 500, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsWorldOffRadio, m_settingsWorldOnRadio, m_settingsSyncLocalRadio, m_settingsSyncServerRadio, m_settingsPushRemoteBtn, m_settingsFilterCombo, m_settingsOrderCombo, boundary, m_settingsWorldBoundaryBtn, close }) {
+        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsSyncLocalRadio, m_settingsSyncServerRadio, m_settingsPushRemoteBtn, m_settingsFilterCombo, m_settingsOrderCombo, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -11035,12 +13147,6 @@ private:
             ApplyFilters(true);
             SaveSettings();
         }
-        else if (id == IDC_SETTINGS_BOUNDARY_BTN && code == BN_CLICKED) {
-            DownloadBoundaryFromGitHubAsync(BoundaryDownloadKind::Uk);
-        }
-        else if (id == IDC_SETTINGS_WORLD_BOUNDARY_BTN && code == BN_CLICKED) {
-            DownloadBoundaryFromGitHubAsync(BoundaryDownloadKind::World);
-        }
         else if (id == IDC_SETTINGS_CLOSE_BTN && code == BN_CLICKED) {
             ShowWindow(m_settingsWnd, SW_HIDE);
         }
@@ -11064,6 +13170,7 @@ private:
     HWND m_listView = nullptr;
     HWND m_detailsEdit = nullptr;
     HWND m_settingsWnd = nullptr;
+    HWND m_cacheManagerWnd = nullptr;
     HWND m_incidentFiltersWnd = nullptr;
     HWND m_incidentNotificationsWnd = nullptr;
     HWND m_notificationRegionsWnd = nullptr;
@@ -11072,6 +13179,13 @@ private:
     HWND m_templatesWizardWnd = nullptr;
     HWND m_templatesEditorWnd = nullptr;
     HWND m_accountCreatorWnd = nullptr;
+    HWND m_adminLogWnd = nullptr;
+    HWND m_adminLogTypeCombo = nullptr;
+    HWND m_adminLogListView = nullptr;
+    HWND m_legendWnd = nullptr;
+    HWND m_roadDepictionsWnd = nullptr;
+    HWND m_roadDepictionsList = nullptr;
+    HWND m_roadDepictionsRoadEdit = nullptr;
     HWND m_settingsFilterCombo = nullptr;
     HWND m_settingsOrderCombo = nullptr;
     HWND m_settingsRefreshOffRadio = nullptr;
@@ -11083,6 +13197,9 @@ private:
     HWND m_settingsSyncServerRadio = nullptr;
     HWND m_settingsPushRemoteBtn = nullptr;
     HWND m_settingsWorldBoundaryBtn = nullptr;
+    HWND m_settingsRoadsBtn = nullptr;
+    HWND m_cacheProgressBar = nullptr;
+    HWND m_cacheStatusLabel = nullptr;
     HWND m_incidentSevereCheck = nullptr;
     HWND m_incidentModerateCheck = nullptr;
     HWND m_incidentMinorCheck = nullptr;
@@ -11111,6 +13228,7 @@ private:
     HWND m_earthquakeListTimeEdit = nullptr;
     HWND m_earthquakeListPeriodRadio = nullptr;
     HWND m_earthquakeListPeriodCombo = nullptr;
+    HWND m_earthquakeListPopulatedRadiusEdit = nullptr;
     HWND m_earthquakeListRegionBtn = nullptr;
     HWND m_earthquakeListClearRegionBtn = nullptr;
     HWND m_earthquakeListView = nullptr;
@@ -11119,6 +13237,7 @@ private:
     HWND m_earthquakeNotificationTimeEdit = nullptr;
     HWND m_earthquakeNotificationPeriodRadio = nullptr;
     HWND m_earthquakeNotificationPeriodCombo = nullptr;
+    HWND m_earthquakeNotificationPopulatedRadiusEdit = nullptr;
     HWND m_weatherSystemsListWnd = nullptr;
     HWND m_weatherSystemNotificationsWnd = nullptr;
     HWND m_weatherSystemsListView = nullptr;
@@ -11162,8 +13281,10 @@ private:
     std::vector<TrafficAlert> m_allAlerts;
     std::vector<TrafficAlert> m_filteredAlerts;
     std::vector<ChatMessage> m_chatMessages;
+    std::vector<PrivateMessage> m_privateMessages;
     std::vector<MapNote> m_notes;
     std::vector<OnlineUser> m_onlineUsers;
+    std::vector<AdminLogEntry> m_adminLogEntries;
     std::unordered_map<std::wstring, MapNote> m_pendingNoteEdits;
     std::vector<AppNotification> m_notificationHistory;
     std::vector<GeoPolygon> m_incidentNotificationRegions;
@@ -11175,6 +13296,7 @@ private:
     std::vector<std::pair<std::wstring, std::wstring>> m_templateWizardVariables;
     std::vector<TemplateEditableRange> m_templateWizardTitleEditableRanges;
     std::vector<TemplateEditableRange> m_templateWizardBodyEditableRanges;
+    std::vector<PopulatedPlace> m_populatedPlaces;
     std::vector<EarthquakeEvent> m_allEarthquakes;
     std::vector<EarthquakeEvent> m_filteredEarthquakes;
     std::vector<WeatherSystemEvent> m_allWeatherSystems;
@@ -11239,10 +13361,18 @@ private:
     bool m_showMapControls = true;
     bool m_displayWorldMap = false;
     bool m_syncSettingsFromServer = false;
+    bool m_populatedPlacesLoaded = false;
+    bool m_populatedPlacesLoadAttempted = false;
+    bool m_populatedPlacesDownloadAttempted = false;
+    bool m_cacheBoundaryBusy = false;
+    bool m_cacheRoadDepictionsBusy = false;
+    bool m_cachePopulatedPlacesBusy = false;
     std::wstring m_earthquakeListMagnitudeText;
     std::wstring m_earthquakeListTimeText;
     bool m_earthquakeListUseDateFilter = false;
     std::wstring m_earthquakeListPeriodText = L"24h";
+    std::wstring m_earthquakeListPopulatedRadiusText;
+    double m_earthquakeListPopulatedRadiusMiles = 0.0;
     std::wstring m_weatherSystemsListForecastText = L"All";
     std::wstring m_weatherWarningsListPeriodText = L"24h";
     std::wstring m_floodsListPeriodText = L"24h";
@@ -11251,6 +13381,8 @@ private:
     std::wstring m_earthquakeNotificationTimeText;
     bool m_earthquakeNotificationUseDateFilter = false;
     std::wstring m_earthquakeNotificationPeriodText = L"All";
+    std::wstring m_earthquakeNotificationPopulatedRadiusText;
+    double m_earthquakeNotificationPopulatedRadiusMiles = 0.0;
     std::wstring m_weatherSystemNotificationWindText = L"39";
     double m_weatherSystemNotificationWindMph = 39.0;
     std::wstring m_alertOrder = L"Road";
@@ -11285,6 +13417,8 @@ private:
     std::unordered_map<std::wstring, FloodNotificationState> m_notifiedFloodStates;
     std::unordered_set<std::wstring> m_hiddenWeatherSystemForecastIds;
     std::unordered_set<std::wstring> m_hiddenWeatherWarningPolygonIds;
+    std::vector<std::wstring> m_roadDepictionRoadLabels = DefaultRoadDepictionRoadLabels();
+    std::unordered_set<std::wstring> m_hiddenRoadDepictionIds;
     PolygonCaptureTarget m_polygonCaptureTarget = PolygonCaptureTarget::None;
     size_t m_activeIncidentRegionIndex = static_cast<size_t>(-1);
     std::unordered_set<std::wstring> m_deletedNoteIds;

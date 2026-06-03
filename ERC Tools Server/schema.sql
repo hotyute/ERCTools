@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash CHAR(64) NOT NULL,
     password_iterations INT NOT NULL DEFAULT 150000,
     active TINYINT(1) NOT NULL DEFAULT 1,
+    muted_until TIMESTAMP NULL DEFAULT NULL,
+    muted_by BIGINT UNSIGNED NULL DEFAULT NULL,
+    muted_at TIMESTAMP NULL DEFAULT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_login_at TIMESTAMP NULL DEFAULT NULL
 );
@@ -37,8 +40,40 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     author VARCHAR(255) NOT NULL,
     body TEXT NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP NULL DEFAULT NULL,
+    deleted_by BIGINT UNSIGNED NULL DEFAULT NULL,
     INDEX idx_chat_messages_created (created_at),
     CONSTRAINT fk_chat_messages_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS private_messages (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    sender_user_id BIGINT UNSIGNED NOT NULL,
+    recipient_user_id BIGINT UNSIGNED NOT NULL,
+    body TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_by_sender_at TIMESTAMP NULL DEFAULT NULL,
+    deleted_by_recipient_at TIMESTAMP NULL DEFAULT NULL,
+    INDEX idx_private_messages_pair (sender_user_id, recipient_user_id, created_at),
+    INDEX idx_private_messages_recipient (recipient_user_id, created_at),
+    CONSTRAINT fk_private_messages_sender FOREIGN KEY (sender_user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_private_messages_recipient FOREIGN KEY (recipient_user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_session_audit (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    event_type VARCHAR(32) NOT NULL,
+    target_user_id BIGINT UNSIGNED NULL DEFAULT NULL,
+    username VARCHAR(128) NULL DEFAULT NULL,
+    display_name VARCHAR(255) NULL DEFAULT NULL,
+    position VARCHAR(32) NULL DEFAULT NULL,
+    pod VARCHAR(32) NULL DEFAULT NULL,
+    actor_user_id BIGINT UNSIGNED NULL DEFAULT NULL,
+    actor_username VARCHAR(128) NULL DEFAULT NULL,
+    details VARCHAR(255) NULL DEFAULT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_user_session_audit_created (created_at),
+    INDEX idx_user_session_audit_user (target_user_id)
 );
 
 CREATE TABLE IF NOT EXISTS map_notes (
