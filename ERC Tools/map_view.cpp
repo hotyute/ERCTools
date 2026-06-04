@@ -3302,6 +3302,13 @@ private:
         return text;
     }
 
+    static std::wstring EarthquakeRenderKey(const EarthquakeEvent& event)
+    {
+        if (!event.id.empty())
+            return event.id;
+        return event.place + L"|" + std::to_wstring(event.timeMs);
+    }
+
     void DrawEarthquakeOverlayLabel(const ViewState& view, const EarthquakeEvent& event, D2D1_POINT_2F anchor, float radius, bool forceVisible = false)
     {
         if ((!m_showEarthquakeOverlayLabels && !forceVisible) || !m_noteTextFormat)
@@ -3330,10 +3337,14 @@ private:
             const float cellSize = m_zoom <= 2 ? 18.0f : 12.0f;
             std::unordered_map<long long, EarthquakeCell> cells;
             cells.reserve(1024);
+            const EarthquakeEvent* selectedEvent = nullptr;
 
             for (const EarthquakeEvent& event : m_earthquakes) {
                 if (!event.hasLocation || !IsGeoPointInView(view, event.latitude, event.longitude))
                     continue;
+
+                if (!m_selectedId.empty() && EarthquakeRenderKey(event) == m_selectedId)
+                    selectedEvent = &event;
 
                 D2D1_POINT_2F p = GeoToScreen(view, event.latitude, event.longitude);
                 int cellX = static_cast<int>(std::floor(p.x / cellSize));
@@ -3354,6 +3365,15 @@ private:
                 m_rt->FillEllipse(D2D1::Ellipse(cell.point, radius, radius), m_earthquakeBrush.Get());
                 m_rt->DrawEllipse(D2D1::Ellipse(cell.point, radius, radius), m_borderBrush.Get(), 1.15f);
             }
+            if (selectedEvent) {
+                D2D1_POINT_2F p = GeoToScreen(view, selectedEvent->latitude, selectedEvent->longitude);
+                float radius = static_cast<float>(ClampValue(4.0 + selectedEvent->magnitude * 2.2, 5.0, 22.0));
+                m_rt->DrawEllipse(D2D1::Ellipse(p, radius + 8.0f, radius + 8.0f), m_selectedBrush.Get(), 4.0f);
+                m_rt->DrawEllipse(D2D1::Ellipse(p, radius + 13.0f, radius + 13.0f), m_selectedBrush.Get(), 1.6f);
+                m_rt->FillEllipse(D2D1::Ellipse(p, radius, radius), m_earthquakeBrush.Get());
+                m_rt->DrawEllipse(D2D1::Ellipse(p, radius, radius), m_selectedBrush.Get(), 2.4f);
+                DrawEarthquakeOverlayLabel(view, *selectedEvent, p, radius, true);
+            }
             return;
         }
 
@@ -3363,9 +3383,14 @@ private:
 
             D2D1_POINT_2F p = GeoToScreen(view, event.latitude, event.longitude);
             float radius = static_cast<float>(ClampValue(4.0 + event.magnitude * 2.2, 5.0, 22.0));
+            const bool selected = !m_selectedId.empty() && EarthquakeRenderKey(event) == m_selectedId;
+            if (selected) {
+                m_rt->DrawEllipse(D2D1::Ellipse(p, radius + 8.0f, radius + 8.0f), m_selectedBrush.Get(), 4.0f);
+                m_rt->DrawEllipse(D2D1::Ellipse(p, radius + 13.0f, radius + 13.0f), m_selectedBrush.Get(), 1.6f);
+            }
             m_rt->FillEllipse(D2D1::Ellipse(p, radius, radius), m_earthquakeBrush.Get());
-            m_rt->DrawEllipse(D2D1::Ellipse(p, radius, radius), m_borderBrush.Get(), 1.25f);
-            DrawEarthquakeOverlayLabel(view, event, p, radius, event.id == m_hoveredEarthquakeId);
+            m_rt->DrawEllipse(D2D1::Ellipse(p, radius, radius), selected ? m_selectedBrush.Get() : m_borderBrush.Get(), selected ? 2.4f : 1.25f);
+            DrawEarthquakeOverlayLabel(view, event, p, radius, selected || event.id == m_hoveredEarthquakeId);
         }
     }
 
@@ -3500,6 +3525,14 @@ private:
             if (!currentInView && !anyForecastInView)
                 continue;
 
+            D2D1_POINT_2F currentPoint{};
+            ID2D1Brush* currentBrush = WeatherForecastBrush(system.category);
+            bool haveCurrentPoint = false;
+            if (system.hasLocation) {
+                currentPoint = GeoToScreen(view, system.latitude, system.longitude);
+                haveCurrentPoint = true;
+            }
+
             D2D1_POINT_2F previous{};
             bool havePrevious = false;
             D2D1_POINT_2F lastSegmentStart{};
@@ -3511,6 +3544,18 @@ private:
                     continue;
                 D2D1_POINT_2F forecast = GeoToScreen(view, point.latitude, point.longitude);
                 ID2D1Brush* forecastBrush = WeatherForecastBrush(point.category);
+                if (!havePrevious && haveCurrentPoint) {
+                    const float dx = forecast.x - currentPoint.x;
+                    const float dy = forecast.y - currentPoint.y;
+                    if ((dx * dx + dy * dy) > 9.0f && SegmentIntersectsView(currentPoint, forecast, view)) {
+                        ID2D1Brush* connectorBrush = forecastBrush ? forecastBrush : (currentBrush ? currentBrush : m_weatherSystemBrush.Get());
+                        m_rt->DrawLine(currentPoint, forecast, connectorBrush, 2.1f);
+                        lastSegmentStart = currentPoint;
+                        lastSegmentEnd = forecast;
+                        lastSegmentBrush = connectorBrush;
+                        haveLastSegment = true;
+                    }
+                }
                 if (havePrevious && SegmentIntersectsView(previous, forecast, view)) {
                     m_rt->DrawLine(previous, forecast, forecastBrush ? forecastBrush : m_weatherSystemBrush.Get(), 2.1f);
                     lastSegmentStart = previous;
@@ -3548,9 +3593,8 @@ private:
             if (!currentInView)
                 continue;
 
-            D2D1_POINT_2F p = GeoToScreen(view, system.latitude, system.longitude);
+            D2D1_POINT_2F p = currentPoint;
             const float radius = static_cast<float>(ClampValue(8.0 + system.windKnots * 0.08, 9.0, 22.0));
-            ID2D1Brush* currentBrush = WeatherForecastBrush(system.category);
             m_rt->FillEllipse(D2D1::Ellipse(p, radius, radius), currentBrush ? currentBrush : m_weatherSystemBrush.Get());
             m_rt->DrawEllipse(D2D1::Ellipse(p, radius, radius), m_borderBrush.Get(), 1.35f);
             m_rt->DrawEllipse(D2D1::Ellipse(p, radius + 5.0f, radius + 5.0f), currentBrush ? currentBrush : m_weatherSystemBrush.Get(), 1.1f);

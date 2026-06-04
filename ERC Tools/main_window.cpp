@@ -119,6 +119,7 @@ constexpr int IDC_SETTINGS_SYNC_SERVER_RADIO = 2119;
 constexpr int IDC_SETTINGS_WORLD_BOUNDARY_BTN = 2120;
 constexpr int IDC_SETTINGS_PUSH_REMOTE_BTN = 2121;
 constexpr int IDC_SETTINGS_ROADS_BTN = 2122;
+constexpr int IDC_SETTINGS_EARTHQUAKE_RADIUS_RATIO_EDIT = 2123;
 constexpr int IDC_INCIDENT_FILTERS_TITLE_LABEL = 2201;
 constexpr int IDC_INCIDENT_FILTERS_DESC_LABEL = 2202;
 constexpr int IDC_INCIDENT_FILTERS_SEVERITY_LABEL = 2203;
@@ -3136,6 +3137,13 @@ private:
                 m_earthquakeListPopulatedRadiusMiles = MaxValue(0.0, parsedListRadius);
             else if (m_earthquakeListPopulatedRadiusText.empty() && m_earthquakeListPopulatedRadiusMiles > 0.0)
                 m_earthquakeListPopulatedRadiusText = FormatMilesSettingText(m_earthquakeListPopulatedRadiusMiles);
+            readString("earthquakePopulatedRadiusMilesPerMagnitudeTenthText", m_earthquakePopulatedRadiusMilesPerMagnitudeTenthText);
+            readDouble("earthquakePopulatedRadiusMilesPerMagnitudeTenth", m_earthquakePopulatedRadiusMilesPerMagnitudeTenth);
+            double parsedRadiusRatio = 0.0;
+            if (TryParseDoubleText(m_earthquakePopulatedRadiusMilesPerMagnitudeTenthText, parsedRadiusRatio))
+                m_earthquakePopulatedRadiusMilesPerMagnitudeTenth = MaxValue(0.0, parsedRadiusRatio);
+            else if (m_earthquakePopulatedRadiusMilesPerMagnitudeTenthText.empty())
+                m_earthquakePopulatedRadiusMilesPerMagnitudeTenthText = FormatMilesSettingText(m_earthquakePopulatedRadiusMilesPerMagnitudeTenth);
             readString("weatherSystemsListForecastText", m_weatherSystemsListForecastText);
             readString("weatherWarningsListPeriodText", m_weatherWarningsListPeriodText);
             readString("floodsListPeriodText", m_floodsListPeriodText);
@@ -3514,6 +3522,8 @@ private:
             settings["earthquakeListPeriodText"] = WideToUtf8(m_earthquakeListPeriodText);
             settings["earthquakeListPopulatedRadiusText"] = WideToUtf8(m_earthquakeListPopulatedRadiusText);
             settings["earthquakeListPopulatedRadiusMiles"] = m_earthquakeListPopulatedRadiusMiles;
+            settings["earthquakePopulatedRadiusMilesPerMagnitudeTenthText"] = WideToUtf8(m_earthquakePopulatedRadiusMilesPerMagnitudeTenthText);
+            settings["earthquakePopulatedRadiusMilesPerMagnitudeTenth"] = m_earthquakePopulatedRadiusMilesPerMagnitudeTenth;
             settings["weatherSystemsListForecastText"] = WideToUtf8(m_weatherSystemsListForecastText);
             settings["weatherWarningsListPeriodText"] = WideToUtf8(m_weatherWarningsListPeriodText);
             settings["floodsListPeriodText"] = WideToUtf8(m_floodsListPeriodText);
@@ -4700,6 +4710,74 @@ private:
             m_map.FitToPoints({ { flood.latitude, flood.longitude } }, 8);
     }
 
+    std::wstring MapSelectionIdForEarthquake(const EarthquakeEvent& event) const
+    {
+        return event.id.empty() ? EarthquakeStableKey(event) : event.id;
+    }
+
+    std::wstring MapSelectionIdForWeatherSystem(const WeatherSystemEvent& system) const
+    {
+        return system.id.empty() ? WeatherSystemStableKey(system) : system.id;
+    }
+
+    std::wstring MapSelectionIdForWeatherWarning(const WeatherWarningEvent& warning) const
+    {
+        return warning.id.empty() ? WeatherWarningStableKey(warning) : warning.id;
+    }
+
+    std::wstring MapSelectionIdForFlood(const FloodEvent& flood) const
+    {
+        return flood.id.empty() ? FloodStableKey(flood) : flood.id;
+    }
+
+    void SelectEarthquakeEventFromList(size_t index, bool centerMap)
+    {
+        if (index >= m_filteredEarthquakes.size())
+            return;
+
+        const EarthquakeEvent& event = m_filteredEarthquakes[index];
+        m_selectedId = MapSelectionIdForEarthquake(event);
+        m_map.SetSelectedId(m_selectedId);
+        if (centerMap)
+            FocusEarthquakeOnMap(event);
+    }
+
+    void SelectWeatherSystemEventFromList(size_t index, bool centerMap)
+    {
+        if (index >= m_filteredWeatherSystems.size())
+            return;
+
+        const WeatherSystemEvent& system = m_filteredWeatherSystems[index];
+        m_selectedId = MapSelectionIdForWeatherSystem(system);
+        m_map.SetSelectedId(m_selectedId);
+        if (centerMap)
+            FocusWeatherSystemOnMap(system);
+    }
+
+    void SelectWeatherWarningEventFromList(size_t index, bool centerMap)
+    {
+        if (index >= m_filteredWeatherWarnings.size())
+            return;
+
+        const WeatherWarningEvent& warning = m_filteredWeatherWarnings[index];
+        m_selectedId = MapSelectionIdForWeatherWarning(warning);
+        m_map.SetSelectedId(m_selectedId);
+        if (centerMap)
+            FocusWeatherWarningOnMap(warning);
+    }
+
+    void SelectFloodEventFromList(size_t index, bool centerMap)
+    {
+        if (index >= m_filteredFloods.size())
+            return;
+
+        const FloodEvent& flood = m_filteredFloods[index];
+        m_selectedId = MapSelectionIdForFlood(flood);
+        m_map.SetSelectedId(m_selectedId);
+        if (centerMap)
+            FocusFloodOnMap(flood);
+    }
+
     bool SelectEarthquakeNotificationSource(const std::wstring& sourceId)
     {
         ShowEarthquakeListWindow();
@@ -4733,7 +4811,7 @@ private:
         }
         if (row < 0)
             return false;
-        FocusEarthquakeOnMap(m_filteredEarthquakes[static_cast<size_t>(row)]);
+        SelectEarthquakeEventFromList(static_cast<size_t>(row), true);
         SelectListViewRow(m_earthquakeListView, row);
         return true;
     }
@@ -4758,7 +4836,7 @@ private:
         }
         if (row < 0)
             return false;
-        FocusWeatherSystemOnMap(m_filteredWeatherSystems[static_cast<size_t>(row)]);
+        SelectWeatherSystemEventFromList(static_cast<size_t>(row), true);
         SelectListViewRow(m_weatherSystemsListView, row);
         return true;
     }
@@ -4783,7 +4861,7 @@ private:
         }
         if (row < 0)
             return false;
-        FocusWeatherWarningOnMap(m_filteredWeatherWarnings[static_cast<size_t>(row)]);
+        SelectWeatherWarningEventFromList(static_cast<size_t>(row), true);
         SelectListViewRow(m_weatherWarningsListView, row);
         return true;
     }
@@ -4808,7 +4886,7 @@ private:
         }
         if (row < 0)
             return false;
-        FocusFloodOnMap(m_filteredFloods[static_cast<size_t>(row)]);
+        SelectFloodEventFromList(static_cast<size_t>(row), true);
         SelectListViewRow(m_floodsListView, row);
         return true;
     }
@@ -11152,6 +11230,15 @@ private:
         return false;
     }
 
+    double EffectiveEarthquakePopulatedRadiusMiles(double eventMagnitude, double minimumMagnitude, double baseRadiusMiles) const
+    {
+        if (baseRadiusMiles <= 0.0)
+            return 0.0;
+
+        const double extraTenths = MaxValue(0.0, (eventMagnitude - minimumMagnitude) * 10.0);
+        return baseRadiusMiles + extraTenths * MaxValue(0.0, m_earthquakePopulatedRadiusMilesPerMagnitudeTenth);
+    }
+
     bool EarthquakeMatchesNotification(const EarthquakeEvent& event) const
     {
         if (event.magnitude + 0.0001 < m_earthquakeNotificationMagnitude)
@@ -11174,7 +11261,11 @@ private:
             return false;
 
         if (m_earthquakeNotificationPopulatedRadiusMiles > 0.0) {
-            if (!EarthquakeIsWithinPopulatedAreaRadius(event, m_earthquakeNotificationPopulatedRadiusMiles))
+            const double radiusMiles = EffectiveEarthquakePopulatedRadiusMiles(
+                event.magnitude,
+                m_earthquakeNotificationMagnitude,
+                m_earthquakeNotificationPopulatedRadiusMiles);
+            if (!EarthquakeIsWithinPopulatedAreaRadius(event, radiusMiles))
                 return false;
         }
 
@@ -11613,6 +11704,8 @@ private:
         case WM_COMMAND:
             OnEarthquakeListCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_NOTIFY:
+            return OnEarthquakeListNotify(reinterpret_cast<NMHDR*>(lParam));
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
         case WM_CTLCOLOREDIT:
@@ -11791,11 +11884,13 @@ private:
     bool EarthquakeMatchesListFilters(const EarthquakeEvent& event) const
     {
         double minMagnitude = 0.0;
+        bool hasMinMagnitude = false;
         if (!m_earthquakeListMagnitudeText.empty() &&
-            TryParseDoubleText(m_earthquakeListMagnitudeText, minMagnitude) &&
-            event.magnitude + 0.0001 < minMagnitude)
+            TryParseDoubleText(m_earthquakeListMagnitudeText, minMagnitude))
         {
-            return false;
+            hasMinMagnitude = true;
+            if (event.magnitude + 0.0001 < minMagnitude)
+                return false;
         }
 
         long long afterMs = 0;
@@ -11818,7 +11913,10 @@ private:
         }
 
         if (m_earthquakeListPopulatedRadiusMiles > 0.0) {
-            if (!EarthquakeIsWithinPopulatedAreaRadius(event, m_earthquakeListPopulatedRadiusMiles))
+            const double radiusMiles = hasMinMagnitude
+                ? EffectiveEarthquakePopulatedRadiusMiles(event.magnitude, minMagnitude, m_earthquakeListPopulatedRadiusMiles)
+                : m_earthquakeListPopulatedRadiusMiles;
+            if (!EarthquakeIsWithinPopulatedAreaRadius(event, radiusMiles))
                 return false;
         }
 
@@ -11867,6 +11965,24 @@ private:
                 ++row;
             }
         }
+    }
+
+    LRESULT OnEarthquakeListNotify(NMHDR* nmh)
+    {
+        if (!nmh || nmh->hwndFrom != m_earthquakeListView || nmh->code != LVN_ITEMCHANGED || m_syncingControls)
+            return 0;
+
+        NMLISTVIEW* lv = reinterpret_cast<NMLISTVIEW*>(nmh);
+        if (lv->iItem < 0 || lv->iItem >= static_cast<int>(m_filteredEarthquakes.size()))
+            return 0;
+        if ((lv->uChanged & LVIF_STATE) == 0)
+            return 0;
+
+        const bool becameSelected = (lv->uNewState & LVIS_SELECTED) != 0 && (lv->uOldState & LVIS_SELECTED) == 0;
+        if (becameSelected)
+            SelectEarthquakeEventFromList(static_cast<size_t>(lv->iItem), true);
+
+        return 0;
     }
 
     void ApplyEarthquakeListFilters()
@@ -12334,6 +12450,10 @@ private:
         if ((lv->uChanged & LVIF_STATE) == 0)
             return 0;
 
+        const bool becameSelected = (lv->uNewState & LVIS_SELECTED) != 0 && (lv->uOldState & LVIS_SELECTED) == 0;
+        if (becameSelected)
+            SelectWeatherSystemEventFromList(static_cast<size_t>(lv->iItem), true);
+
         const UINT oldCheck = lv->uOldState & LVIS_STATEIMAGEMASK;
         const UINT newCheck = lv->uNewState & LVIS_STATEIMAGEMASK;
         if (oldCheck == newCheck)
@@ -12525,6 +12645,10 @@ private:
         if ((lv->uChanged & LVIF_STATE) == 0)
             return 0;
 
+        const bool becameSelected = (lv->uNewState & LVIS_SELECTED) != 0 && (lv->uOldState & LVIS_SELECTED) == 0;
+        if (becameSelected)
+            SelectWeatherWarningEventFromList(static_cast<size_t>(lv->iItem), true);
+
         const UINT oldCheck = lv->uOldState & LVIS_STATEIMAGEMASK;
         const UINT newCheck = lv->uNewState & LVIS_STATEIMAGEMASK;
         if (oldCheck == newCheck)
@@ -12576,6 +12700,8 @@ private:
         case WM_COMMAND:
             OnFloodsListCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_NOTIFY:
+            return OnFloodsListNotify(reinterpret_cast<NMHDR*>(lParam));
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
         case WM_CTLCOLOREDIT:
@@ -12697,6 +12823,24 @@ private:
             }
             ++row;
         }
+    }
+
+    LRESULT OnFloodsListNotify(NMHDR* nmh)
+    {
+        if (!nmh || nmh->hwndFrom != m_floodsListView || nmh->code != LVN_ITEMCHANGED || m_syncingControls)
+            return 0;
+
+        NMLISTVIEW* lv = reinterpret_cast<NMLISTVIEW*>(nmh);
+        if (lv->iItem < 0 || lv->iItem >= static_cast<int>(m_filteredFloods.size()))
+            return 0;
+        if ((lv->uChanged & LVIF_STATE) == 0)
+            return 0;
+
+        const bool becameSelected = (lv->uNewState & LVIS_SELECTED) != 0 && (lv->uOldState & LVIS_SELECTED) == 0;
+        if (becameSelected)
+            SelectFloodEventFromList(static_cast<size_t>(lv->iItem), true);
+
+        return 0;
     }
 
     void OnFloodsListCommand(int id, int code)
@@ -12963,7 +13107,7 @@ private:
 
         if (!m_settingsWnd || !IsWindow(m_settingsWnd)) {
             m_settingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClassName, L"Settings", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                CW_USEDEFAULT, CW_USEDEFAULT, 470, 560, m_hwnd, nullptr, m_hInst, this);
+                CW_USEDEFAULT, CW_USEDEFAULT, 470, 640, m_hwnd, nullptr, m_hInst, this);
         }
         SyncSettingsControls();
         ShowWindow(m_settingsWnd, SW_SHOW);
@@ -12985,13 +13129,15 @@ private:
         m_settingsSyncLocalRadio = CreateWindowExW(0, L"BUTTON", L"Local settings", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 278, 130, 24, parent, ControlId(IDC_SETTINGS_SYNC_LOCAL_RADIO), m_hInst, nullptr);
         m_settingsSyncServerRadio = CreateWindowExW(0, L"BUTTON", L"Remote Settings", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 278, 160, 24, parent, ControlId(IDC_SETTINGS_SYNC_SERVER_RADIO), m_hInst, nullptr);
         m_settingsPushRemoteBtn = CreateWindowExW(0, L"BUTTON", L"Push Settings Remotely", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 312, 220, 32, parent, ControlId(IDC_SETTINGS_PUSH_REMOTE_BTN), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 364);
-        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 390, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 428);
-        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 454, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 500, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Earthquake populated radius ratio (mi per +0.1 mag)", 18, 364);
+        m_settingsEarthquakeRadiusRatioEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 390, 120, 26, parent, ControlId(IDC_SETTINGS_EARTHQUAKE_RADIUS_RATIO_EDIT), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 436);
+        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 462, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 500);
+        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 526, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 572, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsSyncLocalRadio, m_settingsSyncServerRadio, m_settingsPushRemoteBtn, m_settingsFilterCombo, m_settingsOrderCombo, close }) {
+        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsSyncLocalRadio, m_settingsSyncServerRadio, m_settingsPushRemoteBtn, m_settingsEarthquakeRadiusRatioEdit, m_settingsFilterCombo, m_settingsOrderCombo, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -13009,6 +13155,7 @@ private:
         SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"https://www.trafficengland.com/traffic-alerts"));
         SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"213.254.181.35:8081"));
         SendMessageW(m_settingsRefreshIntervalEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"5s, 3s, 10s"));
+        SendMessageW(m_settingsEarthquakeRadiusRatioEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"10"));
 
         SendMessageW(m_settingsFilterCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Unplanned only"));
         SendMessageW(m_settingsFilterCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All alerts"));
@@ -13050,6 +13197,8 @@ private:
             ShowWindow(m_settingsPushRemoteBtn, canPush ? SW_SHOW : SW_HIDE);
             EnableWindow(m_settingsPushRemoteBtn, canPush);
         }
+        if (m_settingsEarthquakeRadiusRatioEdit)
+            SetWindowTextSafe(m_settingsEarthquakeRadiusRatioEdit, m_earthquakePopulatedRadiusMilesPerMagnitudeTenthText);
         if (m_settingsFilterCombo)
             SendMessageW(m_settingsFilterCombo, CB_SETCURSEL, m_alertFilterUnplannedOnly ? 0 : 1, 0);
         if (m_settingsOrderCombo) {
@@ -13134,6 +13283,20 @@ private:
         else if (id == IDC_SETTINGS_PUSH_REMOTE_BTN && code == BN_CLICKED) {
             PushGlobalSettingsToServerAsync();
         }
+        else if (id == IDC_SETTINGS_EARTHQUAKE_RADIUS_RATIO_EDIT && (code == EN_CHANGE || code == EN_KILLFOCUS)) {
+            std::wstring text = Trim(GetWindowTextString(m_settingsEarthquakeRadiusRatioEdit));
+            double parsed = 0.0;
+            if (TryParseDoubleText(text, parsed) && parsed >= 0.0) {
+                m_earthquakePopulatedRadiusMilesPerMagnitudeTenthText = text;
+                m_earthquakePopulatedRadiusMilesPerMagnitudeTenth = parsed;
+                ApplyEarthquakeListFilters();
+                SaveSettings();
+            }
+            else if (code == EN_KILLFOCUS) {
+                SetWindowTextSafe(m_settingsEarthquakeRadiusRatioEdit, m_earthquakePopulatedRadiusMilesPerMagnitudeTenthText);
+                SetStatusText(L"Earthquake radius ratio should be miles per +0.1 magnitude, e.g. 10.");
+            }
+        }
         else if (id == IDC_SETTINGS_ALERT_FILTER && code == CBN_SELCHANGE) {
             m_alertFilterUnplannedOnly = SendMessageW(m_settingsFilterCombo, CB_GETCURSEL, 0, 0) == 0;
             SaveSettings();
@@ -13196,6 +13359,7 @@ private:
     HWND m_settingsSyncLocalRadio = nullptr;
     HWND m_settingsSyncServerRadio = nullptr;
     HWND m_settingsPushRemoteBtn = nullptr;
+    HWND m_settingsEarthquakeRadiusRatioEdit = nullptr;
     HWND m_settingsWorldBoundaryBtn = nullptr;
     HWND m_settingsRoadsBtn = nullptr;
     HWND m_cacheProgressBar = nullptr;
@@ -13373,6 +13537,8 @@ private:
     std::wstring m_earthquakeListPeriodText = L"24h";
     std::wstring m_earthquakeListPopulatedRadiusText;
     double m_earthquakeListPopulatedRadiusMiles = 0.0;
+    std::wstring m_earthquakePopulatedRadiusMilesPerMagnitudeTenthText = L"10";
+    double m_earthquakePopulatedRadiusMilesPerMagnitudeTenth = 10.0;
     std::wstring m_weatherSystemsListForecastText = L"All";
     std::wstring m_weatherWarningsListPeriodText = L"24h";
     std::wstring m_floodsListPeriodText = L"24h";
