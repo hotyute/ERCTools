@@ -157,6 +157,27 @@ static bool IsRoadDepictionHidden(const std::unordered_set<std::wstring>& hidden
     return false;
 }
 
+static std::unordered_set<std::wstring> NormalizeRoadDepictionHiddenLabels(const std::unordered_set<std::wstring>& hiddenRoadLabels)
+{
+    std::unordered_set<std::wstring> normalized;
+    normalized.reserve(hiddenRoadLabels.size());
+    for (const std::wstring& hidden : hiddenRoadLabels) {
+        std::wstring key = ToLower(Trim(hidden));
+        if (!key.empty())
+            normalized.insert(std::move(key));
+    }
+    return normalized;
+}
+
+static bool IsRoadDepictionHiddenFast(const std::unordered_set<std::wstring>& normalizedHiddenRoadLabels, const RoadDepictionRoute& route)
+{
+    if (normalizedHiddenRoadLabels.empty())
+        return false;
+    if (!route.normalizedLabel.empty())
+        return normalizedHiddenRoadLabels.find(route.normalizedLabel) != normalizedHiddenRoadLabels.end();
+    return normalizedHiddenRoadLabels.find(ToLower(Trim(route.label))) != normalizedHiddenRoadLabels.end();
+}
+
 // Tile/cache tuning.
 constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
@@ -609,6 +630,7 @@ public:
             return;
 
         m_hiddenRoadDepictionIds = hiddenRoadLabels;
+        m_normalizedHiddenRoadDepictionIds = NormalizeRoadDepictionHiddenLabels(m_hiddenRoadDepictionIds);
         InvalidateSceneCache();
         Invalidate();
     }
@@ -1477,7 +1499,7 @@ private:
         ViewState boundaryView{};
         std::vector<SceneCacheRingSnapshot> rings;
         std::shared_ptr<const std::vector<RoadDepictionRoute>> roadRoutes;
-        std::vector<std::wstring> hiddenRoadDepictionIds;
+        std::unordered_set<std::wstring> hiddenRoadDepictionIds;
     };
 
     struct SceneCacheBuildResult
@@ -1503,7 +1525,7 @@ private:
         ViewState boundaryView{};
         std::vector<SceneCacheRingSnapshot> rings;
         std::shared_ptr<const std::vector<RoadDepictionRoute>> roadRoutes;
-        std::vector<std::wstring> hiddenRoadDepictionIds;
+        std::unordered_set<std::wstring> hiddenRoadDepictionIds;
     };
 
     struct SceneTileBuildResult
@@ -1671,6 +1693,79 @@ private:
         if (route.maxLat < view.minLat || route.minLat > view.maxLat)
             return false;
         return AnyPointInViewStatic(view, route.points);
+    }
+
+    static const std::vector<GeoPoint>& RoadRoutePointsForZoom(const RoadDepictionRoute& route, int zoom)
+    {
+        if (zoom <= 7 && route.farPoints.size() >= 2)
+            return route.farPoints;
+        if (zoom <= 10 && route.midPoints.size() >= 2)
+            return route.midPoints;
+        if (zoom <= 13 && route.nearPoints.size() >= 2)
+            return route.nearPoints;
+        return route.points;
+    }
+
+    static void RoadRouteBoundsForZoom(
+        const RoadDepictionRoute& route,
+        int zoom,
+        double& minLat,
+        double& maxLat,
+        double& minLon,
+        double& maxLon)
+    {
+        if (zoom <= 7 && route.farPoints.size() >= 2) {
+            minLat = route.farMinLat;
+            maxLat = route.farMaxLat;
+            minLon = route.farMinLon;
+            maxLon = route.farMaxLon;
+            return;
+        }
+        if (zoom <= 10 && route.midPoints.size() >= 2) {
+            minLat = route.midMinLat;
+            maxLat = route.midMaxLat;
+            minLon = route.midMinLon;
+            maxLon = route.midMaxLon;
+            return;
+        }
+        if (zoom <= 13 && route.nearPoints.size() >= 2) {
+            minLat = route.nearMinLat;
+            maxLat = route.nearMaxLat;
+            minLon = route.nearMinLon;
+            maxLon = route.nearMaxLon;
+            return;
+        }
+
+        minLat = route.minLat;
+        maxLat = route.maxLat;
+        minLon = route.minLon;
+        maxLon = route.maxLon;
+    }
+
+    static bool RoadBoundsIntersectView(const ViewState& view, double minLat, double maxLat, double minLon, double maxLon)
+    {
+        if (maxLat < view.minLat || minLat > view.maxLat)
+            return false;
+        return LongitudeRangesIntersect(view, minLon, maxLon);
+    }
+
+    static bool RoadRouteIntersectsView(const ViewState& view, const RoadDepictionRoute& route, int zoom)
+    {
+        double minLat = 0.0;
+        double maxLat = 0.0;
+        double minLon = 0.0;
+        double maxLon = 0.0;
+        RoadRouteBoundsForZoom(route, zoom, minLat, maxLat, minLon, maxLon);
+        return RoadBoundsIntersectView(view, minLat, maxLat, minLon, maxLon);
+    }
+
+    static bool RoadSegmentIntersectsView(const ViewState& view, const GeoPoint& a, const GeoPoint& b)
+    {
+        const double minLat = MinValue(a.lat, b.lat);
+        const double maxLat = MaxValue(a.lat, b.lat);
+        const double minLon = MinValue(a.lon, b.lon);
+        const double maxLon = MaxValue(a.lon, b.lon);
+        return RoadBoundsIntersectView(view, minLat, maxLat, minLon, maxLon);
     }
 
     static bool RectsIntersect(const D2D1_RECT_F& a, const D2D1_RECT_F& b)
@@ -5838,7 +5933,7 @@ private:
         const ViewState& view,
         int zoom,
         const std::shared_ptr<const std::vector<RoadDepictionRoute>>& roadRoutes,
-        const std::vector<std::wstring>& hiddenRoadDepictionIds)
+        const std::unordered_set<std::wstring>& hiddenRoadDepictionIds)
     {
         if (!rt || !roadBrush || !casingBrush)
             return;
@@ -5848,14 +5943,18 @@ private:
         const float casingWidth = zoom >= 8 ? 7.0f : 5.0f;
         const float roadWidth = zoom >= 8 ? 4.0f : 3.0f;
         for (const RoadDepictionRoute& route : *roadRoutes) {
-            if (IsRoadDepictionHidden(hiddenRoadDepictionIds, route.label))
+            if (IsRoadDepictionHiddenFast(hiddenRoadDepictionIds, route))
                 continue;
-            if (!RoadRouteIntersectsView(view, route))
+            if (!RoadRouteIntersectsView(view, route, zoom))
                 continue;
 
-            for (size_t i = 1; i < route.points.size(); ++i) {
-                D2D1_POINT_2F a = GeoToScreenForZoom(view, route.points[i - 1].lat, route.points[i - 1].lon, zoom);
-                D2D1_POINT_2F b = GeoToScreenForZoom(view, route.points[i].lat, route.points[i].lon, zoom);
+            const std::vector<GeoPoint>& points = RoadRoutePointsForZoom(route, zoom);
+            for (size_t i = 1; i < points.size(); ++i) {
+                if (!RoadSegmentIntersectsView(view, points[i - 1], points[i]))
+                    continue;
+
+                D2D1_POINT_2F a = GeoToScreenForZoom(view, points[i - 1].lat, points[i - 1].lon, zoom);
+                D2D1_POINT_2F b = GeoToScreenForZoom(view, points[i].lat, points[i].lon, zoom);
                 rt->DrawLine(a, b, casingBrush, casingWidth);
                 rt->DrawLine(a, b, roadBrush, roadWidth);
             }
@@ -5872,14 +5971,18 @@ private:
         const float casingWidth = m_zoom >= 8 ? 7.0f : 5.0f;
         const float roadWidth = m_zoom >= 8 ? 4.0f : 3.0f;
         for (const RoadDepictionRoute& route : *m_roadDepictionRoutes) {
-            if (IsRoadDepictionHidden(m_hiddenRoadDepictionIds, route.label))
+            if (IsRoadDepictionHiddenFast(m_normalizedHiddenRoadDepictionIds, route))
                 continue;
-            if (!RoadRouteIntersectsView(view, route))
+            if (!RoadRouteIntersectsView(view, route, m_zoom))
                 continue;
 
-            for (size_t i = 1; i < route.points.size(); ++i) {
-                D2D1_POINT_2F a = GeoToScreen(view, route.points[i - 1].lat, route.points[i - 1].lon);
-                D2D1_POINT_2F b = GeoToScreen(view, route.points[i].lat, route.points[i].lon);
+            const std::vector<GeoPoint>& points = RoadRoutePointsForZoom(route, m_zoom);
+            for (size_t i = 1; i < points.size(); ++i) {
+                if (!RoadSegmentIntersectsView(view, points[i - 1], points[i]))
+                    continue;
+
+                D2D1_POINT_2F a = GeoToScreen(view, points[i - 1].lat, points[i - 1].lon);
+                D2D1_POINT_2F b = GeoToScreen(view, points[i].lat, points[i].lon);
                 m_rt->DrawLine(a, b, m_roadCasingBrush.Get(), casingWidth);
                 m_rt->DrawLine(a, b, m_roadBrush.Get(), roadWidth);
             }
@@ -5888,18 +5991,25 @@ private:
 
     void DrawRoadDepictionLabels(const ViewState& view)
     {
-        if (!m_rt || !m_showRoadDepictions || !m_noteTextFormat || m_zoom < 7)
+        if (!m_rt || !m_showRoadDepictions || !m_noteTextFormat || m_zoom < 7 || m_interactivePan)
             return;
         if (!m_roadDepictionRoutes)
             return;
 
         std::unordered_set<std::wstring> drawnLabels;
         for (const RoadDepictionRoute& route : *m_roadDepictionRoutes) {
-            if (IsRoadDepictionHidden(m_hiddenRoadDepictionIds, route.label))
+            if (IsRoadDepictionHiddenFast(m_normalizedHiddenRoadDepictionIds, route))
                 continue;
-            if (!drawnLabels.insert(ToLower(route.label)).second)
+            if (!RoadRouteIntersectsView(view, route, m_zoom))
                 continue;
-            const GeoPoint& mid = route.points[route.points.size() / 2];
+
+            std::wstring labelKey = !route.normalizedLabel.empty() ? route.normalizedLabel : ToLower(route.label);
+            if (!drawnLabels.insert(labelKey).second)
+                continue;
+            const std::vector<GeoPoint>& points = RoadRoutePointsForZoom(route, m_zoom);
+            if (points.empty())
+                continue;
+            const GeoPoint& mid = points[points.size() / 2];
             if (IsGeoPointInView(view, mid.lat, mid.lon)) {
                 D2D1_POINT_2F p = GeoToScreen(view, mid.lat, mid.lon);
                 D2D1_RECT_F rect = D2D1::RectF(p.x + 6.0f, p.y - 12.0f, p.x + 74.0f, p.y + 12.0f);
@@ -6605,7 +6715,7 @@ private:
         request->displayWorldMap = m_displayWorldMap;
         request->includeRoadDepictions = !m_displayWorldMap && m_showRoadDepictions;
         request->roadRoutes = m_roadDepictionRoutes;
-        request->hiddenRoadDepictionIds.assign(m_hiddenRoadDepictionIds.begin(), m_hiddenRoadDepictionIds.end());
+        request->hiddenRoadDepictionIds = m_normalizedHiddenRoadDepictionIds;
 
         const ViewState cacheView = BuildViewStateForSize(request->cacheWidth, request->cacheHeight);
         request->centerWorld = cacheView.centerWorld;
@@ -6771,7 +6881,7 @@ private:
         request->tileSize = kSceneTileSize;
         request->includeRoadDepictions = !key.world && m_showRoadDepictions;
         request->roadRoutes = m_roadDepictionRoutes;
-        request->hiddenRoadDepictionIds.assign(m_hiddenRoadDepictionIds.begin(), m_hiddenRoadDepictionIds.end());
+        request->hiddenRoadDepictionIds = m_normalizedHiddenRoadDepictionIds;
 
         const double tileLeft = static_cast<double>(key.x) * kSceneTileSize;
         const double tileTop = static_cast<double>(key.y) * kSceneTileSize;
@@ -8090,6 +8200,7 @@ private:
     std::shared_ptr<const std::vector<RoadDepictionRoute>> m_roadDepictionRoutes =
         std::make_shared<std::vector<RoadDepictionRoute>>(BuiltInRoadDepictionRoutes());
     std::unordered_set<std::wstring> m_hiddenRoadDepictionIds;
+    std::unordered_set<std::wstring> m_normalizedHiddenRoadDepictionIds;
     bool m_displayWorldMap = false;
     bool m_showFpsCounter = false;
     bool m_showToolbarPanel = true;

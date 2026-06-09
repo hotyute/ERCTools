@@ -7,21 +7,67 @@
 
 namespace
 {
-    void SetRouteBounds(RoadDepictionRoute& route)
+    void SetPointBounds(
+        const std::vector<GeoPoint>& points,
+        double& minLat,
+        double& maxLat,
+        double& minLon,
+        double& maxLon)
     {
-        if (route.points.empty()) {
-            route.minLat = route.maxLat = route.minLon = route.maxLon = 0.0;
+        if (points.empty()) {
+            minLat = maxLat = minLon = maxLon = 0.0;
             return;
         }
 
-        route.minLat = route.maxLat = route.points.front().lat;
-        route.minLon = route.maxLon = route.points.front().lon;
-        for (const GeoPoint& point : route.points) {
-            route.minLat = MinValue(route.minLat, point.lat);
-            route.maxLat = MaxValue(route.maxLat, point.lat);
-            route.minLon = MinValue(route.minLon, point.lon);
-            route.maxLon = MaxValue(route.maxLon, point.lon);
+        minLat = maxLat = points.front().lat;
+        minLon = maxLon = points.front().lon;
+        for (const GeoPoint& point : points) {
+            minLat = MinValue(minLat, point.lat);
+            maxLat = MaxValue(maxLat, point.lat);
+            minLon = MinValue(minLon, point.lon);
+            maxLon = MaxValue(maxLon, point.lon);
         }
+    }
+
+    std::vector<GeoPoint> SimplifyRoadLine(const std::vector<GeoPoint>& source, double toleranceDegrees)
+    {
+        if (source.size() < 4 || toleranceDegrees <= 0.0)
+            return source;
+
+        const double toleranceSq = toleranceDegrees * toleranceDegrees;
+        std::vector<GeoPoint> simplified;
+        simplified.reserve(source.size());
+        simplified.push_back(source.front());
+
+        GeoPoint lastKept = source.front();
+        for (size_t i = 1; i + 1 < source.size(); ++i) {
+            const GeoPoint& pt = source[i];
+            const double dLat = pt.lat - lastKept.lat;
+            const double dLon = pt.lon - lastKept.lon;
+            if (dLat * dLat + dLon * dLon >= toleranceSq) {
+                simplified.push_back(pt);
+                lastKept = pt;
+            }
+        }
+
+        simplified.push_back(source.back());
+        return simplified.size() >= 2 ? simplified : source;
+    }
+
+    void PrepareRouteRenderData(RoadDepictionRoute& route)
+    {
+        route.normalizedLabel = ToLower(Trim(route.label));
+
+        SetPointBounds(route.points, route.minLat, route.maxLat, route.minLon, route.maxLon);
+
+        route.farPoints = SimplifyRoadLine(route.points, 0.018);
+        SetPointBounds(route.farPoints, route.farMinLat, route.farMaxLat, route.farMinLon, route.farMaxLon);
+
+        route.midPoints = SimplifyRoadLine(route.points, 0.006);
+        SetPointBounds(route.midPoints, route.midMinLat, route.midMaxLat, route.midMinLon, route.midMaxLon);
+
+        route.nearPoints = SimplifyRoadLine(route.points, 0.0015);
+        SetPointBounds(route.nearPoints, route.nearMinLat, route.nearMaxLat, route.nearMinLon, route.nearMaxLon);
     }
 
     RoadDepictionRoute MakeRoute(const std::wstring& label, std::vector<GeoPoint> points)
@@ -29,7 +75,7 @@ namespace
         RoadDepictionRoute route;
         route.label = label;
         route.points = std::move(points);
-        SetRouteBounds(route);
+        PrepareRouteRenderData(route);
         return route;
     }
 
