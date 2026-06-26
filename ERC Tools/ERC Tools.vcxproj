@@ -19,49 +19,62 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="app.cpp" />
-    <ClCompile Include="app_state.cpp" />
-    <ClCompile Include="binary_protocol.cpp" />
-    <ClCompile Include="client_update.cpp" />
-    <ClCompile Include="earthquake_data.cpp" />
-    <ClCompile Include="http.cpp" />
-    <ClCompile Include="login_dialog.cpp" />
-    <ClCompile Include="main_window.cpp" />
-    <ClCompile Include="map_overlay_ui.cpp" />
-    <ClCompile Include="map_view.cpp" />
-    <ClCompile Include="parsing.cpp" />
-    <ClCompile Include="populated_places.cpp" />
-    <ClCompile Include="road_data.cpp" />
-    <ClCompile Include="time_filters.cpp" />
-    <ClCompile Include="util.cpp" />
-    <ClCompile Include="weather_data.cpp" />
-    <ClCompile Include="weather_intensity.cpp" />
-    <ClCompile Include="win32_ui_helpers.cpp" />
+    <ClCompile Include="src\app\app.cpp" />
+    <ClCompile Include="src\app\app_state.cpp" />
+    <ClCompile Include="src\net\binary_protocol.cpp" />
+    <ClCompile Include="src\net\client_update.cpp" />
+    <ClCompile Include="src\data\parsers\earthquake_data.cpp" />
+    <ClCompile Include="src\net\http.cpp" />
+    <ClCompile Include="src\ui\windows\login_dialog.cpp" />
+    <ClCompile Include="src\ui\windows\main_window.cpp" />
+    <ClCompile Include="src\map\map_overlay_ui.cpp" />
+    <ClCompile Include="src\map\map_view.cpp" />
+    <ClCompile Include="src\data\parsers\parsing.cpp" />
+    <ClCompile Include="src\data\places\populated_places.cpp" />
+    <ClCompile Include="src\data\roads\road_data.cpp" />
+    <ClCompile Include="src\audio\sound_cues.cpp" />
+    <ClCompile Include="src\data\time_filters.cpp" />
+    <ClCompile Include="src\data\parsers\traffic_scotland.cpp" />
+    <ClCompile Include="src\core\util.cpp" />
+    <ClCompile Include="src\data\parsers\weather_data.cpp" />
+    <ClCompile Include="src\data\weather\weather_intensity.cpp" />
+    <ClCompile Include="src\ui\windows\win32_ui_helpers.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="app_state.h" />
-    <ClInclude Include="auth_session.h" />
-    <ClInclude Include="binary_protocol.h" />
-    <ClInclude Include="client_update.h" />
-    <ClInclude Include="common.h" />
-    <ClInclude Include="earthquake_data.h" />
-    <ClInclude Include="http.h" />
-    <ClInclude Include="login_dialog.h" />
-    <ClInclude Include="main_window.h" />
-    <ClInclude Include="map_overlay_ui.h" />
-    <ClInclude Include="map_view.h" />
-    <ClInclude Include="models.h" />
-    <ClInclude Include="parsing.h" />
-    <ClInclude Include="populated_places.h" />
-    <ClInclude Include="road_data.h" />
-    <ClInclude Include="time_filters.h" />
-    <ClInclude Include="util.h" />
-    <ClInclude Include="weather_data.h" />
-    <ClInclude Include="weather_intensity.h" />
-    <ClInclude Include="win32_ui_helpers.h" />
+    <ClInclude Include="include\app\app_state.h" />
+    <ClInclude Include="include\net\auth_session.h" />
+    <ClInclude Include="include\net\binary_protocol.h" />
+    <ClInclude Include="include\net\client_update.h" />
+    <ClInclude Include="include\core\common.h" />
+    <ClInclude Include="include\data\parsers\earthquake_data.h" />
+    <ClInclude Include="include\net\http.h" />
+    <ClInclude Include="include\ui\windows\login_dialog.h" />
+    <ClInclude Include="include\ui\windows\main_window.h" />
+    <ClInclude Include="include\map\map_overlay_ui.h" />
+    <ClInclude Include="include\map\map_view.h" />
+    <ClInclude Include="include\core\models.h" />
+    <ClInclude Include="include\data\parsers\parsing.h" />
+    <ClInclude Include="include\data\places\populated_places.h" />
+    <ClInclude Include="include\data\roads\road_data.h" />
+    <ClInclude Include="include\audio\sound_cues.h" />
+    <ClInclude Include="include\data\time_filters.h" />
+    <ClInclude Include="include\data\parsers\traffic_scotland.h" />
+    <ClInclude Include="include\core\util.h" />
+    <ClInclude Include="include\data\parsers\weather_data.h" />
+    <ClInclude Include="include\data\weather\weather_intensity.h" />
+    <ClInclude Include="include\ui\windows\win32_ui_helpers.h" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="app.manifest" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="assets\sounds\message.wav" />
+    <Content Include="assets\sounds\notification.wav" />
+    <Content Include="assets\sounds\private_message.wav" />
+    <Content Include="assets\sounds\README.txt" />
+    <Content Include="assets\sounds\timer_complete.wav" />
+    <Content Include="assets\sounds\timer_start.wav" />
+    <Content Include="assets\sounds\timer_warning.wav" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
@@ -124,6 +137,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -138,6 +152,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -151,6 +166,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp23</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -168,6 +184,7 @@
       <LanguageStandard>stdcpp23</LanguageStandard>
       <LanguageStandard_C>Default</LanguageStandard_C>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -178,6 +195,15 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ItemGroup>
+    <SoundAsset Include="$(ProjectDir)assets\sounds\**\*.*" />
+  </ItemGroup>
+  <Target Name="CopySoundAssets" AfterTargets="Build">
+    <Copy
+      SourceFiles="@(SoundAsset)"
+      DestinationFiles="@(SoundAsset->'$(TargetDir)assets\sounds\%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

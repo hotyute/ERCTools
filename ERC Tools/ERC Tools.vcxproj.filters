@@ -13,128 +13,235 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="Source Files\data">
+      <UniqueIdentifier>{5E74CF87-44F1-4937-8A8D-0F4FCA4F3B98}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\data\parsers">
+      <UniqueIdentifier>{A6A7DAA8-5646-4217-9FDD-1273367D14F6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\data">
+      <UniqueIdentifier>{6550640A-6293-4385-A5E4-742ED9E41D96}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\data\parsers">
+      <UniqueIdentifier>{A2700E1B-E899-4A2C-965A-B7900860C63C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\app">
+      <UniqueIdentifier>{D01FBE72-A78A-4CE3-8C1D-D626741515F0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\ui">
+      <UniqueIdentifier>{EA903FFD-A669-4B17-A2F6-926AFA1820E4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\ui\windows">
+      <UniqueIdentifier>{4D90C6C1-072B-4D5B-BF4D-A33A526CA661}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\map">
+      <UniqueIdentifier>{1FC2960D-5E29-4B1B-9DCA-4B8944010B89}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\data\places">
+      <UniqueIdentifier>{12381713-A6FB-44F7-B593-AFFE45C6F3AF}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\data\roads">
+      <UniqueIdentifier>{D9C86297-F84B-4445-B5B6-3294B26006A2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\data\weather">
+      <UniqueIdentifier>{2A89F597-65D1-4855-AABD-DABD77BB9922}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\net">
+      <UniqueIdentifier>{FA28EA2D-FB12-4ADA-BB98-F6A34B9C225B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\audio">
+      <UniqueIdentifier>{F342EBCE-E76A-4AE9-9C85-F2D197AB232D}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\core">
+      <UniqueIdentifier>{489CC5AF-B581-41FC-AD22-589F8AE79C6F}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\app">
+      <UniqueIdentifier>{304B9A12-75A5-4EF7-9276-500B800A8F41}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\ui">
+      <UniqueIdentifier>{3AB9557D-4845-4A63-AC94-DCF0DE6D1652}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\ui\windows">
+      <UniqueIdentifier>{9C66A267-3CD6-4016-B946-9B7C875618FD}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\map">
+      <UniqueIdentifier>{919DDA6A-7B92-4CCF-9502-4A739B958D1E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\data\places">
+      <UniqueIdentifier>{4C7BE1BA-000F-4C12-A819-14AAE0D8DF15}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\data\roads">
+      <UniqueIdentifier>{75B473FA-4956-4843-8FB3-711C20F0C84F}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\data\weather">
+      <UniqueIdentifier>{896A3AF6-61CD-4451-8561-0A4F6272872C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\net">
+      <UniqueIdentifier>{DFC8CAF2-49D8-4EA9-AE93-3CF5853B369E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\audio">
+      <UniqueIdentifier>{1B3DA4AA-22AC-4334-8586-E22F9B0C9A9E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\core">
+      <UniqueIdentifier>{ACC1BE69-2F69-4852-A9DB-AE06D5A05FEA}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="app.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\app\app.cpp">
+      <Filter>Source Files\app</Filter>
     </ClCompile>
-    <ClCompile Include="app_state.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\app\app_state.cpp">
+      <Filter>Source Files\app</Filter>
     </ClCompile>
-    <ClCompile Include="binary_protocol.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\net\binary_protocol.cpp">
+      <Filter>Source Files\net</Filter>
     </ClCompile>
-    <ClCompile Include="client_update.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\net\client_update.cpp">
+      <Filter>Source Files\net</Filter>
     </ClCompile>
-    <ClCompile Include="earthquake_data.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\data\parsers\earthquake_data.cpp">
+      <Filter>Source Files\data\parsers</Filter>
     </ClCompile>
-    <ClCompile Include="http.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\net\http.cpp">
+      <Filter>Source Files\net</Filter>
     </ClCompile>
-    <ClCompile Include="login_dialog.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\ui\windows\login_dialog.cpp">
+      <Filter>Source Files\ui\windows</Filter>
     </ClCompile>
-    <ClCompile Include="main_window.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\ui\windows\main_window.cpp">
+      <Filter>Source Files\ui\windows</Filter>
     </ClCompile>
-    <ClCompile Include="map_overlay_ui.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\map\map_overlay_ui.cpp">
+      <Filter>Source Files\map</Filter>
     </ClCompile>
-    <ClCompile Include="map_view.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\map\map_view.cpp">
+      <Filter>Source Files\map</Filter>
     </ClCompile>
-    <ClCompile Include="parsing.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\data\parsers\parsing.cpp">
+      <Filter>Source Files\data\parsers</Filter>
     </ClCompile>
-    <ClCompile Include="populated_places.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\data\places\populated_places.cpp">
+      <Filter>Source Files\data\places</Filter>
     </ClCompile>
-    <ClCompile Include="road_data.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\data\roads\road_data.cpp">
+      <Filter>Source Files\data\roads</Filter>
     </ClCompile>
-    <ClCompile Include="time_filters.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\audio\sound_cues.cpp">
+      <Filter>Source Files\audio</Filter>
     </ClCompile>
-    <ClCompile Include="util.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\data\time_filters.cpp">
+      <Filter>Source Files\data</Filter>
     </ClCompile>
-    <ClCompile Include="weather_data.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\data\parsers\traffic_scotland.cpp">
+      <Filter>Source Files\data\parsers</Filter>
     </ClCompile>
-    <ClCompile Include="win32_ui_helpers.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\core\util.cpp">
+      <Filter>Source Files\core</Filter>
     </ClCompile>
-    <ClCompile Include="weather_intensity.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\data\parsers\weather_data.cpp">
+      <Filter>Source Files\data\parsers</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\windows\win32_ui_helpers.cpp">
+      <Filter>Source Files\ui\windows</Filter>
+    </ClCompile>
+    <ClCompile Include="src\data\weather\weather_intensity.cpp">
+      <Filter>Source Files\data\weather</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="app_state.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\app\app_state.h">
+      <Filter>Header Files\app</Filter>
     </ClInclude>
-    <ClInclude Include="auth_session.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\net\auth_session.h">
+      <Filter>Header Files\net</Filter>
     </ClInclude>
-    <ClInclude Include="binary_protocol.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\net\binary_protocol.h">
+      <Filter>Header Files\net</Filter>
     </ClInclude>
-    <ClInclude Include="client_update.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\net\client_update.h">
+      <Filter>Header Files\net</Filter>
     </ClInclude>
-    <ClInclude Include="common.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\core\common.h">
+      <Filter>Header Files\core</Filter>
     </ClInclude>
-    <ClInclude Include="earthquake_data.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\data\parsers\earthquake_data.h">
+      <Filter>Header Files\data\parsers</Filter>
     </ClInclude>
-    <ClInclude Include="http.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\net\http.h">
+      <Filter>Header Files\net</Filter>
     </ClInclude>
-    <ClInclude Include="login_dialog.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\ui\windows\login_dialog.h">
+      <Filter>Header Files\ui\windows</Filter>
     </ClInclude>
-    <ClInclude Include="main_window.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\ui\windows\main_window.h">
+      <Filter>Header Files\ui\windows</Filter>
     </ClInclude>
-    <ClInclude Include="map_overlay_ui.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\map\map_overlay_ui.h">
+      <Filter>Header Files\map</Filter>
     </ClInclude>
-    <ClInclude Include="map_view.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\map\map_view.h">
+      <Filter>Header Files\map</Filter>
     </ClInclude>
-    <ClInclude Include="models.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\core\models.h">
+      <Filter>Header Files\core</Filter>
     </ClInclude>
-    <ClInclude Include="parsing.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\data\parsers\parsing.h">
+      <Filter>Header Files\data\parsers</Filter>
     </ClInclude>
-    <ClInclude Include="populated_places.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\data\places\populated_places.h">
+      <Filter>Header Files\data\places</Filter>
     </ClInclude>
-    <ClInclude Include="road_data.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\data\roads\road_data.h">
+      <Filter>Header Files\data\roads</Filter>
     </ClInclude>
-    <ClInclude Include="time_filters.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\audio\sound_cues.h">
+      <Filter>Header Files\audio</Filter>
     </ClInclude>
-    <ClInclude Include="util.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\data\time_filters.h">
+      <Filter>Header Files\data</Filter>
     </ClInclude>
-    <ClInclude Include="weather_data.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\data\parsers\traffic_scotland.h">
+      <Filter>Header Files\data\parsers</Filter>
     </ClInclude>
-    <ClInclude Include="win32_ui_helpers.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\core\util.h">
+      <Filter>Header Files\core</Filter>
     </ClInclude>
-    <ClInclude Include="weather_intensity.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="include\data\parsers\weather_data.h">
+      <Filter>Header Files\data\parsers</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ui\windows\win32_ui_helpers.h">
+      <Filter>Header Files\ui\windows</Filter>
+    </ClInclude>
+    <ClInclude Include="include\data\weather\weather_intensity.h">
+      <Filter>Header Files\data\weather</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="app.manifest">
       <Filter>Resource Files</Filter>
     </Manifest>
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="assets\sounds\message.wav">
+      <Filter>Resource Files</Filter>
+    </Content>
+    <Content Include="assets\sounds\notification.wav">
+      <Filter>Resource Files</Filter>
+    </Content>
+    <Content Include="assets\sounds\private_message.wav">
+      <Filter>Resource Files</Filter>
+    </Content>
+    <Content Include="assets\sounds\README.txt">
+      <Filter>Resource Files</Filter>
+    </Content>
+    <Content Include="assets\sounds\timer_complete.wav">
+      <Filter>Resource Files</Filter>
+    </Content>
+    <Content Include="assets\sounds\timer_start.wav">
+      <Filter>Resource Files</Filter>
+    </Content>
+    <Content Include="assets\sounds\timer_warning.wav">
+      <Filter>Resource Files</Filter>
+    </Content>
   </ItemGroup>
 </Project>

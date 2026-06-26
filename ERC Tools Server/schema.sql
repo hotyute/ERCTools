@@ -90,3 +90,18 @@ CREATE TABLE IF NOT EXISTS map_notes (
     INDEX idx_map_notes_visible (deleted_at, updated_at),
     CONSTRAINT fk_map_notes_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS incident_exclusions (
+    key_hash CHAR(64) NOT NULL PRIMARY KEY,
+    incident_key VARCHAR(1024) NOT NULL,
+    source_id VARCHAR(255) NULL DEFAULT NULL,
+    source_name VARCHAR(64) NULL DEFAULT NULL,
+    road VARCHAR(64) NULL DEFAULT NULL,
+    summary VARCHAR(512) NULL DEFAULT NULL,
+    added_by_user_id BIGINT UNSIGNED NULL DEFAULT NULL,
+    added_by_username VARCHAR(128) NULL DEFAULT NULL,
+    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_incident_exclusions_added (added_at),
+    INDEX idx_incident_exclusions_source (source_id)
+);

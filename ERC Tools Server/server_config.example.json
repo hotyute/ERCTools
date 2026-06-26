@@ -3,6 +3,8 @@
   "workerThreads": 8,
   "sessionMinutes": 720,
   "onlineTimeoutSeconds": 30,
+  "sourceFetchIntervalSeconds": 60,
+  "serveStaleSourceCache": true,
   "databaseConnectionString": "DRIVER={Maria Unicode};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=root;PWD=!Derickandjr1010;OPTION=3;",
   "updateRoot": "updates",
   "manifestPath": "updates/manifest.json",

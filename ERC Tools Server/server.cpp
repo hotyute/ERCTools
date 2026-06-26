@@ -11,6 +11,7 @@
 #include <ws2tcpip.h>
 #include <sqlext.h>
 #include <bcrypt.h>
+#include <winhttp.h>
 
 #include <nlohmann/json.hpp>
 
@@ -26,19 +27,25 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <queue>
 #include <random>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "odbc32.lib")
 #pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "user32.lib")
 
 using json = nlohmann::json;
 
@@ -50,6 +57,8 @@ struct ServerConfig
     int workerThreads = 0;
     int sessionMinutes = 12 * 60;
     int onlineTimeoutSeconds = 30;
+    int sourceFetchIntervalSeconds = 60;
+    bool serveStaleSourceCache = true;
     std::wstring databaseConnectionString =
         L"DRIVER={Maria Unicode};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=root;PWD=!Derickandjr1010;OPTION=3;";
     std::filesystem::path updateRoot = L"updates";
@@ -88,7 +97,7 @@ static std::wstring Utf8ToWide(const std::string& s);
 static std::string WideToUtf8(const std::wstring& s);
 
 constexpr uint16_t kBinaryProtocolVersion = 1;
-constexpr uint32_t kMaxBinaryPayload = 8u * 1024u * 1024u;
+constexpr uint32_t kMaxBinaryPayload = 32u * 1024u * 1024u;
 
 constexpr uint16_t kBinaryLogin = 1;
 constexpr uint16_t kBinaryLogout = 2;
@@ -105,6 +114,10 @@ constexpr uint16_t kBinaryDeleteChatMessage = 12;
 constexpr uint16_t kBinaryKickUser = 13;
 constexpr uint16_t kBinaryMuteUser = 14;
 constexpr uint16_t kBinarySendPrivateMessage = 15;
+constexpr uint16_t kBinaryAddIncidentExclusion = 16;
+constexpr uint16_t kBinaryRemoveIncidentExclusion = 17;
+constexpr uint16_t kBinaryFetchSourceBundle = 18;
+constexpr uint16_t kBinaryWaitSourceBundle = 19;
 
 struct BinaryResponse
 {
@@ -172,6 +185,13 @@ public:
         m_data.insert(m_data.end(), text.begin(), text.end());
     }
 
+    void Bytes(const std::string& value)
+    {
+        const size_t length = std::min<size_t>(value.size(), kMaxBinaryPayload);
+        U32(static_cast<uint32_t>(length));
+        m_data.insert(m_data.end(), value.begin(), value.begin() + length);
+    }
+
     const std::vector<unsigned char>& Data() const { return m_data; }
 
 private:
@@ -223,6 +243,16 @@ public:
         m_pos += len;
         value = json::parse(text.empty() ? "{}" : text);
         return value.is_object();
+    }
+
+    bool Bytes(std::string& value)
+    {
+        uint32_t len = 0;
+        if (!U32(len) || len > kMaxBinaryPayload || Remaining() < len)
+            return false;
+        value.assign(reinterpret_cast<const char*>(m_data.data() + m_pos), len);
+        m_pos += len;
+        return true;
     }
 
 private:
@@ -1022,6 +1052,160 @@ public:
         return items;
     }
 
+    bool ClearAdminLogCategory(const std::wstring& category, std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+
+        const std::wstring clean = ToLower(TrimWide(category));
+        if (clean == L"exclusions") {
+            return db.Execute(
+                L"DELETE FROM user_session_audit "
+                L"WHERE event_type LIKE 'incident_exclusion_%' OR event_type LIKE 'exclusion_%'",
+                {},
+                errorOut);
+        }
+        if (clean == L"user_login_times") {
+            return db.Execute(
+                L"DELETE FROM user_session_audit WHERE event_type IN ('login', 'logout')",
+                {},
+                errorOut);
+        }
+
+        errorOut = L"Unknown administrator log category.";
+        return false;
+    }
+
+    json IncidentExclusions(std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return json::array();
+
+        auto rows = db.Query(
+            L"SELECT incident_key, source_id, source_name, road, summary, added_by_username, "
+            L"DATE_FORMAT(added_at, '%Y-%m-%d %H:%i:%s') "
+            L"FROM incident_exclusions ORDER BY added_at DESC",
+            {},
+            errorOut);
+        json items = json::array();
+        for (const auto& row : rows) {
+            if (row.size() < 7)
+                continue;
+            items.push_back({
+                { "key", WideToUtf8(row[0]) },
+                { "sourceId", WideToUtf8(row[1]) },
+                { "source", WideToUtf8(row[2]) },
+                { "road", WideToUtf8(row[3]) },
+                { "summary", WideToUtf8(row[4]) },
+                { "addedBy", WideToUtf8(row[5]) },
+                { "addedAt", WideToUtf8(row[6]) }
+                });
+        }
+        return items;
+    }
+
+    bool AddIncidentExclusion(
+        const UserRecord& actor,
+        const std::wstring& key,
+        const std::wstring& sourceId,
+        const std::wstring& source,
+        const std::wstring& road,
+        const std::wstring& summary,
+        std::wstring& errorOut)
+    {
+        const std::wstring cleanKey = TrimWide(key);
+        if (cleanKey.empty()) {
+            errorOut = L"Exclusion key is empty.";
+            return false;
+        }
+
+        std::string hash;
+        if (!Sha256Hex(WideToUtf8(cleanKey), hash)) {
+            errorOut = L"Could not hash the exclusion key.";
+            return false;
+        }
+
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        if (!db.Execute(
+            L"INSERT INTO incident_exclusions "
+            L"(key_hash, incident_key, source_id, source_name, road, summary, added_by_user_id, added_by_username, added_at, updated_at) "
+            L"VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+            L"ON DUPLICATE KEY UPDATE source_id = VALUES(source_id), source_name = VALUES(source_name), "
+            L"road = VALUES(road), summary = VALUES(summary), added_by_user_id = VALUES(added_by_user_id), "
+            L"added_by_username = VALUES(added_by_username), updated_at = CURRENT_TIMESTAMP",
+            {
+                Utf8ToWide(hash),
+                cleanKey,
+                TrimWide(sourceId),
+                TrimWide(source),
+                TrimWide(road),
+                TrimWide(summary),
+                actor.id,
+                actor.username
+            },
+            errorOut))
+        {
+            return false;
+        }
+
+        std::wstring auditError;
+        const std::wstring auditTarget = TrimWide(road).empty() ? TrimWide(source) : TrimWide(road);
+        db.Execute(
+            L"INSERT INTO user_session_audit "
+            L"(event_type, username, display_name, actor_user_id, actor_username, details, created_at) "
+            L"VALUES ('exclusion_add', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            { auditTarget, TrimWide(summary), actor.id, actor.username, cleanKey.substr(0, 255) },
+            auditError);
+        return true;
+    }
+
+    bool RemoveIncidentExclusion(
+        const UserRecord& actor,
+        const std::wstring& key,
+        std::wstring& errorOut)
+    {
+        const std::wstring cleanKey = TrimWide(key);
+        std::string hash;
+        if (cleanKey.empty() || !Sha256Hex(WideToUtf8(cleanKey), hash)) {
+            errorOut = L"Exclusion key is invalid.";
+            return false;
+        }
+
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        auto rows = db.Query(
+            L"SELECT source_name, road, summary FROM incident_exclusions WHERE key_hash = ? LIMIT 1",
+            { Utf8ToWide(hash) },
+            errorOut);
+        if (!errorOut.empty())
+            return false;
+        if (!db.Execute(
+            L"DELETE FROM incident_exclusions WHERE key_hash = ?",
+            { Utf8ToWide(hash) },
+            errorOut))
+        {
+            return false;
+        }
+
+        const std::wstring source = rows.empty() || rows.front().empty() ? L"" : rows.front()[0];
+        const std::wstring road = rows.empty() || rows.front().size() < 2 ? L"" : rows.front()[1];
+        const std::wstring summary = rows.empty() || rows.front().size() < 3 ? L"" : rows.front()[2];
+        const std::wstring auditTarget = TrimWide(road).empty() ? source : road;
+        std::wstring auditError;
+        db.Execute(
+            L"INSERT INTO user_session_audit "
+            L"(event_type, username, display_name, actor_user_id, actor_username, details, created_at) "
+            L"VALUES ('exclusion_remove', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            { auditTarget, summary, actor.id, actor.username, cleanKey.substr(0, 255) },
+            auditError);
+        return true;
+    }
+
     json OnlineUsers(std::wstring& errorOut)
     {
         OdbcConnection db(m_config.databaseConnectionString);
@@ -1414,6 +1598,27 @@ private:
             return false;
         }
 
+        if (!db.Execute(
+            L"CREATE TABLE IF NOT EXISTS incident_exclusions ("
+            L"key_hash CHAR(64) NOT NULL PRIMARY KEY,"
+            L"incident_key VARCHAR(1024) NOT NULL,"
+            L"source_id VARCHAR(255) NULL DEFAULT NULL,"
+            L"source_name VARCHAR(64) NULL DEFAULT NULL,"
+            L"road VARCHAR(64) NULL DEFAULT NULL,"
+            L"summary VARCHAR(512) NULL DEFAULT NULL,"
+            L"added_by_user_id BIGINT UNSIGNED NULL DEFAULT NULL,"
+            L"added_by_username VARCHAR(128) NULL DEFAULT NULL,"
+            L"added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            L"updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            L"INDEX idx_incident_exclusions_added (added_at),"
+            L"INDEX idx_incident_exclusions_source (source_id)"
+            L")",
+            {},
+            errorOut))
+        {
+            return false;
+        }
+
         return db.Execute(
             L"CREATE TABLE IF NOT EXISTS private_messages ("
             L"id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,"
@@ -1575,6 +1780,425 @@ static HttpResponse ErrorResponse(int status, const std::wstring& message, const
     return JsonResponse(status, body);
 }
 
+struct SourceBlob
+{
+    std::wstring name;
+    std::wstring url;
+    bool ok = false;
+    std::string body;
+    std::wstring error;
+};
+
+struct SourceBundle
+{
+    std::vector<SourceBlob> blobs;
+    std::wstring status;
+    std::chrono::steady_clock::time_point fetchedAt{};
+};
+
+struct SourceCacheEntry
+{
+    SourceBundle bundle;
+    std::wstring sourceType;
+    json options = json::object();
+    uint32_t generation = 0;
+};
+
+static std::wstring WinErrorText(DWORD error)
+{
+    wchar_t* buffer = nullptr;
+    const DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
+    DWORD length = FormatMessageW(flags, nullptr, error, 0, reinterpret_cast<wchar_t*>(&buffer), 0, nullptr);
+    std::wstring message = length && buffer ? std::wstring(buffer, length) : L"error " + std::to_wstring(error);
+    if (buffer)
+        LocalFree(buffer);
+    while (!message.empty() && (message.back() == L'\r' || message.back() == L'\n' || message.back() == L'.' || std::iswspace(message.back())))
+        message.pop_back();
+    return message;
+}
+
+struct WinHttpHandle
+{
+    HINTERNET handle = nullptr;
+    explicit WinHttpHandle(HINTERNET value = nullptr) : handle(value) {}
+    ~WinHttpHandle()
+    {
+        if (handle)
+            WinHttpCloseHandle(handle);
+    }
+    WinHttpHandle(const WinHttpHandle&) = delete;
+    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
+    operator HINTERNET() const { return handle; }
+};
+
+static std::wstring NormalizeAbsoluteUrl(std::wstring url)
+{
+    url = TrimWide(std::move(url));
+    if (url.empty())
+        return {};
+    std::wstring lower = ToLower(url);
+    if (lower.rfind(L"http://", 0) != 0 && lower.rfind(L"https://", 0) != 0)
+        url = L"https://" + url;
+    return url;
+}
+
+static bool ServerHttpGetText(const std::wstring& inputUrl, std::string& bodyOut, std::wstring& errorOut, DWORD timeoutMs = 15000)
+{
+    bodyOut.clear();
+    errorOut.clear();
+
+    std::wstring url = NormalizeAbsoluteUrl(inputUrl);
+    if (url.empty()) {
+        errorOut = L"Empty URL.";
+        return false;
+    }
+
+    URL_COMPONENTS parts{};
+    parts.dwStructSize = sizeof(parts);
+    wchar_t host[2048]{};
+    wchar_t path[8192]{};
+    wchar_t extra[8192]{};
+    parts.lpszHostName = host;
+    parts.dwHostNameLength = _countof(host);
+    parts.lpszUrlPath = path;
+    parts.dwUrlPathLength = _countof(path);
+    parts.lpszExtraInfo = extra;
+    parts.dwExtraInfoLength = _countof(extra);
+
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts)) {
+        errorOut = L"Could not parse source URL: " + WinErrorText(GetLastError());
+        return false;
+    }
+    if (parts.nScheme != INTERNET_SCHEME_HTTP && parts.nScheme != INTERNET_SCHEME_HTTPS) {
+        errorOut = L"Only http:// and https:// source URLs are supported.";
+        return false;
+    }
+
+    std::wstring hostName(host, parts.dwHostNameLength);
+    std::wstring object(path, parts.dwUrlPathLength);
+    object.append(extra, parts.dwExtraInfoLength);
+    if (object.empty())
+        object = L"/";
+
+    WinHttpHandle session(WinHttpOpen(L"ERC Tools Server/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!session) {
+        errorOut = L"WinHttpOpen failed: " + WinErrorText(GetLastError());
+        return false;
+    }
+    WinHttpSetTimeouts(session, static_cast<int>(timeoutMs), static_cast<int>(timeoutMs), static_cast<int>(timeoutMs), static_cast<int>(timeoutMs));
+
+    WinHttpHandle connect(WinHttpConnect(session, hostName.c_str(), parts.nPort, 0));
+    if (!connect) {
+        errorOut = L"WinHttpConnect failed: " + WinErrorText(GetLastError());
+        return false;
+    }
+
+    DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
+    WinHttpHandle request(WinHttpOpenRequest(connect, L"GET", object.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
+    if (!request) {
+        errorOut = L"WinHttpOpenRequest failed: " + WinErrorText(GetLastError());
+        return false;
+    }
+
+    DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+#ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+    protocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+#endif
+    WinHttpSetOption(request, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
+
+    const wchar_t* headers =
+        L"Accept: application/json, text/html, text/plain, */*\r\n"
+        L"Accept-Encoding: identity\r\n"
+        L"Cache-Control: no-cache\r\n";
+    if (!WinHttpSendRequest(request, headers, static_cast<DWORD>(-1L), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(request, nullptr))
+    {
+        errorOut = L"Source request failed: " + WinErrorText(GetLastError());
+        return false;
+    }
+
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
+    WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX);
+    if (status < 200 || status >= 300) {
+        errorOut = L"Source returned HTTP " + std::to_wstring(status) + L".";
+        return false;
+    }
+
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request, &available)) {
+            errorOut = L"WinHttpQueryDataAvailable failed: " + WinErrorText(GetLastError());
+            return false;
+        }
+        if (available == 0)
+            break;
+
+        if (bodyOut.size() + available > kMaxBinaryPayload) {
+            errorOut = L"Source body is larger than the binary transport limit.";
+            return false;
+        }
+        const size_t oldSize = bodyOut.size();
+        bodyOut.resize(oldSize + available);
+        DWORD read = 0;
+        if (!WinHttpReadData(request, bodyOut.data() + oldSize, available, &read)) {
+            errorOut = L"WinHttpReadData failed: " + WinErrorText(GetLastError());
+            return false;
+        }
+        bodyOut.resize(oldSize + read);
+    }
+
+    return true;
+}
+
+static bool JsonBoolOption(const json& options, const char* key, bool fallback)
+{
+    auto it = options.find(key);
+    if (it != options.end() && it->is_boolean())
+        return it->get<bool>();
+    return fallback;
+}
+
+static std::wstring JsonWideOption(const json& options, const char* key, const std::wstring& fallback = L"")
+{
+    auto it = options.find(key);
+    if (it != options.end() && it->is_string())
+        return Utf8ToWide(it->get<std::string>());
+    return fallback;
+}
+
+static bool IsTrafficEnglandAlertsPageUrlServer(std::wstring url)
+{
+    url = ToLower(NormalizeAbsoluteUrl(std::move(url)));
+    size_t fragment = url.find(L'#');
+    if (fragment != std::wstring::npos)
+        url.resize(fragment);
+    size_t query = url.find(L'?');
+    if (query != std::wstring::npos)
+        url.resize(query);
+    while (!url.empty() && url.back() == L'/')
+        url.pop_back();
+    return url == L"https://www.trafficengland.com/traffic-alerts" ||
+        url == L"https://trafficengland.com/traffic-alerts" ||
+        url == L"http://www.trafficengland.com/traffic-alerts" ||
+        url == L"http://trafficengland.com/traffic-alerts";
+}
+
+static std::wstring BuildTrafficEnglandAlertsApiUrlServer(size_t start, size_t step, bool unplannedOnly, const std::wstring& order)
+{
+    const ULONGLONG cacheBuster = GetTickCount64();
+    std::wstring url = L"https://www.trafficengland.com/api/events/getAlerts";
+    url += L"?start=" + std::to_wstring(start);
+    url += L"&step=" + std::to_wstring(step);
+    url += L"&order=" + (order.empty() ? L"Road" : order);
+    url += L"&is_current=1";
+    url += unplannedOnly
+        ? L"&events=CONGESTION,FULL_CLOSURES,INCIDENT,WEATHER,ABNORMAL_LOADS"
+        : L"&events=CONGESTION,FULL_CLOSURES,ROADWORKS,INCIDENT,WEATHER,MAJOR_ORGANISED_EVENTS,ABNORMAL_LOADS";
+    url += L"&unconfirmed=false";
+    url += L"&completed=false";
+    url += L"&includeUnconfirmedRoadworks=true";
+    url += L"&_=" + std::to_wstring(cacheBuster + start);
+    return url;
+}
+
+static size_t LargestJsonArraySize(const json& value)
+{
+    if (value.is_array()) {
+        size_t best = value.size();
+        for (const json& child : value)
+            best = std::max(best, LargestJsonArraySize(child));
+        return best;
+    }
+    if (value.is_object()) {
+        size_t best = 0;
+        for (auto it = value.begin(); it != value.end(); ++it)
+            best = std::max(best, LargestJsonArraySize(it.value()));
+        return best;
+    }
+    return 0;
+}
+
+static size_t EstimateRecordCountFromJsonBody(const std::string& body)
+{
+    try {
+        return LargestJsonArraySize(json::parse(body));
+    }
+    catch (...) {
+        return 0;
+    }
+}
+
+static void AddFetchedBlob(std::vector<SourceBlob>& blobs, const std::wstring& name, const std::wstring& url, DWORD timeoutMs = 15000)
+{
+    SourceBlob blob;
+    blob.name = name;
+    blob.url = url;
+    blob.ok = ServerHttpGetText(url, blob.body, blob.error, timeoutMs);
+    blobs.push_back(std::move(blob));
+}
+
+static std::wstring ResolveRelativeSourceUrl(const std::wstring& baseUrl, const std::wstring& link)
+{
+    if (link.empty())
+        return {};
+    const std::wstring lower = ToLower(link);
+    if (lower.rfind(L"http://", 0) == 0 || lower.rfind(L"https://", 0) == 0)
+        return link;
+    if (link.rfind(L"//", 0) == 0)
+        return (ToLower(baseUrl).rfind(L"http://", 0) == 0 ? L"http:" : L"https:") + link;
+
+    URL_COMPONENTS parts{};
+    parts.dwStructSize = sizeof(parts);
+    wchar_t host[2048]{};
+    wchar_t path[8192]{};
+    parts.lpszHostName = host;
+    parts.dwHostNameLength = _countof(host);
+    parts.lpszUrlPath = path;
+    parts.dwUrlPathLength = _countof(path);
+    if (!WinHttpCrackUrl(baseUrl.c_str(), 0, 0, &parts))
+        return link;
+
+    std::wstring prefix = parts.nScheme == INTERNET_SCHEME_HTTP ? L"http://" : L"https://";
+    prefix += std::wstring(host, parts.dwHostNameLength);
+    if ((parts.nScheme == INTERNET_SCHEME_HTTP && parts.nPort != 80) ||
+        (parts.nScheme == INTERNET_SCHEME_HTTPS && parts.nPort != 443))
+    {
+        prefix += L":" + std::to_wstring(parts.nPort);
+    }
+    if (!link.empty() && link.front() == L'/')
+        return prefix + link;
+
+    std::wstring basePath(path, parts.dwUrlPathLength);
+    size_t slash = basePath.find_last_of(L'/');
+    if (slash != std::wstring::npos)
+        basePath.resize(slash + 1);
+    else
+        basePath = L"/";
+    return prefix + basePath + link;
+}
+
+static std::vector<std::wstring> ExtractTrafficScotlandSids(const std::string& body)
+{
+    std::vector<std::wstring> sids;
+    std::wstring html = Utf8ToWide(body);
+    const std::wregex sidRegex(LR"erc(/more-details\?sid=([^&"'<>\s]+))erc", std::regex_constants::icase);
+    for (std::wsregex_iterator it(html.begin(), html.end(), sidRegex), end; it != end; ++it) {
+        std::wstring sid = (*it)[1].str();
+        if (!sid.empty() && std::find(sids.begin(), sids.end(), sid) == sids.end())
+            sids.push_back(std::move(sid));
+    }
+    return sids;
+}
+
+static std::vector<std::wstring> ExtractWeatherSystemDetailLinks(const std::string& body)
+{
+    std::vector<std::wstring> links;
+    std::wstring html = Utf8ToWide(body);
+    const std::wregex hrefRegex(LR"erc(href\s*=\s*(?:"([^"]+)"|'([^']+)'|([^>\s]+)))erc", std::regex_constants::icase);
+    for (std::wsregex_iterator it(html.begin(), html.end(), hrefRegex), end; it != end; ++it) {
+        std::wstring href = (*it)[1].matched ? (*it)[1].str() : ((*it)[2].matched ? (*it)[2].str() : (*it)[3].str());
+        std::wstring lowerHref = ToLower(href);
+        if (lowerHref.find(L".html") == std::wstring::npos ||
+            lowerHref.find(L"main.html") != std::wstring::npos ||
+            lowerHref.find(L"index") != std::wstring::npos)
+        {
+            continue;
+        }
+        if (std::find(links.begin(), links.end(), href) == links.end())
+            links.push_back(std::move(href));
+        if (links.size() >= 80)
+            break;
+    }
+    return links;
+}
+
+static bool BuildSourceBundle(const std::wstring& sourceType, const json& options, SourceBundle& bundleOut, std::wstring& errorOut)
+{
+    bundleOut = {};
+    bundleOut.fetchedAt = std::chrono::steady_clock::now();
+    errorOut.clear();
+
+    const std::wstring source = ToLower(TrimWide(sourceType));
+    if (source == L"roads") {
+        const std::wstring endpoint = NormalizeAbsoluteUrl(JsonWideOption(options, "endpoint", L"https://www.trafficengland.com/traffic-alerts"));
+        const bool unplannedOnly = JsonBoolOption(options, "unplannedOnly", true);
+        const std::wstring order = JsonWideOption(options, "order", L"Road");
+        if (IsTrafficEnglandAlertsPageUrlServer(endpoint)) {
+            constexpr size_t pageSize = 100;
+            constexpr size_t maxPages = 20;
+            for (size_t page = 0; page < maxPages; ++page) {
+                const std::wstring url = BuildTrafficEnglandAlertsApiUrlServer(page * pageSize, pageSize, unplannedOnly, order);
+                AddFetchedBlob(bundleOut.blobs, L"traffic_england_page", url);
+                const SourceBlob& blob = bundleOut.blobs.back();
+                if (!blob.ok) {
+                    if (page == 0)
+                        errorOut = L"Traffic England alerts API failed: " + blob.error;
+                    break;
+                }
+                const size_t returned = EstimateRecordCountFromJsonBody(blob.body);
+                if (returned == 0 || returned < pageSize)
+                    break;
+            }
+        }
+        else {
+            AddFetchedBlob(bundleOut.blobs, L"traffic_custom", endpoint);
+        }
+
+        if (JsonBoolOption(options, "trafficScotlandEnabled", false)) {
+            const std::wstring scotlandUrl = NormalizeAbsoluteUrl(JsonWideOption(options, "trafficScotlandIncidentsUrl", L"https://www.traffic.gov.scot/traffic-information/incidents"));
+            AddFetchedBlob(bundleOut.blobs, L"traffic_scotland_list", scotlandUrl);
+            if (!bundleOut.blobs.empty() && bundleOut.blobs.back().ok) {
+                std::vector<std::wstring> sids = ExtractTrafficScotlandSids(bundleOut.blobs.back().body);
+                constexpr size_t maxScotlandDetails = 250;
+                for (size_t i = 0; i < sids.size() && i < maxScotlandDetails; ++i) {
+                    const std::wstring detailUrl = L"https://www.traffic.gov.scot/more-details?sid=" + sids[i] + L"&type=incidents";
+                    AddFetchedBlob(bundleOut.blobs, L"traffic_scotland_detail:" + sids[i], detailUrl);
+                }
+            }
+        }
+    }
+    else if (source == L"earthquakes") {
+        AddFetchedBlob(bundleOut.blobs, L"earthquakes", L"https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&minlatitude=-82.94033&maxlatitude=82.9834&minlongitude=-180&maxlongitude=180&orderby=time&limit=20000");
+    }
+    else if (source == L"weather_systems") {
+        const std::wstring mainUrl = L"https://www.tropicalstormrisk.com/tracker/dynamic/main.html";
+        AddFetchedBlob(bundleOut.blobs, L"weather_systems_main", mainUrl);
+        if (!bundleOut.blobs.empty() && bundleOut.blobs.back().ok) {
+            std::vector<std::wstring> links = ExtractWeatherSystemDetailLinks(bundleOut.blobs.back().body);
+            for (const std::wstring& link : links) {
+                const std::wstring detailUrl = ResolveRelativeSourceUrl(mainUrl, link);
+                if (!detailUrl.empty())
+                    AddFetchedBlob(bundleOut.blobs, L"weather_system_detail:" + link, detailUrl);
+            }
+        }
+    }
+    else if (source == L"weather_warnings") {
+        AddFetchedBlob(bundleOut.blobs, L"weather_warnings", NormalizeAbsoluteUrl(JsonWideOption(options, "url", L"https://weather.metoffice.gov.uk/warnings-and-advice/uk-warnings")));
+    }
+    else if (source == L"floods") {
+        AddFetchedBlob(bundleOut.blobs, L"floods", NormalizeAbsoluteUrl(JsonWideOption(options, "url", L"https://environment.data.gov.uk/flood-monitoring/id/floods?_view=full")));
+    }
+    else {
+        errorOut = L"Unknown source bundle type.";
+        return false;
+    }
+
+    if (bundleOut.blobs.empty()) {
+        if (errorOut.empty())
+            errorOut = L"No source documents were fetched.";
+        return false;
+    }
+    if (std::none_of(bundleOut.blobs.begin(), bundleOut.blobs.end(), [](const SourceBlob& blob) { return blob.ok; })) {
+        if (errorOut.empty())
+            errorOut = bundleOut.blobs.front().error.empty() ? L"Every source document failed to fetch." : bundleOut.blobs.front().error;
+        return false;
+    }
+    return true;
+}
+
 static bool IsDatabaseErrorMessage(const std::wstring& message)
 {
     return message.rfind(L"Database ", 0) == 0;
@@ -1621,10 +2245,66 @@ static int CompareVersionParts(const std::wstring& a, const std::wstring& b)
     return 0;
 }
 
+static uint32_t ClampSourceFetchIntervalMs(uint64_t intervalMs)
+{
+    constexpr uint64_t minMs = 15ull * 1000ull;
+    constexpr uint64_t maxMs = 60ull * 60ull * 1000ull;
+    return static_cast<uint32_t>(std::clamp<uint64_t>(intervalMs, minMs, maxMs));
+}
+
 class ErcServer
 {
 public:
-    explicit ErcServer(ServerConfig config) : m_config(std::move(config)), m_database(m_config) {}
+    explicit ErcServer(ServerConfig config) : m_config(std::move(config)), m_database(m_config)
+    {
+        m_sourceFetchIntervalMs.store(
+            ClampSourceFetchIntervalMs(static_cast<uint64_t>(std::max(1, m_config.sourceFetchIntervalSeconds)) * 1000ull),
+            std::memory_order_release);
+        m_serveStaleSourceCache.store(m_config.serveStaleSourceCache, std::memory_order_release);
+        m_sourceRefreshThread = std::thread([this]() { SourceRefreshLoop(); });
+    }
+
+    ~ErcServer()
+    {
+        m_sourceRefreshStop.store(true, std::memory_order_release);
+        m_sourceRefreshCv.notify_all();
+        if (m_sourceRefreshThread.joinable())
+            m_sourceRefreshThread.join();
+    }
+
+    uint32_t SourceFetchIntervalMs() const
+    {
+        return m_sourceFetchIntervalMs.load(std::memory_order_acquire);
+    }
+
+    void SetSourceFetchIntervalMs(uint32_t intervalMs)
+    {
+        m_sourceFetchIntervalMs.store(ClampSourceFetchIntervalMs(intervalMs), std::memory_order_release);
+        m_sourceRefreshCv.notify_all();
+    }
+
+    bool ServeStaleSourceCache() const
+    {
+        return m_serveStaleSourceCache.load(std::memory_order_acquire);
+    }
+
+    void SetServeStaleSourceCache(bool enabled)
+    {
+        m_serveStaleSourceCache.store(enabled, std::memory_order_release);
+    }
+
+    size_t SourceCacheEntryCount()
+    {
+        std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
+        return m_sourceCache.size();
+    }
+
+    void ClearSourceCache()
+    {
+        std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
+        m_sourceCache.clear();
+        m_sourceCacheChanged.notify_all();
+    }
 
     BinaryResponse HandleBinary(uint16_t opcode, const std::vector<unsigned char>& payload)
     {
@@ -1669,6 +2349,10 @@ public:
                 return HandleBinaryMuteUser(opcode, reader, user);
             case kBinarySendPrivateMessage:
                 return HandleBinarySendPrivateMessage(opcode, reader, user);
+            case kBinaryAddIncidentExclusion:
+                return HandleBinaryAddIncidentExclusion(opcode, reader, user);
+            case kBinaryRemoveIncidentExclusion:
+                return HandleBinaryRemoveIncidentExclusion(opcode, reader, user);
             case kBinaryCreateNote:
                 return HandleBinaryCreateNote(opcode, reader, user);
             case kBinaryUpdateNote:
@@ -1679,6 +2363,10 @@ public:
                 return HandleBinaryGetSettings(opcode);
             case kBinarySetSettings:
                 return HandleBinarySetSettings(opcode, reader, user);
+            case kBinaryFetchSourceBundle:
+                return HandleBinaryFetchSourceBundle(opcode, reader, user);
+            case kBinaryWaitSourceBundle:
+                return HandleBinaryWaitSourceBundle(opcode, reader, user);
             case kBinaryCreateAccount:
                 return HandleBinaryCreateAccount(opcode, reader, user);
             default:
@@ -1715,6 +2403,14 @@ public:
                 return HandleCreateAccount(req, user);
             if (req.method == "GET" && req.path == "/api/admin/logs")
                 return HandleAdminLogs(req, user);
+            if (req.method == "DELETE" && req.path.rfind("/api/admin/logs/", 0) == 0)
+                return HandleClearAdminLogs(req, user);
+            if (req.method == "GET" && req.path == "/api/incidents/exclusions")
+                return HandleGetIncidentExclusions();
+            if (req.method == "POST" && req.path == "/api/incidents/exclusions")
+                return HandleAddIncidentExclusion(req, user);
+            if (req.method == "POST" && req.path == "/api/incidents/exclusions/remove")
+                return HandleRemoveIncidentExclusion(req, user);
             if (req.method == "GET" && req.path == "/api/chat")
                 return HandleGetChat();
             if (req.method == "POST" && req.path == "/api/chat")
@@ -1835,6 +2531,17 @@ private:
         writer.Text(JsonTextField(item, { "timestamp", "time", "createdAt" }));
     }
 
+    static void WriteIncidentExclusionJson(BinaryWriter& writer, const json& item)
+    {
+        writer.Text(JsonTextField(item, { "key", "incidentKey" }));
+        writer.Text(JsonTextField(item, { "sourceId", "source_id" }));
+        writer.Text(JsonTextField(item, { "source", "sourceName" }));
+        writer.Text(JsonTextField(item, { "road" }));
+        writer.Text(JsonTextField(item, { "summary", "title" }));
+        writer.Text(JsonTextField(item, { "addedBy", "added_by" }));
+        writer.Text(JsonTextField(item, { "addedAt", "added_at" }));
+    }
+
     uint32_t CollaborationVersion() const
     {
         return m_collaborationVersion.load(std::memory_order_acquire);
@@ -1855,6 +2562,412 @@ private:
         m_collaborationChanged.wait_for(lock, std::chrono::seconds(25), [&]() {
             return knownVersion != CollaborationVersion();
             });
+    }
+
+    static std::wstring SourceCacheKey(const std::wstring& sourceType, const json& options)
+    {
+        return ToLower(TrimWide(sourceType)) + L"\n" + Utf8ToWide(options.dump());
+    }
+
+    static uint32_t SourceBundleAgeMs(const SourceBundle& bundle)
+    {
+        const uint64_t age = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - bundle.fetchedAt).count());
+        return static_cast<uint32_t>(std::min<uint64_t>(age, std::numeric_limits<uint32_t>::max()));
+    }
+
+    uint32_t NextSourceCacheGenerationLocked()
+    {
+        uint32_t generation = m_nextSourceCacheGeneration++;
+        if (generation == 0)
+            generation = m_nextSourceCacheGeneration++;
+        if (m_nextSourceCacheGeneration == 0)
+            m_nextSourceCacheGeneration = 1;
+        return generation;
+    }
+
+    void StoreSourceCacheEntryLocked(
+        const std::wstring& key,
+        SourceBundle fresh,
+        const std::wstring& sourceType,
+        const json& options,
+        uint32_t* generationOut = nullptr)
+    {
+        SourceCacheEntry entry;
+        entry.bundle = std::move(fresh);
+        entry.sourceType = sourceType;
+        entry.options = options;
+        entry.generation = NextSourceCacheGenerationLocked();
+        if (generationOut)
+            *generationOut = entry.generation;
+        m_sourceCache[key] = std::move(entry);
+    }
+
+    void RefreshDueSourceCacheEntries()
+    {
+        struct RefreshTarget
+        {
+            std::wstring key;
+            std::wstring sourceType;
+            json options;
+        };
+
+        std::vector<RefreshTarget> targets;
+        const uint32_t ttlMs = SourceFetchIntervalMs();
+        {
+            std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
+            for (const auto& [key, entry] : m_sourceCache) {
+                if (entry.sourceType.empty() ||
+                    SourceBundleAgeMs(entry.bundle) < ttlMs ||
+                    m_sourceCacheInFlight.find(key) != m_sourceCacheInFlight.end())
+                {
+                    continue;
+                }
+                m_sourceCacheInFlight.insert(key);
+                targets.push_back({ key, entry.sourceType, entry.options });
+            }
+        }
+
+        for (const RefreshTarget& target : targets) {
+            SourceBundle fresh;
+            std::wstring error;
+            const bool fetched = BuildSourceBundle(target.sourceType, target.options, fresh, error);
+            if (fetched)
+                fresh.fetchedAt = std::chrono::steady_clock::now();
+
+            {
+                std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
+                if (fetched)
+                    StoreSourceCacheEntryLocked(target.key, std::move(fresh), target.sourceType, target.options);
+                m_sourceCacheInFlight.erase(target.key);
+            }
+            m_sourceCacheChanged.notify_all();
+        }
+    }
+
+    void SourceRefreshLoop()
+    {
+        while (!m_sourceRefreshStop.load(std::memory_order_acquire)) {
+            const auto waitFor = std::chrono::milliseconds(SourceFetchIntervalMs());
+            std::unique_lock<std::mutex> lock(m_sourceRefreshMutex);
+            m_sourceRefreshCv.wait_for(lock, waitFor, [&]() {
+                return m_sourceRefreshStop.load(std::memory_order_acquire);
+                });
+            lock.unlock();
+            if (m_sourceRefreshStop.load(std::memory_order_acquire))
+                break;
+            RefreshDueSourceCacheEntries();
+        }
+    }
+
+    bool GetCachedSourceBundle(
+        const std::wstring& sourceType,
+        uint32_t requestedIntervalMs,
+        const json& options,
+        SourceBundle& bundleOut,
+        bool& fromCacheOut,
+        uint32_t& ageMsOut,
+        uint32_t& generationOut,
+        std::wstring& errorOut)
+    {
+        bundleOut = {};
+        fromCacheOut = false;
+        ageMsOut = 0;
+        generationOut = 0;
+        errorOut.clear();
+
+        (void)requestedIntervalMs;
+        const uint32_t ttlMs = SourceFetchIntervalMs();
+        const std::wstring key = SourceCacheKey(sourceType, options);
+        {
+            std::unique_lock<std::mutex> lock(m_sourceCacheMutex);
+            auto cached = m_sourceCache.find(key);
+            if (cached != m_sourceCache.end()) {
+                const uint32_t cachedAge = SourceBundleAgeMs(cached->second.bundle);
+                if (cachedAge <= ttlMs) {
+                    bundleOut = cached->second.bundle;
+                    fromCacheOut = true;
+                    ageMsOut = cachedAge;
+                    generationOut = cached->second.generation;
+                    return true;
+                }
+            }
+
+            if (m_sourceCacheInFlight.find(key) != m_sourceCacheInFlight.end()) {
+                if (cached != m_sourceCache.end() && ServeStaleSourceCache()) {
+                    bundleOut = cached->second.bundle;
+                    fromCacheOut = true;
+                    ageMsOut = SourceBundleAgeMs(cached->second.bundle);
+                    generationOut = cached->second.generation;
+                    if (bundleOut.status.empty())
+                        bundleOut.status = L"Served cache while a refresh is already running.";
+                    else
+                        bundleOut.status += L" Served cache while a refresh is already running.";
+                    return true;
+                }
+
+                const bool completed = m_sourceCacheChanged.wait_for(
+                    lock,
+                    std::chrono::seconds(60),
+                    [&]() { return m_sourceCacheInFlight.find(key) == m_sourceCacheInFlight.end(); });
+                cached = m_sourceCache.find(key);
+                if (cached != m_sourceCache.end()) {
+                    bundleOut = cached->second.bundle;
+                    fromCacheOut = true;
+                    ageMsOut = SourceBundleAgeMs(cached->second.bundle);
+                    generationOut = cached->second.generation;
+                    return true;
+                }
+                if (!completed) {
+                    errorOut = L"Timed out waiting for server source cache refresh.";
+                    return false;
+                }
+            }
+
+            m_sourceCacheInFlight.insert(key);
+        }
+
+        SourceBundle fresh;
+        const bool fetched = BuildSourceBundle(sourceType, options, fresh, errorOut);
+        if (fetched)
+            fresh.fetchedAt = std::chrono::steady_clock::now();
+
+        {
+            std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
+            if (fetched) {
+                StoreSourceCacheEntryLocked(key, std::move(fresh), sourceType, options, &generationOut);
+                bundleOut = m_sourceCache[key].bundle;
+            }
+            m_sourceCacheInFlight.erase(key);
+        }
+        m_sourceCacheChanged.notify_all();
+
+        if (fetched)
+            return true;
+
+        {
+            std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
+            auto cached = m_sourceCache.find(key);
+            if (cached != m_sourceCache.end() && ServeStaleSourceCache()) {
+                bundleOut = cached->second.bundle;
+                fromCacheOut = true;
+                ageMsOut = SourceBundleAgeMs(cached->second.bundle);
+                generationOut = cached->second.generation;
+                if (!errorOut.empty())
+                    bundleOut.status += L" Served stale cache after fetch failure: " + errorOut;
+                return true;
+            }
+        }
+
+        if (errorOut.empty())
+            errorOut = L"Could not fetch source bundle.";
+        return false;
+    }
+
+    bool EnsureSourceCacheEntry(const std::wstring& sourceType, const json& options, std::wstring& errorOut)
+    {
+        errorOut.clear();
+        const std::wstring key = SourceCacheKey(sourceType, options);
+        {
+            std::unique_lock<std::mutex> lock(m_sourceCacheMutex);
+            if (m_sourceCache.find(key) != m_sourceCache.end())
+                return true;
+
+            if (m_sourceCacheInFlight.find(key) != m_sourceCacheInFlight.end()) {
+                const bool completed = m_sourceCacheChanged.wait_for(
+                    lock,
+                    std::chrono::seconds(60),
+                    [&]() {
+                        return m_sourceCacheInFlight.find(key) == m_sourceCacheInFlight.end() ||
+                            m_sourceCache.find(key) != m_sourceCache.end();
+                    });
+                if (m_sourceCache.find(key) != m_sourceCache.end())
+                    return true;
+                if (!completed) {
+                    errorOut = L"Timed out waiting for server source cache seed.";
+                    return false;
+                }
+            }
+
+            m_sourceCacheInFlight.insert(key);
+        }
+
+        SourceBundle fresh;
+        const bool fetched = BuildSourceBundle(sourceType, options, fresh, errorOut);
+        if (fetched)
+            fresh.fetchedAt = std::chrono::steady_clock::now();
+
+        {
+            std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
+            if (fetched)
+                StoreSourceCacheEntryLocked(key, std::move(fresh), sourceType, options);
+            m_sourceCacheInFlight.erase(key);
+        }
+        m_sourceCacheChanged.notify_all();
+
+        if (!fetched && errorOut.empty())
+            errorOut = L"Could not seed server source cache.";
+        return fetched;
+    }
+
+    bool WaitForSourceBundleChange(
+        const std::wstring& sourceType,
+        uint32_t knownGeneration,
+        uint32_t waitTimeoutMs,
+        const json& options,
+        SourceBundle& bundleOut,
+        bool& changedOut,
+        bool& fromCacheOut,
+        uint32_t& ageMsOut,
+        uint32_t& generationOut,
+        std::wstring& errorOut)
+    {
+        bundleOut = {};
+        changedOut = false;
+        fromCacheOut = true;
+        ageMsOut = 0;
+        generationOut = knownGeneration;
+        errorOut.clear();
+
+        if (!EnsureSourceCacheEntry(sourceType, options, errorOut))
+            return false;
+
+        const std::wstring key = SourceCacheKey(sourceType, options);
+        const uint32_t clampedWaitMs = std::clamp<uint32_t>(waitTimeoutMs, 1000u, 65000u);
+
+        std::unique_lock<std::mutex> lock(m_sourceCacheMutex);
+        auto cached = m_sourceCache.find(key);
+        if (cached == m_sourceCache.end()) {
+            generationOut = knownGeneration;
+            return true;
+        }
+
+        if (knownGeneration == 0 || cached->second.generation != knownGeneration) {
+            bundleOut = cached->second.bundle;
+            changedOut = true;
+            generationOut = cached->second.generation;
+            ageMsOut = SourceBundleAgeMs(cached->second.bundle);
+            return true;
+        }
+
+        m_sourceCacheChanged.wait_for(
+            lock,
+            std::chrono::milliseconds(clampedWaitMs),
+            [&]() {
+                auto latest = m_sourceCache.find(key);
+                return latest == m_sourceCache.end() || latest->second.generation != knownGeneration;
+            });
+
+        cached = m_sourceCache.find(key);
+        if (cached == m_sourceCache.end()) {
+            generationOut = knownGeneration;
+            return true;
+        }
+
+        generationOut = cached->second.generation;
+        ageMsOut = SourceBundleAgeMs(cached->second.bundle);
+        if (cached->second.generation != knownGeneration) {
+            bundleOut = cached->second.bundle;
+            changedOut = true;
+        }
+        return true;
+    }
+
+    BinaryResponse HandleBinaryFetchSourceBundle(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        (void)user;
+
+        std::wstring sourceType;
+        uint32_t requestedIntervalMs = 0;
+        json options = json::object();
+        if (!reader.Text(sourceType) ||
+            !reader.U32(requestedIntervalMs) ||
+            !reader.Json(options))
+        {
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary source-bundle payload is incomplete.");
+        }
+        if (!options.is_object())
+            options = json::object();
+
+        SourceBundle bundle;
+        bool fromCache = false;
+        uint32_t ageMs = 0;
+        uint32_t generation = 0;
+        std::wstring error;
+        if (!GetCachedSourceBundle(sourceType, requestedIntervalMs, options, bundle, fromCache, ageMs, generation, error))
+            return BinaryError(opcode, 502, "source_fetch_failed", error);
+
+        BinaryWriter writer;
+        writer.U32(ageMs);
+        writer.U32(fromCache ? 1u : 0u);
+        writer.U32(static_cast<uint32_t>(bundle.blobs.size()));
+        for (const SourceBlob& blob : bundle.blobs) {
+            writer.Text(blob.name);
+            writer.Text(blob.url);
+            writer.U32(blob.ok ? 1u : 0u);
+            writer.Bytes(blob.body);
+            writer.Text(blob.error);
+        }
+        writer.U32(generation);
+        return BinaryOk(opcode, writer);
+    }
+
+    BinaryResponse HandleBinaryWaitSourceBundle(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        (void)user;
+
+        std::wstring sourceType;
+        uint32_t knownGeneration = 0;
+        uint32_t waitTimeoutMs = 0;
+        json options = json::object();
+        if (!reader.Text(sourceType) ||
+            !reader.U32(knownGeneration) ||
+            !reader.U32(waitTimeoutMs) ||
+            !reader.Json(options))
+        {
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary source-wait payload is incomplete.");
+        }
+        if (!options.is_object())
+            options = json::object();
+
+        SourceBundle bundle;
+        bool changed = false;
+        bool fromCache = true;
+        uint32_t ageMs = 0;
+        uint32_t generation = knownGeneration;
+        std::wstring error;
+        if (!WaitForSourceBundleChange(
+            sourceType,
+            knownGeneration,
+            waitTimeoutMs,
+            options,
+            bundle,
+            changed,
+            fromCache,
+            ageMs,
+            generation,
+            error))
+        {
+            return BinaryError(opcode, 502, "source_wait_failed", error);
+        }
+
+        BinaryWriter writer;
+        writer.U32(generation);
+        writer.U32(changed ? 1u : 0u);
+        writer.U32(ageMs);
+        writer.U32(fromCache ? 1u : 0u);
+        writer.U32(changed ? static_cast<uint32_t>(bundle.blobs.size()) : 0u);
+        if (changed) {
+            for (const SourceBlob& blob : bundle.blobs) {
+                writer.Text(blob.name);
+                writer.Text(blob.url);
+                writer.U32(blob.ok ? 1u : 0u);
+                writer.Bytes(blob.body);
+                writer.Text(blob.error);
+            }
+        }
+        return BinaryOk(opcode, writer);
     }
 
     BinaryResponse HandleBinaryLogin(BinaryReader& reader)
@@ -1924,6 +3037,10 @@ private:
         if (!error.empty())
             return BinaryError(opcode, 500, "database_error", L"Private message poll failed: " + error);
 
+        json incidentExclusions = m_database.IncidentExclusions(error);
+        if (!error.empty())
+            return BinaryError(opcode, 500, "database_error", L"Incident exclusions poll failed: " + error);
+
         BinaryWriter writer;
         writer.U32(chat.is_array() ? static_cast<uint32_t>(chat.size()) : 0);
         if (chat.is_array()) {
@@ -1948,7 +3065,13 @@ private:
             for (const auto& item : privateMessages)
                 WritePrivateMessageJson(writer, item);
         }
+        // Preserve the original version field position for rolling client/server updates.
         writer.U32(CollaborationVersion());
+        writer.U32(incidentExclusions.is_array() ? static_cast<uint32_t>(incidentExclusions.size()) : 0);
+        if (incidentExclusions.is_array()) {
+            for (const auto& item : incidentExclusions)
+                WriteIncidentExclusionJson(writer, item);
+        }
         return BinaryOk(opcode, writer);
     }
 
@@ -2030,6 +3153,42 @@ private:
         std::wstring error;
         if (!m_database.AddPrivateMessage(user, recipientUsername, text, error))
             return BinaryError(opcode, IsDatabaseErrorMessage(error) ? 500 : 400, IsDatabaseErrorMessage(error) ? "database_error" : "private_message_failed", error);
+        NotifyCollaborationChanged();
+        return BinaryOk(opcode);
+    }
+
+    BinaryResponse HandleBinaryAddIncidentExclusion(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring key;
+        std::wstring sourceId;
+        std::wstring source;
+        std::wstring road;
+        std::wstring summary;
+        if (!reader.Text(key) ||
+            !reader.Text(sourceId) ||
+            !reader.Text(source) ||
+            !reader.Text(road) ||
+            !reader.Text(summary))
+        {
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary incident-exclusion payload is incomplete.");
+        }
+
+        std::wstring error;
+        if (!m_database.AddIncidentExclusion(user, key, sourceId, source, road, summary, error))
+            return BinaryError(opcode, 500, "database_error", error);
+        NotifyCollaborationChanged();
+        return BinaryOk(opcode);
+    }
+
+    BinaryResponse HandleBinaryRemoveIncidentExclusion(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    {
+        std::wstring key;
+        if (!reader.Text(key))
+            return BinaryError(opcode, 400, "invalid_payload", L"Binary remove-exclusion payload is incomplete.");
+
+        std::wstring error;
+        if (!m_database.RemoveIncidentExclusion(user, key, error))
+            return BinaryError(opcode, 500, "database_error", error);
         NotifyCollaborationChanged();
         return BinaryOk(opcode);
     }
@@ -2410,14 +3569,87 @@ private:
 
     HttpResponse HandleAdminLogs(const HttpRequest& req, const UserRecord& user)
     {
-        if (PositionRank(user.position) < 2)
-            return ErrorResponse(403, L"Only Managers, Supervisors and Administrators can view administrator logs.", "forbidden");
+        if (PositionRank(user.position) < 4)
+            return ErrorResponse(403, L"Only Administrators can view administrator logs.", "forbidden");
 
         std::wstring error;
         json rows = m_database.UserLoginTimes(error);
         if (!error.empty())
             return ErrorResponse(500, error, "database_error");
         return JsonResponse(200, { { "ok", true }, { "type", "user_login_times" }, { "items", rows } });
+    }
+
+    HttpResponse HandleClearAdminLogs(const HttpRequest& req, const UserRecord& user)
+    {
+        if (PositionRank(user.position) < 4)
+            return ErrorResponse(403, L"Only Administrators can clear administrator logs.", "forbidden");
+
+        const std::string prefix = "/api/admin/logs/";
+        const std::wstring category = Utf8ToWide(req.path.substr(prefix.size()));
+        std::wstring error;
+        if (!m_database.ClearAdminLogCategory(category, error))
+            return ErrorResponse(
+                error == L"Unknown administrator log category." ? 400 : 500,
+                error,
+                error == L"Unknown administrator log category." ? "invalid_category" : "database_error");
+        return JsonResponse(200, { { "ok", true } });
+    }
+
+    HttpResponse HandleGetIncidentExclusions()
+    {
+        std::wstring error;
+        json items = m_database.IncidentExclusions(error);
+        if (!error.empty())
+            return ErrorResponse(500, error, "database_error");
+        return JsonResponse(200, { { "ok", true }, { "items", items } });
+    }
+
+    HttpResponse HandleAddIncidentExclusion(const HttpRequest& req, const UserRecord& user)
+    {
+        json body;
+        try {
+            body = json::parse(req.body.empty() ? "{}" : req.body);
+        }
+        catch (const std::exception& e) {
+            return ErrorResponse(400, L"Invalid incident exclusion JSON: " + Utf8ToWide(e.what()), "invalid_json");
+        }
+
+        std::wstring error;
+        if (!m_database.AddIncidentExclusion(
+            user,
+            JsonTextField(body, { "key", "incidentKey" }),
+            JsonTextField(body, { "sourceId", "source_id" }),
+            JsonTextField(body, { "source", "sourceName" }),
+            JsonTextField(body, { "road" }),
+            JsonTextField(body, { "summary", "title" }),
+            error))
+        {
+            return ErrorResponse(500, error, "database_error");
+        }
+        NotifyCollaborationChanged();
+        return JsonResponse(200, { { "ok", true } });
+    }
+
+    HttpResponse HandleRemoveIncidentExclusion(const HttpRequest& req, const UserRecord& user)
+    {
+        json body;
+        try {
+            body = json::parse(req.body.empty() ? "{}" : req.body);
+        }
+        catch (const std::exception& e) {
+            return ErrorResponse(400, L"Invalid incident exclusion JSON: " + Utf8ToWide(e.what()), "invalid_json");
+        }
+
+        std::wstring error;
+        if (!m_database.RemoveIncidentExclusion(
+            user,
+            JsonTextField(body, { "key", "incidentKey" }),
+            error))
+        {
+            return ErrorResponse(500, error, "database_error");
+        }
+        NotifyCollaborationChanged();
+        return JsonResponse(200, { { "ok", true } });
     }
 
     HttpResponse HandleGetNotes()
@@ -2618,6 +3850,17 @@ private:
     std::mutex m_collaborationMutex;
     std::condition_variable m_collaborationChanged;
     std::atomic<uint32_t> m_collaborationVersion{ 1 };
+    std::mutex m_sourceCacheMutex;
+    std::condition_variable m_sourceCacheChanged;
+    std::unordered_map<std::wstring, SourceCacheEntry> m_sourceCache;
+    std::unordered_set<std::wstring> m_sourceCacheInFlight;
+    uint32_t m_nextSourceCacheGeneration = 1;
+    std::mutex m_sourceRefreshMutex;
+    std::condition_variable m_sourceRefreshCv;
+    std::thread m_sourceRefreshThread;
+    std::atomic_bool m_sourceRefreshStop{ false };
+    std::atomic<uint32_t> m_sourceFetchIntervalMs{ 60u * 1000u };
+    std::atomic_bool m_serveStaleSourceCache{ true };
     ServerConfig m_config;
     Database m_database;
 };
@@ -2636,6 +3879,12 @@ static bool LoadConfig(const std::filesystem::path& path, ServerConfig& config)
         config.sessionMinutes = root["sessionMinutes"].get<int>();
     if (root.contains("onlineTimeoutSeconds"))
         config.onlineTimeoutSeconds = std::clamp(root["onlineTimeoutSeconds"].get<int>(), 15, 3600);
+    if (root.contains("sourceFetchIntervalSeconds"))
+        config.sourceFetchIntervalSeconds = std::clamp(root["sourceFetchIntervalSeconds"].get<int>(), 15, 3600);
+    if (root.contains("sourceFetchIntervalMs"))
+        config.sourceFetchIntervalSeconds = static_cast<int>(ClampSourceFetchIntervalMs(root["sourceFetchIntervalMs"].get<uint64_t>()) / 1000u);
+    if (root.contains("serveStaleSourceCache"))
+        config.serveStaleSourceCache = root["serveStaleSourceCache"].get<bool>();
     if (root.contains("databaseConnectionString"))
         config.databaseConnectionString = Utf8ToWide(root["databaseConnectionString"].get<std::string>());
     if (root.contains("updateRoot"))
@@ -2827,6 +4076,180 @@ static void WorkerLoop(BlockingSocketQueue& queue, ErcServer& server)
         closesocket(s);
     }
 }
+
+constexpr int kServerSettingsIntervalEdit = 5101;
+constexpr int kServerSettingsApplyButton = 5102;
+constexpr int kServerSettingsStaleCheck = 5103;
+constexpr int kServerSettingsClearCacheButton = 5104;
+constexpr int kServerSettingsStatusLabel = 5105;
+
+struct ServerSettingsWindowState
+{
+    ErcServer* server = nullptr;
+};
+
+static std::wstring ServerSettingsStatusText(ErcServer& server)
+{
+    std::wstringstream text;
+    text << L"Source cache entries: " << server.SourceCacheEntryCount()
+        << L" | interval: " << (server.SourceFetchIntervalMs() / 1000u) << L"s";
+    return text.str();
+}
+
+static void UpdateServerSettingsWindow(HWND hwnd)
+{
+    auto* state = reinterpret_cast<ServerSettingsWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!state || !state->server)
+        return;
+
+    if (HWND status = GetDlgItem(hwnd, kServerSettingsStatusLabel)) {
+        const std::wstring text = ServerSettingsStatusText(*state->server);
+        SetWindowTextW(status, text.c_str());
+    }
+    if (HWND stale = GetDlgItem(hwnd, kServerSettingsStaleCheck)) {
+        SendMessageW(stale, BM_SETCHECK, state->server->ServeStaleSourceCache() ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+}
+
+static uint32_t ParseServerIntervalEditSeconds(HWND edit)
+{
+    wchar_t buffer[64]{};
+    GetWindowTextW(edit, buffer, static_cast<int>(_countof(buffer)));
+    wchar_t* end = nullptr;
+    unsigned long seconds = std::wcstoul(buffer, &end, 10);
+    if (end == buffer)
+        seconds = 60;
+    return ClampSourceFetchIntervalMs(static_cast<uint64_t>(seconds) * 1000ull) / 1000u;
+}
+
+static LRESULT CALLBACK ServerSettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_NCCREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        auto* state = reinterpret_cast<ServerSettingsWindowState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        return TRUE;
+    }
+
+    case WM_CREATE: {
+        auto* state = reinterpret_cast<ServerSettingsWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        ErcServer* server = state ? state->server : nullptr;
+        HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+        CreateWindowExW(0, L"STATIC", L"ERC Tools Server", WS_CHILD | WS_VISIBLE,
+            18, 16, 260, 24, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        CreateWindowExW(0, L"STATIC", L"Source fetch interval (seconds)", WS_CHILD | WS_VISIBLE,
+            18, 54, 220, 20, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+            18, 78, 110, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsIntervalEdit)), GetModuleHandleW(nullptr), nullptr);
+        HWND apply = CreateWindowExW(0, L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            140, 78, 86, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsApplyButton)), GetModuleHandleW(nullptr), nullptr);
+        HWND stale = CreateWindowExW(0, L"BUTTON", L"Serve stale cache if an upstream fetch fails", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            18, 118, 330, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsStaleCheck)), GetModuleHandleW(nullptr), nullptr);
+        HWND clear = CreateWindowExW(0, L"BUTTON", L"Clear Source Cache", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            18, 154, 150, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsClearCacheButton)), GetModuleHandleW(nullptr), nullptr);
+        HWND status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+            18, 198, 360, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsStatusLabel)), GetModuleHandleW(nullptr), nullptr);
+
+        for (HWND control : { edit, apply, stale, clear, status })
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+        if (server) {
+            const std::wstring seconds = std::to_wstring(server->SourceFetchIntervalMs() / 1000u);
+            SetWindowTextW(edit, seconds.c_str());
+            SendMessageW(stale, BM_SETCHECK, server->ServeStaleSourceCache() ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        UpdateServerSettingsWindow(hwnd);
+        SetTimer(hwnd, 1, 1000, nullptr);
+        return 0;
+    }
+
+    case WM_COMMAND: {
+        auto* state = reinterpret_cast<ServerSettingsWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        ErcServer* server = state ? state->server : nullptr;
+        const int id = LOWORD(wParam);
+        if (!server)
+            break;
+        if (id == kServerSettingsApplyButton && HIWORD(wParam) == BN_CLICKED) {
+            HWND edit = GetDlgItem(hwnd, kServerSettingsIntervalEdit);
+            const uint32_t seconds = ParseServerIntervalEditSeconds(edit);
+            server->SetSourceFetchIntervalMs(seconds * 1000u);
+            const std::wstring normalized = std::to_wstring(seconds);
+            SetWindowTextW(edit, normalized.c_str());
+            UpdateServerSettingsWindow(hwnd);
+            return 0;
+        }
+        if (id == kServerSettingsStaleCheck && HIWORD(wParam) == BN_CLICKED) {
+            HWND stale = GetDlgItem(hwnd, kServerSettingsStaleCheck);
+            server->SetServeStaleSourceCache(SendMessageW(stale, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            UpdateServerSettingsWindow(hwnd);
+            return 0;
+        }
+        if (id == kServerSettingsClearCacheButton && HIWORD(wParam) == BN_CLICKED) {
+            server->ClearSourceCache();
+            UpdateServerSettingsWindow(hwnd);
+            return 0;
+        }
+        break;
+    }
+
+    case WM_TIMER:
+        UpdateServerSettingsWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY: {
+        KillTimer(hwnd, 1);
+        auto* state = reinterpret_cast<ServerSettingsWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        delete state;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void RunServerSettingsWindow(ErcServer& server)
+{
+    constexpr const wchar_t* className = L"ERCToolsServerSettingsWindow";
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = ServerSettingsWndProc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = className;
+    RegisterClassExW(&wc);
+
+    auto* state = new ServerSettingsWindowState{ &server };
+    HWND hwnd = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        className,
+        L"ERC Tools Server Settings",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        420,
+        280,
+        nullptr,
+        nullptr,
+        instance,
+        state);
+    if (!hwnd) {
+        delete state;
+        return;
+    }
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
 }
 
 int wmain(int argc, wchar_t** argv)
@@ -2889,6 +4312,9 @@ int wmain(int argc, wchar_t** argv)
     }
 
     ErcServer server(config);
+    std::thread settingsWindowThread([&server]() { RunServerSettingsWindow(server); });
+    settingsWindowThread.detach();
+
     BlockingSocketQueue queue;
     std::vector<std::thread> workers;
     for (int i = 0; i < config.workerThreads; ++i)
