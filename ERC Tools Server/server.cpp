@@ -58,9 +58,12 @@ struct ServerConfig
     int sessionMinutes = 12 * 60;
     int onlineTimeoutSeconds = 30;
     int sourceFetchIntervalSeconds = 60;
+    int ntisPollIntervalSeconds = 2;
     bool serveStaleSourceCache = true;
     std::wstring databaseConnectionString =
-        L"DRIVER={Maria Unicode};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=root;PWD=!Derickandjr1010;OPTION=3;";
+        L"DRIVER={Maria Unicode};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=erc_tools;PWD=change-me;OPTION=3;";
+    std::wstring ntisEventSnapshotUrl =
+        L"http://127.0.0.1:18080/internal/events";
     std::filesystem::path updateRoot = L"updates";
     std::filesystem::path manifestPath = L"updates\\manifest.json";
     std::filesystem::path globalSettingsPath = L"global_settings.json";
@@ -1842,7 +1845,11 @@ static std::wstring NormalizeAbsoluteUrl(std::wstring url)
     return url;
 }
 
-static bool ServerHttpGetText(const std::wstring& inputUrl, std::string& bodyOut, std::wstring& errorOut, DWORD timeoutMs = 15000)
+static bool ServerHttpGetText(
+    const std::wstring& inputUrl,
+    std::string& bodyOut,
+    std::wstring& errorOut,
+    DWORD timeoutMs = 15000)
 {
     bodyOut.clear();
     errorOut.clear();
@@ -1880,7 +1887,7 @@ static bool ServerHttpGetText(const std::wstring& inputUrl, std::string& bodyOut
     if (object.empty())
         object = L"/";
 
-    WinHttpHandle session(WinHttpOpen(L"ERC Tools Server/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+    WinHttpHandle session(WinHttpOpen(L"ERC Tools Server/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session) {
         errorOut = L"WinHttpOpen failed: " + WinErrorText(GetLastError());
         return false;
@@ -1908,11 +1915,11 @@ static bool ServerHttpGetText(const std::wstring& inputUrl, std::string& bodyOut
     DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
     WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
 
-    const wchar_t* headers =
+    std::wstring headers =
         L"Accept: application/json, text/html, text/plain, */*\r\n"
         L"Accept-Encoding: identity\r\n"
         L"Cache-Control: no-cache\r\n";
-    if (!WinHttpSendRequest(request, headers, static_cast<DWORD>(-1L), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+    if (!WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1L), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(request, nullptr))
     {
         errorOut = L"Source request failed: " + WinErrorText(GetLastError());
@@ -1969,69 +1976,11 @@ static std::wstring JsonWideOption(const json& options, const char* key, const s
     return fallback;
 }
 
-static bool IsTrafficEnglandAlertsPageUrlServer(std::wstring url)
-{
-    url = ToLower(NormalizeAbsoluteUrl(std::move(url)));
-    size_t fragment = url.find(L'#');
-    if (fragment != std::wstring::npos)
-        url.resize(fragment);
-    size_t query = url.find(L'?');
-    if (query != std::wstring::npos)
-        url.resize(query);
-    while (!url.empty() && url.back() == L'/')
-        url.pop_back();
-    return url == L"https://www.trafficengland.com/traffic-alerts" ||
-        url == L"https://trafficengland.com/traffic-alerts" ||
-        url == L"http://www.trafficengland.com/traffic-alerts" ||
-        url == L"http://trafficengland.com/traffic-alerts";
-}
-
-static std::wstring BuildTrafficEnglandAlertsApiUrlServer(size_t start, size_t step, bool unplannedOnly, const std::wstring& order)
-{
-    const ULONGLONG cacheBuster = GetTickCount64();
-    std::wstring url = L"https://www.trafficengland.com/api/events/getAlerts";
-    url += L"?start=" + std::to_wstring(start);
-    url += L"&step=" + std::to_wstring(step);
-    url += L"&order=" + (order.empty() ? L"Road" : order);
-    url += L"&is_current=1";
-    url += unplannedOnly
-        ? L"&events=CONGESTION,FULL_CLOSURES,INCIDENT,WEATHER,ABNORMAL_LOADS"
-        : L"&events=CONGESTION,FULL_CLOSURES,ROADWORKS,INCIDENT,WEATHER,MAJOR_ORGANISED_EVENTS,ABNORMAL_LOADS";
-    url += L"&unconfirmed=false";
-    url += L"&completed=false";
-    url += L"&includeUnconfirmedRoadworks=true";
-    url += L"&_=" + std::to_wstring(cacheBuster + start);
-    return url;
-}
-
-static size_t LargestJsonArraySize(const json& value)
-{
-    if (value.is_array()) {
-        size_t best = value.size();
-        for (const json& child : value)
-            best = std::max(best, LargestJsonArraySize(child));
-        return best;
-    }
-    if (value.is_object()) {
-        size_t best = 0;
-        for (auto it = value.begin(); it != value.end(); ++it)
-            best = std::max(best, LargestJsonArraySize(it.value()));
-        return best;
-    }
-    return 0;
-}
-
-static size_t EstimateRecordCountFromJsonBody(const std::string& body)
-{
-    try {
-        return LargestJsonArraySize(json::parse(body));
-    }
-    catch (...) {
-        return 0;
-    }
-}
-
-static void AddFetchedBlob(std::vector<SourceBlob>& blobs, const std::wstring& name, const std::wstring& url, DWORD timeoutMs = 15000)
+static void AddFetchedBlob(
+    std::vector<SourceBlob>& blobs,
+    const std::wstring& name,
+    const std::wstring& url,
+    DWORD timeoutMs = 15000)
 {
     SourceBlob blob;
     blob.name = name;
@@ -2115,7 +2064,12 @@ static std::vector<std::wstring> ExtractWeatherSystemDetailLinks(const std::stri
     return links;
 }
 
-static bool BuildSourceBundle(const std::wstring& sourceType, const json& options, SourceBundle& bundleOut, std::wstring& errorOut)
+static bool BuildSourceBundle(
+    const std::wstring& sourceType,
+    const json& options,
+    const ServerConfig& config,
+    SourceBundle& bundleOut,
+    std::wstring& errorOut)
 {
     bundleOut = {};
     bundleOut.fetchedAt = std::chrono::steady_clock::now();
@@ -2123,28 +2077,20 @@ static bool BuildSourceBundle(const std::wstring& sourceType, const json& option
 
     const std::wstring source = ToLower(TrimWide(sourceType));
     if (source == L"roads") {
-        const std::wstring endpoint = NormalizeAbsoluteUrl(JsonWideOption(options, "endpoint", L"https://www.trafficengland.com/traffic-alerts"));
         const bool unplannedOnly = JsonBoolOption(options, "unplannedOnly", true);
-        const std::wstring order = JsonWideOption(options, "order", L"Road");
-        if (IsTrafficEnglandAlertsPageUrlServer(endpoint)) {
-            constexpr size_t pageSize = 100;
-            constexpr size_t maxPages = 20;
-            for (size_t page = 0; page < maxPages; ++page) {
-                const std::wstring url = BuildTrafficEnglandAlertsApiUrlServer(page * pageSize, pageSize, unplannedOnly, order);
-                AddFetchedBlob(bundleOut.blobs, L"traffic_england_page", url);
-                const SourceBlob& blob = bundleOut.blobs.back();
-                if (!blob.ok) {
-                    if (page == 0)
-                        errorOut = L"Traffic England alerts API failed: " + blob.error;
-                    break;
-                }
-                const size_t returned = EstimateRecordCountFromJsonBody(blob.body);
-                if (returned == 0 || returned < pageSize)
-                    break;
-            }
+        if (!config.ntisEventSnapshotUrl.empty()) {
+            std::wstring ntisUrl = config.ntisEventSnapshotUrl;
+            ntisUrl += ntisUrl.find(L'?') == std::wstring::npos ? L"?" : L"&";
+            ntisUrl += L"unplannedOnly=";
+            ntisUrl += unplannedOnly ? L"1" : L"0";
+            AddFetchedBlob(bundleOut.blobs, L"ntis_events", ntisUrl, 10000);
+            if (!bundleOut.blobs.empty() && bundleOut.blobs.back().ok)
+                bundleOut.status = L"National Highways NTIS Event Data.";
+            else
+                errorOut = L"National Highways NTIS event snapshot is unavailable.";
         }
         else {
-            AddFetchedBlob(bundleOut.blobs, L"traffic_custom", endpoint);
+            errorOut = L"National Highways NTIS event snapshot URL is not configured.";
         }
 
         if (JsonBoolOption(options, "trafficScotlandEnabled", false)) {
@@ -2252,6 +2198,13 @@ static uint32_t ClampSourceFetchIntervalMs(uint64_t intervalMs)
     return static_cast<uint32_t>(std::clamp<uint64_t>(intervalMs, minMs, maxMs));
 }
 
+static uint32_t ClampNtisPollIntervalMs(uint64_t intervalMs)
+{
+    constexpr uint64_t minMs = 1000ull;
+    constexpr uint64_t maxMs = 60ull * 1000ull;
+    return static_cast<uint32_t>(std::clamp<uint64_t>(intervalMs, minMs, maxMs));
+}
+
 class ErcServer
 {
 public:
@@ -2259,6 +2212,9 @@ public:
     {
         m_sourceFetchIntervalMs.store(
             ClampSourceFetchIntervalMs(static_cast<uint64_t>(std::max(1, m_config.sourceFetchIntervalSeconds)) * 1000ull),
+            std::memory_order_release);
+        m_ntisPollIntervalMs.store(
+            ClampNtisPollIntervalMs(static_cast<uint64_t>(std::max(1, m_config.ntisPollIntervalSeconds)) * 1000ull),
             std::memory_order_release);
         m_serveStaleSourceCache.store(m_config.serveStaleSourceCache, std::memory_order_release);
         m_sourceRefreshThread = std::thread([this]() { SourceRefreshLoop(); });
@@ -2291,6 +2247,30 @@ public:
     void SetServeStaleSourceCache(bool enabled)
     {
         m_serveStaleSourceCache.store(enabled, std::memory_order_release);
+    }
+
+    uint32_t NtisPollIntervalMs() const
+    {
+        return m_ntisPollIntervalMs.load(std::memory_order_acquire);
+    }
+
+    void SetNtisPollIntervalMs(uint32_t intervalMs)
+    {
+        m_ntisPollIntervalMs.store(ClampNtisPollIntervalMs(intervalMs), std::memory_order_release);
+        m_sourceRefreshCv.notify_all();
+    }
+
+    bool HasNtisEventSnapshot() const
+    {
+        return !m_config.ntisEventSnapshotUrl.empty();
+    }
+
+    uint32_t SourceFetchIntervalMsFor(const std::wstring& sourceType) const
+    {
+        const uint32_t general = SourceFetchIntervalMs();
+        if (ToLower(TrimWide(sourceType)) == L"roads" && HasNtisEventSnapshot())
+            return NtisPollIntervalMs();
+        return general;
     }
 
     size_t SourceCacheEntryCount()
@@ -2577,6 +2557,22 @@ private:
         return static_cast<uint32_t>(std::min<uint64_t>(age, std::numeric_limits<uint32_t>::max()));
     }
 
+    static bool SourceBundlePayloadMatches(const SourceBundle& left, const SourceBundle& right)
+    {
+        if (left.status != right.status || left.blobs.size() != right.blobs.size())
+            return false;
+        for (size_t i = 0; i < left.blobs.size(); ++i) {
+            const SourceBlob& a = left.blobs[i];
+            const SourceBlob& b = right.blobs[i];
+            if (a.name != b.name || a.url != b.url || a.ok != b.ok ||
+                a.body != b.body || a.error != b.error)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     uint32_t NextSourceCacheGenerationLocked()
     {
         uint32_t generation = m_nextSourceCacheGeneration++;
@@ -2614,10 +2610,10 @@ private:
         };
 
         std::vector<RefreshTarget> targets;
-        const uint32_t ttlMs = SourceFetchIntervalMs();
         {
             std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
             for (const auto& [key, entry] : m_sourceCache) {
+                const uint32_t ttlMs = SourceFetchIntervalMsFor(entry.sourceType);
                 if (entry.sourceType.empty() ||
                     SourceBundleAgeMs(entry.bundle) < ttlMs ||
                     m_sourceCacheInFlight.find(key) != m_sourceCacheInFlight.end())
@@ -2632,14 +2628,23 @@ private:
         for (const RefreshTarget& target : targets) {
             SourceBundle fresh;
             std::wstring error;
-            const bool fetched = BuildSourceBundle(target.sourceType, target.options, fresh, error);
+            const bool fetched = BuildSourceBundle(target.sourceType, target.options, m_config, fresh, error);
             if (fetched)
                 fresh.fetchedAt = std::chrono::steady_clock::now();
 
             {
                 std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
-                if (fetched)
-                    StoreSourceCacheEntryLocked(target.key, std::move(fresh), target.sourceType, target.options);
+                if (fetched) {
+                    auto existing = m_sourceCache.find(target.key);
+                    if (existing != m_sourceCache.end() &&
+                        SourceBundlePayloadMatches(existing->second.bundle, fresh))
+                    {
+                        existing->second.bundle = std::move(fresh);
+                    }
+                    else {
+                        StoreSourceCacheEntryLocked(target.key, std::move(fresh), target.sourceType, target.options);
+                    }
+                }
                 m_sourceCacheInFlight.erase(target.key);
             }
             m_sourceCacheChanged.notify_all();
@@ -2649,7 +2654,10 @@ private:
     void SourceRefreshLoop()
     {
         while (!m_sourceRefreshStop.load(std::memory_order_acquire)) {
-            const auto waitFor = std::chrono::milliseconds(SourceFetchIntervalMs());
+            const uint32_t intervalMs = HasNtisEventSnapshot()
+                ? std::min(SourceFetchIntervalMs(), NtisPollIntervalMs())
+                : SourceFetchIntervalMs();
+            const auto waitFor = std::chrono::milliseconds(intervalMs);
             std::unique_lock<std::mutex> lock(m_sourceRefreshMutex);
             m_sourceRefreshCv.wait_for(lock, waitFor, [&]() {
                 return m_sourceRefreshStop.load(std::memory_order_acquire);
@@ -2678,7 +2686,7 @@ private:
         errorOut.clear();
 
         (void)requestedIntervalMs;
-        const uint32_t ttlMs = SourceFetchIntervalMs();
+        const uint32_t ttlMs = SourceFetchIntervalMsFor(sourceType);
         const std::wstring key = SourceCacheKey(sourceType, options);
         {
             std::unique_lock<std::mutex> lock(m_sourceCacheMutex);
@@ -2729,7 +2737,7 @@ private:
         }
 
         SourceBundle fresh;
-        const bool fetched = BuildSourceBundle(sourceType, options, fresh, errorOut);
+        const bool fetched = BuildSourceBundle(sourceType, options, m_config, fresh, errorOut);
         if (fetched)
             fresh.fetchedAt = std::chrono::steady_clock::now();
 
@@ -2794,7 +2802,7 @@ private:
         }
 
         SourceBundle fresh;
-        const bool fetched = BuildSourceBundle(sourceType, options, fresh, errorOut);
+        const bool fetched = BuildSourceBundle(sourceType, options, m_config, fresh, errorOut);
         if (fetched)
             fresh.fetchedAt = std::chrono::steady_clock::now();
 
@@ -3860,6 +3868,7 @@ private:
     std::thread m_sourceRefreshThread;
     std::atomic_bool m_sourceRefreshStop{ false };
     std::atomic<uint32_t> m_sourceFetchIntervalMs{ 60u * 1000u };
+    std::atomic<uint32_t> m_ntisPollIntervalMs{ 2u * 1000u };
     std::atomic_bool m_serveStaleSourceCache{ true };
     ServerConfig m_config;
     Database m_database;
@@ -3868,9 +3877,9 @@ private:
 static bool LoadConfig(const std::filesystem::path& path, ServerConfig& config)
 {
     std::ifstream in(path, std::ios::binary);
-    if (!in)
-        return true;
-    json root = json::parse(in);
+    json root = json::object();
+    if (in)
+        root = json::parse(in);
     if (root.contains("port"))
         config.port = root["port"].get<int>();
     if (root.contains("workerThreads"))
@@ -3883,16 +3892,21 @@ static bool LoadConfig(const std::filesystem::path& path, ServerConfig& config)
         config.sourceFetchIntervalSeconds = std::clamp(root["sourceFetchIntervalSeconds"].get<int>(), 15, 3600);
     if (root.contains("sourceFetchIntervalMs"))
         config.sourceFetchIntervalSeconds = static_cast<int>(ClampSourceFetchIntervalMs(root["sourceFetchIntervalMs"].get<uint64_t>()) / 1000u);
+    if (root.contains("ntisPollIntervalSeconds"))
+        config.ntisPollIntervalSeconds = std::clamp(root["ntisPollIntervalSeconds"].get<int>(), 1, 60);
     if (root.contains("serveStaleSourceCache"))
         config.serveStaleSourceCache = root["serveStaleSourceCache"].get<bool>();
     if (root.contains("databaseConnectionString"))
         config.databaseConnectionString = Utf8ToWide(root["databaseConnectionString"].get<std::string>());
+    if (root.contains("ntisEventSnapshotUrl"))
+        config.ntisEventSnapshotUrl = NormalizeAbsoluteUrl(Utf8ToWide(root["ntisEventSnapshotUrl"].get<std::string>()));
     if (root.contains("updateRoot"))
         config.updateRoot = Utf8ToWide(root["updateRoot"].get<std::string>());
     if (root.contains("manifestPath"))
         config.manifestPath = Utf8ToWide(root["manifestPath"].get<std::string>());
     if (root.contains("globalSettingsPath"))
         config.globalSettingsPath = Utf8ToWide(root["globalSettingsPath"].get<std::string>());
+
     return true;
 }
 
@@ -4082,6 +4096,7 @@ constexpr int kServerSettingsApplyButton = 5102;
 constexpr int kServerSettingsStaleCheck = 5103;
 constexpr int kServerSettingsClearCacheButton = 5104;
 constexpr int kServerSettingsStatusLabel = 5105;
+constexpr int kServerSettingsNtisIntervalEdit = 5107;
 
 struct ServerSettingsWindowState
 {
@@ -4092,7 +4107,8 @@ static std::wstring ServerSettingsStatusText(ErcServer& server)
 {
     std::wstringstream text;
     text << L"Source cache entries: " << server.SourceCacheEntryCount()
-        << L" | interval: " << (server.SourceFetchIntervalMs() / 1000u) << L"s";
+        << L" | general interval: " << (server.SourceFetchIntervalMs() / 1000u) << L"s"
+        << L" | NTIS poll: " << (server.NtisPollIntervalMs() / 1000u) << L"s";
     return text.str();
 }
 
@@ -4122,6 +4138,17 @@ static uint32_t ParseServerIntervalEditSeconds(HWND edit)
     return ClampSourceFetchIntervalMs(static_cast<uint64_t>(seconds) * 1000ull) / 1000u;
 }
 
+static uint32_t ParseNtisIntervalEditSeconds(HWND edit)
+{
+    wchar_t buffer[64]{};
+    GetWindowTextW(edit, buffer, static_cast<int>(_countof(buffer)));
+    wchar_t* end = nullptr;
+    unsigned long seconds = std::wcstoul(buffer, &end, 10);
+    if (end == buffer)
+        seconds = 2;
+    return ClampNtisPollIntervalMs(static_cast<uint64_t>(seconds) * 1000ull) / 1000u;
+}
+
 static LRESULT CALLBACK ServerSettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -4145,19 +4172,25 @@ static LRESULT CALLBACK ServerSettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam
             18, 78, 110, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsIntervalEdit)), GetModuleHandleW(nullptr), nullptr);
         HWND apply = CreateWindowExW(0, L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             140, 78, 86, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsApplyButton)), GetModuleHandleW(nullptr), nullptr);
+        CreateWindowExW(0, L"STATIC", L"NTIS snapshot poll (seconds)", WS_CHILD | WS_VISIBLE,
+            250, 54, 220, 20, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND ntisEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+            250, 78, 110, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsNtisIntervalEdit)), GetModuleHandleW(nullptr), nullptr);
         HWND stale = CreateWindowExW(0, L"BUTTON", L"Serve stale cache if an upstream fetch fails", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             18, 118, 330, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsStaleCheck)), GetModuleHandleW(nullptr), nullptr);
         HWND clear = CreateWindowExW(0, L"BUTTON", L"Clear Source Cache", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             18, 154, 150, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsClearCacheButton)), GetModuleHandleW(nullptr), nullptr);
         HWND status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            18, 198, 360, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsStatusLabel)), GetModuleHandleW(nullptr), nullptr);
+            18, 198, 600, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsStatusLabel)), GetModuleHandleW(nullptr), nullptr);
 
-        for (HWND control : { edit, apply, stale, clear, status })
+        for (HWND control : { edit, apply, ntisEdit, stale, clear, status })
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
         if (server) {
             const std::wstring seconds = std::to_wstring(server->SourceFetchIntervalMs() / 1000u);
             SetWindowTextW(edit, seconds.c_str());
+            const std::wstring ntisSeconds = std::to_wstring(server->NtisPollIntervalMs() / 1000u);
+            SetWindowTextW(ntisEdit, ntisSeconds.c_str());
             SendMessageW(stale, BM_SETCHECK, server->ServeStaleSourceCache() ? BST_CHECKED : BST_UNCHECKED, 0);
         }
         UpdateServerSettingsWindow(hwnd);
@@ -4174,9 +4207,14 @@ static LRESULT CALLBACK ServerSettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam
         if (id == kServerSettingsApplyButton && HIWORD(wParam) == BN_CLICKED) {
             HWND edit = GetDlgItem(hwnd, kServerSettingsIntervalEdit);
             const uint32_t seconds = ParseServerIntervalEditSeconds(edit);
+            HWND ntisEdit = GetDlgItem(hwnd, kServerSettingsNtisIntervalEdit);
+            const uint32_t ntisSeconds = ParseNtisIntervalEditSeconds(ntisEdit);
             server->SetSourceFetchIntervalMs(seconds * 1000u);
+            server->SetNtisPollIntervalMs(ntisSeconds * 1000u);
             const std::wstring normalized = std::to_wstring(seconds);
             SetWindowTextW(edit, normalized.c_str());
+            const std::wstring normalizedNtis = std::to_wstring(ntisSeconds);
+            SetWindowTextW(ntisEdit, normalizedNtis.c_str());
             UpdateServerSettingsWindow(hwnd);
             return 0;
         }
@@ -4230,7 +4268,7 @@ static void RunServerSettingsWindow(ErcServer& server)
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        420,
+        650,
         280,
         nullptr,
         nullptr,
@@ -4321,6 +4359,7 @@ int wmain(int argc, wchar_t** argv)
         workers.emplace_back([&]() { WorkerLoop(queue, server); });
 
     std::wcout << L"ERC Tools Server listening on port " << config.port << L" with " << config.workerThreads << L" workers.\n";
+    std::wcout << L"National Highways source: NTIS Event Data.\n";
     for (;;) {
         SOCKET client = accept(listenSocket, nullptr, nullptr);
         if (client == INVALID_SOCKET)

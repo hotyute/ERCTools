@@ -4,8 +4,10 @@
   "sessionMinutes": 720,
   "onlineTimeoutSeconds": 30,
   "sourceFetchIntervalSeconds": 60,
+  "ntisPollIntervalSeconds": 2,
   "serveStaleSourceCache": true,
-  "databaseConnectionString": "DRIVER={Maria Unicode};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=root;PWD=!Derickandjr1010;OPTION=3;",
+  "databaseConnectionString": "DRIVER={Maria Unicode};SERVER=127.0.0.1;PORT=3306;DATABASE=erc_tools;UID=erc_tools;PWD=change-me;OPTION=3;",
+  "ntisEventSnapshotUrl": "http://127.0.0.1:18080/internal/events",
   "updateRoot": "updates",
   "manifestPath": "updates/manifest.json",
   "globalSettingsPath": "global_settings.json"

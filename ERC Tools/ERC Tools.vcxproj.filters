@@ -102,6 +102,9 @@
     <ClCompile Include="src\data\parsers\earthquake_data.cpp">
       <Filter>Source Files\data\parsers</Filter>
     </ClCompile>
+    <ClCompile Include="src\data\parsers\ntis_traffic.cpp">
+      <Filter>Source Files\data\parsers</Filter>
+    </ClCompile>
     <ClCompile Include="src\net\http.cpp">
       <Filter>Source Files\net</Filter>
     </ClCompile>
@@ -165,6 +168,9 @@
       <Filter>Header Files\core</Filter>
     </ClInclude>
     <ClInclude Include="include\data\parsers\earthquake_data.h">
+      <Filter>Header Files\data\parsers</Filter>
+    </ClInclude>
+    <ClInclude Include="include\data\parsers\ntis_traffic.h">
       <Filter>Header Files\data\parsers</Filter>
     </ClInclude>
     <ClInclude Include="include\net\http.h">

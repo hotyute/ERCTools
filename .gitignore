@@ -366,3 +366,4 @@ FodyWeavers.xsd
 /ERC Tools/merge-sources.ps1
 /ERC Tools/All.txt
 /ERC Tools/All2.txt
+/ERC Tools Server/server_config.json

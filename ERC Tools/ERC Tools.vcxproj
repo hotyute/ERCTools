@@ -24,6 +24,7 @@
     <ClCompile Include="src\net\binary_protocol.cpp" />
     <ClCompile Include="src\net\client_update.cpp" />
     <ClCompile Include="src\data\parsers\earthquake_data.cpp" />
+    <ClCompile Include="src\data\parsers\ntis_traffic.cpp" />
     <ClCompile Include="src\net\http.cpp" />
     <ClCompile Include="src\ui\windows\login_dialog.cpp" />
     <ClCompile Include="src\ui\windows\main_window.cpp" />
@@ -47,6 +48,7 @@
     <ClInclude Include="include\net\client_update.h" />
     <ClInclude Include="include\core\common.h" />
     <ClInclude Include="include\data\parsers\earthquake_data.h" />
+    <ClInclude Include="include\data\parsers\ntis_traffic.h" />
     <ClInclude Include="include\net\http.h" />
     <ClInclude Include="include\ui\windows\login_dialog.h" />
     <ClInclude Include="include\ui\windows\main_window.h" />

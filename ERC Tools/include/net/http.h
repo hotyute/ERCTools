@@ -18,5 +18,3 @@ bool HttpPostJsonTextWithHeaders(const std::wstring& inputUrl, const std::string
 bool HttpPutJsonTextWithHeaders(const std::wstring& inputUrl, const std::string& jsonBody, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut);
 bool HttpPatchJsonTextWithHeaders(const std::wstring& inputUrl, const std::string& jsonBody, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut);
 bool HttpDeleteTextWithHeaders(const std::wstring& inputUrl, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut);
-bool IsTrafficEnglandAlertsPageUrl(const std::wstring& inputUrl);
-std::wstring BuildTrafficEnglandAlertsApiUrl(size_t start, size_t step, bool unplannedOnly = true, const std::wstring& order = L"Road");

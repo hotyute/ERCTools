@@ -8,6 +8,7 @@
 #include "net/binary_protocol.h"
 #include "net/client_update.h"
 #include "data/parsers/earthquake_data.h"
+#include "data/parsers/ntis_traffic.h"
 #include "net/http.h"
 #include "map/map_view.h"
 #include "data/parsers/parsing.h"
@@ -1969,45 +1970,6 @@ static void MergePendingLocalNotes(std::vector<MapNote>& serverNotes, const std:
     }
 }
 
-static bool FetchTrafficEnglandAlerts(std::vector<TrafficAlert>& alertsOut, std::wstring& errorOut, bool unplannedOnly, const std::wstring& order)
-{
-    alertsOut.clear();
-    errorOut.clear();
-
-    constexpr size_t kPageSize = 100;
-    constexpr size_t kMaxPages = 20;
-
-    for (size_t page = 0; page < kMaxPages; ++page) {
-        const size_t start = page * kPageSize;
-        std::string body;
-        std::wstring httpError;
-        if (!HttpGetText(BuildTrafficEnglandAlertsApiUrl(start, kPageSize, unplannedOnly, order), body, httpError)) {
-            errorOut = L"Traffic England alerts API failed: " + httpError;
-            return false;
-        }
-
-        std::wstring parseError;
-        std::vector<TrafficAlert> pageAlerts = ParseTrafficAlerts(body, parseError);
-        if (pageAlerts.empty()) {
-            if (page == 0) {
-                errorOut = parseError.empty()
-                    ? L"Traffic England alerts API returned no alerts."
-                    : L"Traffic England alerts API could not be parsed: " + parseError;
-                return false;
-            }
-            break;
-        }
-
-        const size_t returned = pageAlerts.size();
-        alertsOut.insert(alertsOut.end(), pageAlerts.begin(), pageAlerts.end());
-
-        if (returned < kPageSize)
-            break;
-    }
-
-    return !alertsOut.empty();
-}
-
 static const BinarySourceBlob* FindSourceBlobByName(const std::vector<BinarySourceBlob>& blobs, const std::wstring& name)
 {
     auto found = std::find_if(blobs.begin(), blobs.end(), [&](const BinarySourceBlob& blob) {
@@ -2041,6 +2003,7 @@ static void AppendFetchIssue(std::wstring& error, const std::wstring& issue)
 static bool ParseRoadAlertsFromSourceBundle(
     const BinarySourceBundleResult& bundle,
     bool scotlandEnabled,
+    bool unplannedOnly,
     std::vector<TrafficAlert>& alertsOut,
     std::wstring& statusOut,
     std::wstring& errorOut)
@@ -2049,26 +2012,36 @@ static bool ParseRoadAlertsFromSourceBundle(
     statusOut.clear();
     errorOut.clear();
 
-    bool parsedTrafficEngland = false;
-    bool sawTrafficEngland = false;
+    bool parsedNtis = false;
+    bool sawNtis = false;
     std::string scotlandListBody;
     std::unordered_map<std::wstring, std::string> scotlandDetails;
 
     for (const BinarySourceBlob& blob : bundle.blobs) {
-        if (blob.name == L"traffic_england_page" || blob.name == L"traffic_custom") {
-            sawTrafficEngland = true;
+        if (blob.name == L"ntis_events") {
+            sawNtis = true;
             if (!blob.ok) {
-                AppendFetchIssue(errorOut, L"Traffic England: " + blob.error);
+                AppendFetchIssue(errorOut, L"National Highways NTIS: " + blob.error);
                 continue;
             }
-            std::wstring parseError;
-            std::vector<TrafficAlert> parsed = ParseTrafficAlerts(blob.body, parseError);
-            if (parsed.empty()) {
-                AppendFetchIssue(errorOut, L"Traffic England: " + (parseError.empty() ? L"Feed could not be parsed." : parseError));
+            std::vector<TrafficAlert> parsed;
+            std::wstring ntisStatus;
+            std::wstring ntisError;
+            parsedNtis = ParseNtisTrafficSnapshot(
+                blob.body,
+                !unplannedOnly,
+                parsed,
+                ntisStatus,
+                ntisError);
+            if (!parsedNtis) {
+                AppendFetchIssue(errorOut, L"National Highways NTIS: " + ntisError);
                 continue;
             }
-            parsedTrafficEngland = true;
-            alertsOut.insert(alertsOut.end(), std::make_move_iterator(parsed.begin()), std::make_move_iterator(parsed.end()));
+            alertsOut.insert(
+                alertsOut.end(),
+                std::make_move_iterator(parsed.begin()),
+                std::make_move_iterator(parsed.end()));
+            statusOut = ntisStatus;
         }
         else if (blob.name == L"traffic_scotland_list") {
             if (blob.ok)
@@ -2095,8 +2068,11 @@ static bool ParseRoadAlertsFromSourceBundle(
             scotlandStatus,
             scotlandError);
         if (scotlandOk) {
-            if (!scotlandStatus.empty())
-                statusOut = scotlandStatus;
+            if (!scotlandStatus.empty()) {
+                if (!statusOut.empty())
+                    statusOut += L" ";
+                statusOut += scotlandStatus;
+            }
             alertsOut.insert(alertsOut.end(), std::make_move_iterator(scotlandAlerts.begin()), std::make_move_iterator(scotlandAlerts.end()));
         }
         else {
@@ -2104,12 +2080,12 @@ static bool ParseRoadAlertsFromSourceBundle(
         }
     }
 
-    if (!sawTrafficEngland && !scotlandEnabled)
+    if (!sawNtis && !scotlandEnabled)
         AppendFetchIssue(errorOut, L"Server source bundle did not include road incident data.");
     if (bundle.fromCache)
         statusOut += L" Server cache age: " + std::to_wstring(bundle.ageMs / 1000) + L"s.";
 
-    return parsedTrafficEngland || (scotlandEnabled && scotlandOk && !alertsOut.empty());
+    return parsedNtis || (scotlandEnabled && scotlandOk && !alertsOut.empty());
 }
 
 static bool ParseEarthquakesFromSourceBundle(
@@ -3500,6 +3476,8 @@ private:
             if (!root.is_object())
                 return;
 
+            const int settingsVersion = root.value("version", 0);
+
             const json* settings = &root;
             auto settingsIt = root.find("settings");
             if (settingsIt != root.end() && settingsIt->is_object())
@@ -3532,8 +3510,13 @@ private:
                     target = static_cast<UINT>(it->get<int>());
                 };
 
-            readString("alertsEndpoint", m_alertsEndpoint);
-            m_alertsEndpoint = NormalizeUrl(m_alertsEndpoint);
+            if (settingsVersion >= 2) {
+                readString("alertsEndpoint", m_alertsEndpoint);
+                m_alertsEndpoint = NormalizeUrl(m_alertsEndpoint);
+            }
+            else {
+                m_alertsEndpoint.clear();
+            }
             readString("serverBaseUrl", m_serverBaseUrl);
             m_serverBaseUrl = NormalizeUrl(m_serverBaseUrl);
             {
@@ -3899,7 +3882,7 @@ private:
             return;
 
         ReportTemplate reportTemplate;
-        reportTemplate.name = L"National Highways incident";
+        reportTemplate.name = L"England road incident";
         reportTemplate.title = L"UK - ENGLAND - $TITLE_SHORT - $ROAD $DIRECTION %JUNCTION_RANGE.";
         reportTemplate.body = L"$DATE: NATIONAL HIGHWAYS REPORTS: A $TITLE on the $ROAD $DIRECTION %JUNCTIONS_WITH_DATA with %LANECLOSURES closed. Expect delays and congestion, avoid the area if possible, find alternate routes, monitor local traffic and media for updates. Allow extra time for your journey.";
         m_reportTemplates.push_back(std::move(reportTemplate));
@@ -4083,10 +4066,21 @@ private:
                 }
             }
 
-            root["version"] = 1;
+            root["version"] = 2;
             json& settings = root["settings"];
             if (!settings.is_object())
                 settings = json::object();
+
+            for (auto it = settings.begin(); it != settings.end();) {
+                std::string key = it.key();
+                std::transform(key.begin(), key.end(), key.begin(), [](unsigned char ch) {
+                    return static_cast<char>(std::tolower(ch));
+                    });
+                if (key.find("apikeyprotected") != std::string::npos)
+                    it = settings.erase(it);
+                else
+                    ++it;
+            }
 
             settings["alertsEndpoint"] = WideToUtf8(m_alertsEndpoint);
             settings["serverBaseUrl"] = WideToUtf8(m_serverBaseUrl);
@@ -4648,11 +4642,8 @@ private:
     {
         switch (source) {
         case ServerSourceKind::Roads: {
-            const std::wstring url = NormalizeUrl(m_alertsEndpoint);
             return {
-                { "endpoint", WideToUtf8(url) },
                 { "unplannedOnly", m_alertFilterUnplannedOnly },
-                { "order", WideToUtf8(m_alertOrder) },
                 { "trafficScotlandEnabled", m_trafficScotlandEnabled },
                 { "trafficScotlandIncidentsUrl", WideToUtf8(m_trafficScotlandIncidentsUrl) }
             };
@@ -4716,8 +4707,9 @@ private:
             m_trafficScotlandEnabled,
             m_trafficScotlandIncidentsUrl
         };
+        const bool unplannedOnly = m_alertFilterUnplannedOnly;
 
-        ScheduleBackgroundTask([hwnd, server, session, source, epoch, knownGeneration, sourceType, sourceOptions, scotlandOptions]() {
+        ScheduleBackgroundTask([hwnd, server, session, source, epoch, knownGeneration, sourceType, sourceOptions, scotlandOptions, unplannedOnly]() {
             BinarySourceBundleResult bundle;
             if (!BinaryWaitSourceBundle(server, session, sourceType, knownGeneration, 65000u, sourceOptions, bundle)) {
                 Sleep(30000);
@@ -4746,7 +4738,7 @@ private:
                 result->serverGeneration = bundle.generation;
                 result->serverSyncEpoch = epoch;
                 std::wstring status;
-                if (ParseRoadAlertsFromSourceBundle(bundle, scotlandOptions.enabled, result->alerts, status, error)) {
+                if (ParseRoadAlertsFromSourceBundle(bundle, scotlandOptions.enabled, unplannedOnly, result->alerts, status, error)) {
                     result->ok = true;
                     result->error = status;
                     if (!PostMessageW(hwnd, WM_APP_FEED_READY, 0, reinterpret_cast<LPARAM>(result)))
@@ -4882,9 +4874,14 @@ private:
         }
 
         std::wstring url = NormalizeUrl(m_alertsEndpoint);
-        if (url.empty()) {
+        const bool useServerFetch = ShouldUseServerToFetchData();
+        const TrafficScotlandOptions scotlandOptions{
+            m_trafficScotlandEnabled,
+            m_trafficScotlandIncidentsUrl
+        };
+        if (!useServerFetch && url.empty() && !scotlandOptions.enabled) {
             g_fetchInProgress.store(false);
-            SetStatusText(L"Please enter a feed URL.");
+            SetStatusText(L"Enable server fetching for National Highways NTIS data or configure a direct feed.");
             return;
         }
 
@@ -4892,25 +4889,17 @@ private:
 
         HWND hwnd = m_hwnd;
         const bool unplannedOnly = m_alertFilterUnplannedOnly;
-        const std::wstring order = m_alertOrder;
-        const TrafficScotlandOptions scotlandOptions{
-            m_trafficScotlandEnabled,
-            m_trafficScotlandIncidentsUrl
-        };
-        const bool useServerFetch = ShouldUseServerToFetchData();
         const std::wstring server = ServerBaseUrl();
         const ClientSession session = m_session;
         const uint32_t serverSyncEpoch = m_serverSourceSyncEpoch.load(std::memory_order_acquire);
         const uint32_t requestedIntervalMs = useServerFetch ? 0u : (m_periodicRefreshEnabled ? m_refreshIntervalMs : 30000u);
         json sourceOptions = {
-            { "endpoint", WideToUtf8(url) },
             { "unplannedOnly", unplannedOnly },
-            { "order", WideToUtf8(order) },
             { "trafficScotlandEnabled", scotlandOptions.enabled },
             { "trafficScotlandIncidentsUrl", WideToUtf8(scotlandOptions.incidentsUrl) }
         };
 
-        ScheduleBackgroundTask([hwnd, url, unplannedOnly, order, scotlandOptions, useServerFetch, server, session, serverSyncEpoch, requestedIntervalMs, sourceOptions]() {
+        ScheduleBackgroundTask([hwnd, url, unplannedOnly, scotlandOptions, useServerFetch, server, session, serverSyncEpoch, requestedIntervalMs, sourceOptions]() {
             auto* result = new FeedResult{};
             if (useServerFetch) {
                 result->serverSourced = true;
@@ -4929,6 +4918,7 @@ private:
                     if (ParseRoadAlertsFromSourceBundle(
                         bundle,
                         scotlandOptions.enabled,
+                        unplannedOnly,
                         result->alerts,
                         brokerStatus,
                         brokerParseError))
@@ -4945,19 +4935,12 @@ private:
                 }
             }
 
-            if (!result->ok) {
+            if (!result->ok && !useServerFetch) {
                 std::string body;
                 std::wstring primaryError;
                 bool primaryOk = false;
 
-                if (IsTrafficEnglandAlertsPageUrl(url)) {
-                    std::vector<TrafficAlert> alerts;
-                    if (FetchTrafficEnglandAlerts(alerts, primaryError, unplannedOnly, order)) {
-                        primaryOk = true;
-                        result->alerts = std::move(alerts);
-                    }
-                }
-                else if (HttpGetText(url, body, primaryError)) {
+                if (!url.empty() && HttpGetText(url, body, primaryError)) {
                     std::wstring parseError;
                     std::vector<TrafficAlert> alerts = ParseTrafficAlerts(body, parseError);
 
@@ -4986,23 +4969,21 @@ private:
 
                 result->ok = primaryOk || (scotlandOk && scotlandOptions.enabled);
                 if (!primaryOk && !primaryError.empty())
-                    result->error = L"Traffic England: " + primaryError;
+                    result->error = L"Direct road feed: " + primaryError;
                 if (scotlandOptions.enabled && !scotlandOk) {
                     if (!result->error.empty())
                         result->error += L" ";
                     result->error += L"Traffic Scotland: " + scotlandError;
                 }
-                if (useServerFetch && !brokerError.empty()) {
-                    if (!result->error.empty())
-                        result->error += L" ";
-                    result->error += L"Server data fetch failed; used direct source fetch. " + brokerError;
-                }
-                if (!result->ok) {
-                    result->alerts = SampleAlerts();
-                    if (!result->error.empty())
-                        result->error += L" ";
-                    result->error += L"Showing sample data.";
-                }
+            }
+
+            if (!result->ok) {
+                if (useServerFetch)
+                    result->error = brokerError.empty() ? L"National Highways NTIS data is unavailable." : brokerError;
+                result->alerts = SampleAlerts();
+                if (!result->error.empty())
+                    result->error += L" ";
+                result->error += L"Showing sample data.";
             }
 
             if (g_appQuitting.load() || !IsWindow(hwnd)) {
@@ -6814,9 +6795,12 @@ private:
         IncidentExclusion exclusion;
         exclusion.key = IncidentNotificationStableKey(alert);
         exclusion.sourceId = alert.id;
-        exclusion.source = alert.id.rfind(L"traffic-scotland:", 0) == 0
-            ? L"Traffic Scotland"
-            : L"Traffic England";
+        if (alert.id.rfind(L"traffic-scotland:", 0) == 0)
+            exclusion.source = L"Traffic Scotland";
+        else if (alert.id.rfind(L"ntis:", 0) == 0)
+            exclusion.source = L"National Highways NTIS";
+        else
+            exclusion.source = L"Road incidents";
         exclusion.road = alert.road;
         exclusion.summary = BuildAlertSummary(alert);
         AddIncidentExclusionAsync(exclusion);
@@ -15977,7 +15961,7 @@ private:
 
     void CreateSettingsControls(HWND parent)
     {
-        m_urlLabel = CreateAutoLabel(parent, IDC_SETTINGS_ENDPOINT_LABEL, L"Alerts endpoint", 18, 18);
+        m_urlLabel = CreateAutoLabel(parent, IDC_SETTINGS_ENDPOINT_LABEL, L"Direct road incidents endpoint (optional)", 18, 18);
         m_urlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 44, 410, 26, parent, ControlId(IDC_URL_EDIT), m_hInst, nullptr);
         m_serverLabel = CreateAutoLabel(parent, IDC_SETTINGS_SERVER_LABEL, L"Collaboration server", 18, 84);
         m_serverEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 110, 410, 26, parent, ControlId(IDC_SERVER_EDIT), m_hInst, nullptr);
@@ -16018,9 +16002,9 @@ private:
             ControlId(IDC_SETTINGS_NOTIFICATION_AVOIDANCE_CHECK),
             m_hInst,
             nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Traffic England alert filter", 18, 512);
+        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Road incident filter", 18, 512);
         m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 538, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Traffic England order", 18, 576);
+        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Incident display order", 18, 576);
         m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 602, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
         HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 648, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
@@ -16039,7 +16023,7 @@ private:
         MoveWindow(m_settingsRefreshOffRadio, 18, radioY, offRadioW, offRadioH, TRUE);
         MoveWindow(m_settingsRefreshOnRadio, onRadioX, radioY, onRadioW, onRadioH, TRUE);
 
-        SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"https://www.trafficengland.com/traffic-alerts"));
+        SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Optional direct DATEX/JSON feed URL"));
         SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"213.254.181.35:8081"));
         SendMessageW(m_settingsRefreshIntervalEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"5s, 3s, 10s"));
         SendMessageW(m_settingsEarthquakeRadiusRatioEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"10"));
@@ -16530,7 +16514,7 @@ private:
     std::wstring m_weatherSystemNotificationWindText = L"39";
     double m_weatherSystemNotificationWindMph = 39.0;
     std::wstring m_alertOrder = L"Road";
-    std::wstring m_alertsEndpoint = L"https://www.trafficengland.com/traffic-alerts";
+    std::wstring m_alertsEndpoint;
     std::wstring m_serverBaseUrl = L"http://213.254.181.35:8081";
     bool m_periodicRefreshEnabled = true;
     bool m_hasLoadedAlerts = false;

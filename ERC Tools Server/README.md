@@ -6,7 +6,7 @@ Multithreaded HTTP server for ERC Tools authentication, collaboration data, and 
 
 1. Install the MySQL ODBC 8 Unicode driver on the server.
 2. Run `schema.sql` against MySQL.
-3. Copy `server_config.example.json` to `server_config.json` and set the MySQL connection string.
+3. Copy `server_config.example.json` to `server_config.json`, set the MySQL connection string, and configure the traffic data source.
 4. Start the server. The default port is `8081`.
 5. Check the ODBC driver name and database connection:
 
@@ -42,6 +42,19 @@ Run the printed SQL against the `erc_tools` database.
 This only bypasses ODBC for account creation. `ERC Tools Server.exe` still needs a working ODBC driver inside the Wine prefix for login, chat, notes, and update authentication.
 
 7. Copy `updates\manifest.example.json` to `updates\manifest.json` when you are ready to publish updates.
+
+## National Highways NTIS Event Data
+
+The preferred online road source is the National Highways NTIS Event Data push feed. The hardened receiver in `deploy/ntis_receiver.py` stores every DATEX II publication, merges overlapping full-refresh partitions by stable record id, applies incremental lifecycle updates, and exposes a compact current snapshot on localhost. The ERC Tools Server polls that local snapshot and advances the client-facing source generation only when its contents change.
+
+```json
+{
+  "ntisEventSnapshotUrl": "http://127.0.0.1:18080/internal/events",
+  "ntisPollIntervalSeconds": 2
+}
+```
+
+NTIS is the sole bundled source for National Highways incidents. If the receiver is unavailable, the server reports that failure instead of switching providers. Traffic Scotland remains a separate additive source.
 
 ## Accounts and 401 Responses
 

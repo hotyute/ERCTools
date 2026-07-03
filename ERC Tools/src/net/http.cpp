@@ -116,7 +116,14 @@ static std::wstring NormalizeExtraHeaders(std::wstring headers)
     return headers;
 }
 
-bool HttpJsonMethodText(const std::wstring& method, const std::wstring& inputUrl, const std::string* jsonBody, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut);
+bool HttpJsonMethodText(
+    const std::wstring& method,
+    const std::wstring& inputUrl,
+    const std::string* jsonBody,
+    const std::wstring& extraHeaders,
+    std::string& bodyOut,
+    std::wstring& errorOut,
+    DWORD timeoutMs = 10000);
 
 bool HttpGetTextWithTimeout(
     const std::wstring& inputUrl,
@@ -402,47 +409,14 @@ bool HttpGetBinary(const std::wstring& inputUrl, std::vector<BYTE>& bodyOut, std
 }
 
 
-bool IsTrafficEnglandAlertsPageUrl(const std::wstring& inputUrl)
-{
-    std::wstring url = ToLower(NormalizeUrl(inputUrl));
-
-    const size_t fragment = url.find(L'#');
-    if (fragment != std::wstring::npos)
-        url.resize(fragment);
-
-    const size_t query = url.find(L'?');
-    if (query != std::wstring::npos)
-        url.resize(query);
-
-    while (!url.empty() && url.back() == L'/')
-        url.pop_back();
-
-    return url == L"https://www.trafficengland.com/traffic-alerts" ||
-        url == L"https://trafficengland.com/traffic-alerts" ||
-        url == L"http://www.trafficengland.com/traffic-alerts" ||
-        url == L"http://trafficengland.com/traffic-alerts";
-}
-
-std::wstring BuildTrafficEnglandAlertsApiUrl(size_t start, size_t step, bool unplannedOnly, const std::wstring& order)
-{
-    const ULONGLONG cacheBuster = GetTickCount64();
-    std::wstring url = L"https://www.trafficengland.com/api/events/getAlerts";
-    url += L"?start=" + std::to_wstring(start);
-    url += L"&step=" + std::to_wstring(step);
-    std::wstring safeOrder = order.empty() ? L"Road" : order;
-    url += L"&order=" + safeOrder;
-    url += L"&is_current=1";
-    url += unplannedOnly
-        ? L"&events=CONGESTION,FULL_CLOSURES,INCIDENT,WEATHER,ABNORMAL_LOADS"
-        : L"&events=CONGESTION,FULL_CLOSURES,ROADWORKS,INCIDENT,WEATHER,MAJOR_ORGANISED_EVENTS,ABNORMAL_LOADS";
-    url += L"&unconfirmed=false";
-    url += L"&completed=false";
-    url += L"&includeUnconfirmedRoadworks=true";
-    url += L"&_=" + std::to_wstring(cacheBuster + start);
-    return url;
-}
-
-bool HttpJsonMethodText(const std::wstring& method, const std::wstring& inputUrl, const std::string* jsonBody, const std::wstring& extraHeaders, std::string& bodyOut, std::wstring& errorOut)
+bool HttpJsonMethodText(
+    const std::wstring& method,
+    const std::wstring& inputUrl,
+    const std::string* jsonBody,
+    const std::wstring& extraHeaders,
+    std::string& bodyOut,
+    std::wstring& errorOut,
+    DWORD timeoutMs)
 {
     bodyOut.clear();
     errorOut.clear();
@@ -496,7 +470,8 @@ bool HttpJsonMethodText(const std::wstring& method, const std::wstring& inputUrl
         return false;
     }
 
-    WinHttpSetTimeouts(session.h, 10000, 10000, 10000, 10000);
+    const int timeout = static_cast<int>(std::clamp<DWORD>(timeoutMs, 1000, 120000));
+    WinHttpSetTimeouts(session.h, timeout, timeout, timeout, timeout);
     ConfigureSecureProtocols(session.h);
 
     INTERNET_PORT port = parts.nPort;

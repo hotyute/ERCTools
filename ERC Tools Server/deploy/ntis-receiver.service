@@ -1,0 +1,26 @@
+[Unit]
+Description=ERC Tools NTIS DATEX II receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=erc-ntis
+Group=erc-ntis
+Environment=NTIS_BIND_HOST=127.0.0.1
+Environment=NTIS_BIND_PORT=18080
+Environment=NTIS_DATA_DIR=/var/lib/erc-tools/ntis
+ExecStart=/usr/bin/python3 /opt/erc-tools/ntis_receiver.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/erc-tools/ntis
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
