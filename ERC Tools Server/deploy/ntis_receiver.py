@@ -12,10 +12,13 @@ import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
+from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from math import ceil, cos, hypot, pi
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.request import urlopen
 
 
 BIND_HOST = os.environ.get("NTIS_BIND_HOST", "127.0.0.1")
@@ -28,7 +31,24 @@ FEEDS = {
 }
 SNAPSHOT_PATH = DATA_DIR / "current" / "events.json"
 FULL_REFRESH_IDLE_SECONDS = 10.0
-ROAD_PATTERN = re.compile(r"\b(?:M\d+[A-Z]?|A\d+(?:\(M\))?|A\d+[A-Z]?|B\d+)\b", re.IGNORECASE)
+TRAFFIC_ENGLAND_SCHEMA_VERSION = "2026-07-04-public-reasons-v4"
+TRAFFIC_ENGLAND_REBUILD_BATCH_SIZE = 500
+DEFAULT_FUSED_CONGESTION_MAX_AGE_SECONDS = int(
+    os.environ.get("NTIS_FUSED_CONGESTION_MAX_AGE_SECONDS", "600")
+)
+MIN_FUSED_CONGESTION_MAX_AGE_SECONDS = 120
+MAX_FUSED_CONGESTION_MAX_AGE_SECONDS = 600
+NETWORK_MODEL_LINK_URL = os.environ.get(
+    "NTIS_NETWORK_MODEL_LINK_URL",
+    "https://services-eu1.arcgis.com/mZXeBXkkZpekxjXT/arcgis/rest/services/"
+    "Network_Model_Public_view2/FeatureServer/1/query",
+)
+NETWORK_MODEL_SEARCH_METRES = int(os.environ.get("NTIS_NETWORK_MODEL_SEARCH_METRES", "2500"))
+NETWORK_MODEL_CACHE_DAYS = int(os.environ.get("NTIS_NETWORK_MODEL_CACHE_DAYS", "7"))
+ROAD_PATTERN = re.compile(
+    r"(?<![A-Z0-9])(?:A\d+(?:\s*\(M\)|[A-Z])?|M\d+[A-Z]?|B\d+[A-Z]?)(?![A-Z0-9])",
+    re.IGNORECASE,
+)
 
 
 def local_name(tag):
@@ -52,6 +72,13 @@ def descendant_values(element, name):
             if value:
                 values.append(value)
     return values
+
+
+def nested_values(element, container_name):
+    for container in element.iter():
+        if local_name(container.tag) == container_name:
+            return descendant_values(container, "value")
+    return []
 
 
 def xml_attribute(element, name, default=""):
@@ -82,6 +109,82 @@ def float_value(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def normalise_road_name(value):
+    match = ROAD_PATTERN.search(value or "")
+    if not match:
+        return ""
+    road = re.sub(r"\s+", "", match.group(0)).upper()
+    return road
+
+
+def extract_road_name(value):
+    road = normalise_road_name(value)
+    if road and re.search(rf"(?<![A-Z0-9]){re.escape(road)}\s+SPUR(?![A-Z0-9])", value or "", re.IGNORECASE):
+        road += " SPUR"
+    return road
+
+
+def road_base(value):
+    return normalise_road_name(value).replace("(M)", "")
+
+
+def resolved_road_name(source_road, model_road):
+    source = normalise_road_name(source_road)
+    model = normalise_road_name(model_road)
+    if not model or (source and road_base(model) != road_base(source)):
+        return source
+    # Network Model geometry may meet an adjacent all-purpose section at a
+    # junction. Never let that ambiguity downgrade an explicit motorway name.
+    if "(M)" in source and "(M)" not in model:
+        return source
+    return model
+
+
+def replace_first_road_name(value, road):
+    if not value or not road:
+        return value
+    return ROAD_PATTERN.sub(road, value, count=1)
+
+
+def traffic_england_event_type(record_type):
+    if record_type == "AbnormalTraffic":
+        return "CONGESTION"
+    if record_type == "MaintenanceWorks":
+        return "ROADWORKS"
+    if record_type == "WeatherRelatedRoadConditions":
+        return "WEATHER"
+    if record_type == "PublicEvent":
+        return "MAJOR_ORGANISED_EVENTS"
+    if record_type == "AbnormalLoad":
+        return "ABNORMAL_LOADS"
+    return "INCIDENT"
+
+
+def refresh_traffic_england_flags(alert):
+    event_type = alert.get("trafficEnglandEventType", "")
+    confirmed = bool(alert.get("confirmed", False))
+    eligible = (
+        bool(alert.get("current", True))
+        and (confirmed or event_type == "ROADWORKS")
+        and not bool(alert.get("completed", False))
+        and bool(alert.get("hasPublicPresentation", False))
+        and str(alert.get("informationStatus", "real")).lower() == "real"
+    )
+    alert["trafficEnglandEligible"] = eligible
+    alert["trafficEnglandUnplanned"] = (
+        eligible and confirmed and event_type in {"CONGESTION", "INCIDENT"}
+    )
+    # The public Alerts page only exposed records already carrying a public
+    # road identity. Network-resolved regional records remain available via
+    # the explicit "Show unresolved incidents" client option.
+    alert["trafficEnglandVisible"] = (
+        eligible
+        and bool(alert.get("sourceRoad", ""))
+        and bool(alert.get("networkResolved", False))
+    )
+    return alert
 
 
 def general_public_comments(record):
@@ -117,9 +220,22 @@ def normalise_reason(value):
         "broken down vehicle": "Broken down vehicle",
         "vehicle breakdown": "Broken down vehicle",
         "queue": "Congestion",
+        # The former Traffic England public API shortened the NTIS
+        # "Other Road Management" subtype to this public-facing label.
+        "other road management": "Road Management",
+        "other road or carriageway or lane management": "Road Management",
     }
     stripped = " ".join((value or "").split())
     return aliases.get(stripped.lower(), stripped)
+
+
+def normalise_reason_for_record(value, record_type):
+    reason = normalise_reason(value)
+    # NTIS encodes its public "Police Incident" subtype as an
+    # AuthorityOperation whose authorityOperationType is "other".
+    if record_type == "AuthorityOperation" and reason.lower() == "other":
+        return "Police incident"
+    return reason
 
 
 def fallback_reason(record_type, record):
@@ -135,7 +251,7 @@ def fallback_reason(record_type, record):
     raw = descendant_text(record, type_fields.get(record_type, ""))
     if raw:
         raw = re.sub(r"(?<!^)([A-Z])", r" \1", raw).replace("_", " ").strip()
-        return normalise_reason(raw.capitalize())
+        return normalise_reason_for_record(raw.capitalize(), record_type)
     defaults = {
         "Accident": "Road traffic collision",
         "AbnormalTraffic": "Congestion",
@@ -151,7 +267,7 @@ def fallback_reason(record_type, record):
 def select_location_and_reason(comments, record_type, record):
     location_index = -1
     for index, comment in enumerate(comments):
-        if ROAD_PATTERN.search(comment):
+        if normalise_road_name(comment):
             location_index = index
             break
     location = comments[location_index] if location_index >= 0 else ""
@@ -172,7 +288,11 @@ def select_location_and_reason(comments, record_type, record):
             continue
         reason = candidate
         break
-    return location, normalise_reason(reason) or fallback_reason(record_type, record)
+    return (
+        location,
+        normalise_reason_for_record(reason, record_type)
+        or fallback_reason(record_type, record),
+    )
 
 
 def extract_coordinates(record):
@@ -192,19 +312,25 @@ def record_is_current(record, publication_time):
     if descendant_text(record, "end").lower() == "true":
         return False
 
-    status = descendant_text(record, "validityStatus").lower()
-    if status == "active":
-        return True
-    if status != "definedbyvaliditytimespec":
-        return False
-
     now = parse_iso_time(publication_time) or utc_now()
     start = parse_iso_time(descendant_text(record, "overallStartTime"))
     end = parse_iso_time(descendant_text(record, "overallEndTime"))
-    return (start is None or start <= now) and (end is None or now <= end)
+    within_validity = (start is None or start <= now) and (end is None or now <= end)
+    status = descendant_text(record, "validityStatus").lower()
+    if status == "active":
+        return within_validity
+    if status == "definedbyvaliditytimespec":
+        return within_validity
+    return False
 
 
-def map_severity(value):
+def map_severity(value, event_type="", delay_seconds=0.0):
+    if event_type == "CONGESTION" and delay_seconds > 0:
+        if delay_seconds >= 360:
+            return "Severe"
+        if delay_seconds >= 120:
+            return "Moderate"
+        return "Minor"
     return {
         "highest": "Severe",
         "high": "Severe",
@@ -234,7 +360,9 @@ def build_description(record, comments, location, reason, lanes, lanes_closed, l
 
     delay_seconds = float_value(descendant_text(record, "delayTimeValue"))
     if delay_seconds > 0:
-        delay_minutes = max(1, round(delay_seconds / 60.0))
+        # Traffic England presented measured congestion in five-minute bands,
+        # with ten minutes as the smallest displayed non-zero delay.
+        delay_minutes = max(10, int(ceil(delay_seconds / 300.0) * 5))
         lines.append(f"Delay : {delay_minutes} minutes")
     if lanes_closed > 0 and lanes_total > 0:
         lines.append(f"Lanes Closed : {lanes_closed} of {lanes_total}")
@@ -243,7 +371,44 @@ def build_description(record, comments, location, reason, lanes, lanes_closed, l
     return "\r\n".join(lines)
 
 
-def normalise_record(record, situation_id, publication_time):
+def event_source_name(record):
+    values = nested_values(record, "sourceName")
+    return values[0] if values else ""
+
+
+def event_location_key(record, location, latitude, longitude):
+    references = []
+    for contained in record.iter():
+        if local_name(contained.tag) != "locationContainedInGroup":
+            continue
+        reference = ""
+        for child in contained.iter():
+            if local_name(child.tag) == "predefinedLocationReference":
+                reference = xml_attribute(child, "id")
+                break
+        if not reference:
+            continue
+        direction = []
+        for field in ("startNode", "endNode"):
+            for child in contained.iter():
+                if local_name(child.tag) == field:
+                    direction.append(field + "=" + xml_attribute(child, "id"))
+                    break
+        for field in ("startChainage", "endChainage"):
+            value = descendant_text(contained, field)
+            if value:
+                direction.append(field + "=" + value)
+        references.append(reference + ":" + ",".join(direction))
+    if references:
+        return "|".join(references)
+    if latitude is not None and longitude is not None:
+        return f"{location.lower()}|{latitude:.6f}|{longitude:.6f}"
+    return location.lower()
+
+
+def normalise_record(
+        record, situation_id, publication_time, information_status="real",
+        network_resolver=None, resolution_db=None):
     record_id = xml_attribute(record, "id")
     version = integer_value(xml_attribute(record, "version"))
     version_time = descendant_text(record, "situationRecordVersionTime")
@@ -262,12 +427,21 @@ def normalise_record(record, situation_id, publication_time):
     record_type = xml_attribute(record, "type") or "RoadIncident"
     comments = general_public_comments(record)
     location, reason = select_location_and_reason(comments, record_type, record)
-    road_match = ROAD_PATTERN.search(location)
-    road = road_match.group(0).upper() if road_match else ""
-    if road and re.search(rf"\b{re.escape(road)}\s+SPUR\b", location, re.IGNORECASE):
-        road += " SPUR"
+    source_road = extract_road_name(location)
+    road = source_road
 
     latitude, longitude = extract_coordinates(record)
+    network_match = None
+    if network_resolver is not None and latitude is not None and longitude is not None:
+        network_match = network_resolver.resolve_cached(
+            latitude, longitude, source_road, resolution_db
+        )
+        if network_match:
+            road = resolved_road_name(source_road, network_match["road"])
+            if road and source_road.endswith(" SPUR"):
+                road += " SPUR"
+            if source_road and road and source_road != road:
+                location = replace_first_road_name(location, road)
     lanes = lane_states(record)
     lanes_closed = sum(1 for lane in lanes if lane["laneStatus"].lower() in {
         "closed", "blocked", "notusable", "not usable", "restricted",
@@ -279,24 +453,52 @@ def normalise_record(record, situation_id, publication_time):
         lanes_closed = max(0, lanes_total - operational)
 
     planned = record_type in {"MaintenanceWorks", "PublicEvent"}
-    event_type = "Roadworks" if record_type == "MaintenanceWorks" else (
-        "Public event" if record_type == "PublicEvent" else reason
+    te_event_type = traffic_england_event_type(record_type)
+    delay_seconds = float_value(descendant_text(record, "delayTimeValue"))
+    source_name = event_source_name(record)
+    source_situation_time = descendant_text(record, "sourceSituationCreationTime")
+    ephemeral = (
+        te_event_type == "CONGESTION"
+        and source_name.lower() == "fused traffic data"
     )
+    location_key = event_location_key(record, location, latitude, longitude)
+    description = build_description(
+        record, comments, location, reason, lanes, lanes_closed, lanes_total)
+    if not location and network_match and network_match.get("description"):
+        description = "Location : " + network_match["description"] + (
+            "\r\n" + description if description else ""
+        )
     alert = {
         "id": "ntis:" + record_id,
         "ntisRecordId": record_id,
         "ntisSituationId": situation_id,
         "title": reason,
         "reason": reason,
-        "description": build_description(
-            record, comments, location, reason, lanes, lanes_closed, lanes_total),
+        "description": description,
         "road": road,
+        "sourceRoad": source_road,
+        "unresolved": not bool(source_road),
+        "networkResolved": bool(network_match),
+        "networkLocation": network_match.get("description", "") if network_match else "",
+        "trafficEnglandEventType": te_event_type,
+        "confirmed": descendant_text(record, "probabilityOfOccurrence").lower() == "certain",
+        "completed": False,
+        "current": True,
+        "hasPublicPresentation": bool(comments),
+        "informationStatus": information_status or "real",
+        "sourceName": source_name,
+        "sourceSituationCreationTime": source_situation_time,
+        "ephemeral": ephemeral,
+        "ephemeralKey": "fused-congestion:" + location_key if ephemeral else "",
         "region": descendant_text(record, "allocatedRoc") or "England",
-        "severity": map_severity(descendant_text(record, "severity")),
-        "eventType": event_type,
+        "severity": map_severity(
+            descendant_text(record, "severity"), te_event_type, delay_seconds
+        ),
+        "eventType": te_event_type,
         "ntisRecordType": record_type,
         "updated": version_time or descendant_text(record, "situationRecordCreationTime"),
         "planned": planned,
+        "delaySeconds": delay_seconds,
         "lanesClosed": lanes_closed,
         "lanesTotal": lanes_total,
         "lanes": lanes,
@@ -304,6 +506,7 @@ def normalise_record(record, situation_id, publication_time):
     if latitude is not None and longitude is not None:
         alert["latitude"] = latitude
         alert["longitude"] = longitude
+    refresh_traffic_england_flags(alert)
     return {
         "recordId": record_id,
         "version": version,
@@ -313,7 +516,7 @@ def normalise_record(record, situation_id, publication_time):
     }
 
 
-def parse_event_publication(path):
+def parse_event_publication(path, network_resolver=None, resolution_db=None):
     with open(path, "rb") as probe:
         compressed = probe.read(2) == b"\x1f\x8b"
     opener = gzip.open if compressed else open
@@ -326,10 +529,14 @@ def parse_event_publication(path):
         if local_name(situation.tag) != "situation":
             continue
         situation_id = xml_attribute(situation, "id")
+        information_status = descendant_text(situation, "informationStatus") or "real"
         for record in list(situation):
             if local_name(record.tag) != "situationRecord":
                 continue
-            normalised = normalise_record(record, situation_id, publication_time)
+            normalised = normalise_record(
+                record, situation_id, publication_time, information_status,
+                network_resolver, resolution_db
+            )
             if normalised is not None:
                 records.append(normalised)
     return feed_type, publication_time, records
@@ -341,6 +548,7 @@ def utc_now():
 
 def initialise_database():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    rebuild_required = False
     with sqlite3.connect(DATA_DIR / "messages.sqlite3") as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute(
@@ -372,9 +580,26 @@ def initialise_database():
                 version_time TEXT NOT NULL,
                 situation_id TEXT NOT NULL,
                 refresh_generation INTEGER NOT NULL,
+                received_at TEXT NOT NULL DEFAULT '',
+                ephemeral_key TEXT NOT NULL DEFAULT '',
                 alert_json TEXT NOT NULL
             )
             """
+        )
+        columns = {
+            row[1] for row in db.execute("PRAGMA table_info(event_state)")
+        }
+        if "received_at" not in columns:
+            db.execute(
+                "ALTER TABLE event_state ADD COLUMN received_at TEXT NOT NULL DEFAULT ''"
+            )
+        if "ephemeral_key" not in columns:
+            db.execute(
+                "ALTER TABLE event_state ADD COLUMN ephemeral_key TEXT NOT NULL DEFAULT ''"
+            )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS event_state_ephemeral "
+            "ON event_state(ephemeral_key, received_at)"
         )
         db.execute(
             """
@@ -384,6 +609,72 @@ def initialise_database():
             )
             """
         )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS network_resolution (
+                cache_key TEXT PRIMARY KEY,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                source_road TEXT NOT NULL,
+                road TEXT NOT NULL,
+                description TEXT NOT NULL,
+                distance_metres REAL NOT NULL,
+                resolved_at TEXT NOT NULL
+            )
+            """
+        )
+
+        schema_row = db.execute(
+            "SELECT value FROM processor_metadata WHERE key = ?",
+            ("traffic_england_schema_version",),
+        ).fetchone()
+        schema_version = schema_row[0] if schema_row else ""
+        pending_row = db.execute(
+            "SELECT value FROM processor_metadata WHERE key = ?",
+            ("traffic_england_rebuild_pending",),
+        ).fetchone()
+        rebuild_pending = pending_row and pending_row[0] == "1"
+        event_message_count = db.execute(
+            "SELECT COUNT(*) FROM messages WHERE feed = 'event'"
+        ).fetchone()[0]
+
+        if schema_version != TRAFFIC_ENGLAND_SCHEMA_VERSION and event_message_count:
+            rebuild_required = True
+            if not rebuild_pending:
+                # The original DATEX II publications are retained specifically so
+                # compatibility changes can be rebuilt without guessing fields that
+                # were not present in older cached alert JSON.
+                db.execute("DELETE FROM event_state")
+                db.execute(
+                    "UPDATE messages SET processed_at = NULL WHERE feed = 'event'"
+                )
+                db.execute(
+                    "DELETE FROM processor_metadata WHERE key IN "
+                    "('refresh_in_progress', 'last_feed_type', "
+                    "'last_refresh_received_epoch', 'refresh_generation')"
+                )
+                db.execute(
+                    "INSERT INTO processor_metadata(key, value) VALUES(?, '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    ("traffic_england_rebuild_pending",),
+                )
+                logging.warning(
+                    "Rebuilding Traffic England compatibility state from %d stored NTIS publication(s)",
+                    event_message_count,
+                )
+        elif schema_version != TRAFFIC_ENGLAND_SCHEMA_VERSION:
+            db.execute(
+                "INSERT INTO processor_metadata(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("traffic_england_schema_version", TRAFFIC_ENGLAND_SCHEMA_VERSION),
+            )
+
+    if rebuild_required:
+        try:
+            SNAPSHOT_PATH.unlink()
+        except FileNotFoundError:
+            pass
+    return rebuild_required
 
 
 def metadata_get(db, key, default=""):
@@ -403,10 +694,268 @@ def metadata_set(db, key, value):
     )
 
 
-class NtisEventProcessor:
+def point_segment_distance_metres(latitude, longitude, start, end):
+    scale_x = 111320.0 * cos(latitude * pi / 180.0)
+    scale_y = 110540.0
+    ax = (float(start[0]) - longitude) * scale_x
+    ay = (float(start[1]) - latitude) * scale_y
+    bx = (float(end[0]) - longitude) * scale_x
+    by = (float(end[1]) - latitude) * scale_y
+    dx = bx - ax
+    dy = by - ay
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 0.000001:
+        return hypot(ax, ay)
+    amount = max(0.0, min(1.0, -(ax * dx + ay * dy) / length_squared))
+    return hypot(ax + amount * dx, ay + amount * dy)
+
+
+def feature_distance_metres(latitude, longitude, geometry):
+    closest = None
+    for path in geometry.get("paths", []):
+        for index in range(1, len(path)):
+            distance = point_segment_distance_metres(
+                latitude, longitude, path[index - 1], path[index]
+            )
+            if closest is None or distance < closest:
+                closest = distance
+    return closest
+
+
+class NetworkModelResolver:
     def __init__(self):
         self._wake = threading.Event()
         self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._queued = set()
+        self._queue = deque()
+        self._retry_after = {}
+        self._retry_items = {}
+        self._on_change = None
+        self._thread = threading.Thread(
+            target=self._run, name="ntis-network-model-resolver", daemon=True
+        )
+
+    def set_change_callback(self, callback):
+        self._on_change = callback
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._wake.set()
+        self._thread.join(timeout=10)
+
+    @staticmethod
+    def _cache_key(latitude, longitude, source_road):
+        return f"{latitude:.5f},{longitude:.5f}|{road_base(source_road)}"
+
+    def resolve_cached(self, latitude, longitude, source_road="", db=None):
+        key = self._cache_key(latitude, longitude, source_road)
+        row = None
+        try:
+            if db is not None:
+                row = db.execute(
+                    """
+                    SELECT road, description, distance_metres, resolved_at
+                    FROM network_resolution WHERE cache_key = ?
+                    """,
+                    (key,),
+                ).fetchone()
+            else:
+                with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=5) as cache_db:
+                    row = cache_db.execute(
+                        """
+                        SELECT road, description, distance_metres, resolved_at
+                        FROM network_resolution WHERE cache_key = ?
+                        """,
+                        (key,),
+                    ).fetchone()
+        except sqlite3.Error:
+            logging.exception("Could not read the Network Model resolution cache")
+
+        stale = True
+        if row:
+            resolved_at = parse_iso_time(row[3])
+            stale = resolved_at is None or (
+                utc_now() - resolved_at
+            ).total_seconds() > NETWORK_MODEL_CACHE_DAYS * 86400
+        if not row or stale:
+            self._schedule(key, latitude, longitude, source_road)
+        if not row or not row[0]:
+            return None
+        return {
+            "road": row[0],
+            "description": row[1],
+            "distanceMetres": float(row[2]),
+        }
+
+    def invalidate(self):
+        try:
+            with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
+                db.execute("UPDATE network_resolution SET resolved_at = ''")
+        except sqlite3.Error:
+            logging.exception("Could not invalidate the Network Model resolution cache")
+        if self._on_change:
+            self._on_change()
+
+    def _schedule(self, key, latitude, longitude, source_road):
+        with self._lock:
+            if key in self._queued or time.monotonic() < self._retry_after.get(key, 0):
+                return
+            self._queued.add(key)
+            self._queue.append((key, latitude, longitude, source_road))
+        self._wake.set()
+
+    def _take(self):
+        with self._lock:
+            if self._queue:
+                return self._queue.popleft()
+            now = time.monotonic()
+            for key, item in list(self._retry_items.items()):
+                if now < self._retry_after.get(key, 0):
+                    continue
+                self._retry_items.pop(key, None)
+                self._retry_after.pop(key, None)
+                self._queued.add(key)
+                return item
+            return None
+
+    def _finish(self, key):
+        with self._lock:
+            self._queued.discard(key)
+
+    def _retry_later(self, key, latitude, longitude, source_road):
+        with self._lock:
+            self._retry_after[key] = time.monotonic() + 60.0
+            self._retry_items[key] = (key, latitude, longitude, source_road)
+
+    def _clear_retry(self, key):
+        with self._lock:
+            self._retry_after.pop(key, None)
+            self._retry_items.pop(key, None)
+
+    def _query(self, latitude, longitude, source_road):
+        params = {
+            "f": "json",
+            "where": "srn='Y' AND roadname IS NOT NULL",
+            "geometry": f"{longitude:.7f},{latitude:.7f}",
+            "geometryType": "esriGeometryPoint",
+            "inSR": "4326",
+            "outSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "distance": str(NETWORK_MODEL_SEARCH_METRES),
+            "units": "esriSRUnit_Meter",
+            "outFields": "roadname,linkref,linkdesc,operationalstate,srn",
+            "returnGeometry": "true",
+            "resultRecordCount": "2000",
+        }
+        with urlopen(NETWORK_MODEL_LINK_URL + "?" + urlencode(params), timeout=20) as response:
+            document = json.load(response)
+        if document.get("error"):
+            raise RuntimeError(document["error"].get("message", "Network Model query failed"))
+
+        wanted_base = road_base(source_road)
+        candidates = []
+        for feature in document.get("features", []):
+            attributes = feature.get("attributes", {})
+            road = normalise_road_name(attributes.get("roadname", ""))
+            if not road:
+                continue
+            if wanted_base and road_base(road) != wanted_base:
+                continue
+            distance = feature_distance_metres(
+                latitude, longitude, feature.get("geometry", {})
+            )
+            if distance is None or distance > NETWORK_MODEL_SEARCH_METRES:
+                continue
+            candidates.append((distance, road, attributes.get("linkdesc", "")))
+        if not candidates:
+            return "", "", -1.0
+        distance, road, description = min(candidates, key=lambda candidate: candidate[0])
+        return road, description, distance
+
+    def _store(self, key, latitude, longitude, source_road, result):
+        road, description, distance = result
+        with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
+            db.execute(
+                """
+                INSERT INTO network_resolution(
+                    cache_key, latitude, longitude, source_road, road,
+                    description, distance_metres, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    latitude = excluded.latitude,
+                    longitude = excluded.longitude,
+                    source_road = excluded.source_road,
+                    road = excluded.road,
+                    description = excluded.description,
+                    distance_metres = excluded.distance_metres,
+                    resolved_at = excluded.resolved_at
+                """,
+                (
+                    key, latitude, longitude, source_road, road, description,
+                    distance, utc_now().isoformat(),
+                ),
+            )
+
+    def _run(self):
+        changed = False
+        last_notification = time.monotonic()
+        while not self._stop.is_set():
+            item = self._take()
+            if item is None:
+                if changed and self._on_change:
+                    self._on_change()
+                    changed = False
+                self._wake.wait(timeout=1.0)
+                self._wake.clear()
+                continue
+
+            key, latitude, longitude, source_road = item
+            try:
+                result = self._query(latitude, longitude, source_road)
+                self._store(key, latitude, longitude, source_road, result)
+                self._clear_retry(key)
+                changed = True
+            except Exception:
+                self._retry_later(key, latitude, longitude, source_road)
+                logging.exception(
+                    "Could not resolve %.6f, %.6f through the Network Model",
+                    latitude,
+                    longitude,
+                )
+            finally:
+                self._finish(key)
+
+            if changed and time.monotonic() - last_notification >= 1.0:
+                if self._on_change:
+                    self._on_change()
+                changed = False
+                last_notification = time.monotonic()
+
+
+class NtisEventProcessor:
+    def __init__(self, network_resolver):
+        self._network_resolver = network_resolver
+        self._settings_lock = threading.Lock()
+        with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
+            stored_age = integer_value(
+                metadata_get(
+                    db,
+                    "fused_congestion_max_age_seconds",
+                    DEFAULT_FUSED_CONGESTION_MAX_AGE_SECONDS,
+                ),
+                DEFAULT_FUSED_CONGESTION_MAX_AGE_SECONDS,
+            )
+        self._fused_congestion_max_age_seconds = max(
+            MIN_FUSED_CONGESTION_MAX_AGE_SECONDS,
+            min(MAX_FUSED_CONGESTION_MAX_AGE_SECONDS, stored_age),
+        )
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._network_refresh_requested = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="ntis-event-processor", daemon=True
         )
@@ -416,6 +965,28 @@ class NtisEventProcessor:
 
     def notify(self):
         self._wake.set()
+
+    def request_network_refresh(self):
+        self._network_refresh_requested.set()
+        self.notify()
+
+    def fused_congestion_max_age_seconds(self):
+        with self._settings_lock:
+            return self._fused_congestion_max_age_seconds
+
+    def set_fused_congestion_max_age_seconds(self, value):
+        value = max(
+            MIN_FUSED_CONGESTION_MAX_AGE_SECONDS,
+            min(MAX_FUSED_CONGESTION_MAX_AGE_SECONDS, integer_value(value, 600)),
+        )
+        with self._settings_lock:
+            self._fused_congestion_max_age_seconds = value
+        with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
+            metadata_set(db, "fused_congestion_max_age_seconds", value)
+            db.commit()
+        self.notify()
+        logging.info("Fused congestion freshness changed to %d seconds", value)
+        return value
 
     def stop(self):
         self._stop.set()
@@ -433,6 +1004,20 @@ class NtisEventProcessor:
             item.get("title", ""),
             item.get("id", ""),
         ))
+        public_count = sum(
+            1 for alert in alerts if alert.get("trafficEnglandVisible", False)
+        )
+        unplanned_public_count = sum(
+            1 for alert in alerts
+            if alert.get("trafficEnglandVisible", False)
+            and alert.get("trafficEnglandUnplanned", False)
+        )
+        unresolved_count = sum(
+            1 for alert in alerts
+            if alert.get("trafficEnglandEligible", False)
+            and alert.get("unresolved", False)
+            and alert.get("networkResolved", False)
+        )
         generation = integer_value(metadata_get(db, "snapshot_generation")) + 1
         metadata_set(db, "snapshot_generation", generation)
         document = {
@@ -441,6 +1026,10 @@ class NtisEventProcessor:
             "generation": generation,
             "updatedAt": utc_now().isoformat(),
             "refreshInProgress": False,
+            "trafficEnglandPublicCount": public_count,
+            "trafficEnglandUnplannedPublicCount": unplanned_public_count,
+            "trafficEnglandResolvedExtraCount": unresolved_count,
+            "currentRecordCount": len(alerts),
             "alerts": alerts,
         }
         SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -458,10 +1047,96 @@ class NtisEventProcessor:
             if os.path.exists(temporary_name):
                 os.unlink(temporary_name)
         logging.info(
-            "Published NTIS event snapshot generation %d with %d current record(s)",
+            "Published NTIS event snapshot generation %d with %d Traffic England-compatible public incident(s), %d resolved extra(s), and %d current raw record(s)",
             generation,
+            public_count,
+            unresolved_count,
             len(alerts),
         )
+
+    def _refresh_network_resolutions(self, db):
+        changed = False
+        rows = db.execute(
+            "SELECT record_id, alert_json FROM event_state"
+        ).fetchall()
+        for record_id, alert_json in rows:
+            alert = json.loads(alert_json)
+            if "trafficEnglandEventType" not in alert:
+                alert["trafficEnglandEventType"] = traffic_england_event_type(
+                    alert.get("ntisRecordType", "RoadIncident")
+                )
+            # Missing source compatibility fields are treated conservatively. A
+            # one-time raw-publication replay upgrades pre-existing databases.
+            alert.setdefault("confirmed", False)
+            alert.setdefault("completed", False)
+            alert.setdefault("current", True)
+            alert.setdefault("hasPublicPresentation", False)
+            alert.setdefault("informationStatus", "real")
+            latitude = float_value(alert.get("latitude"), None)
+            longitude = float_value(alert.get("longitude"), None)
+            if latitude is None or longitude is None:
+                refresh_traffic_england_flags(alert)
+                updated_json = json.dumps(alert, ensure_ascii=False, separators=(",", ":"))
+                if updated_json != alert_json:
+                    db.execute(
+                        "UPDATE event_state SET alert_json = ? WHERE record_id = ?",
+                        (updated_json, record_id),
+                    )
+                    changed = True
+                continue
+
+            source_road = extract_road_name(
+                alert.get("sourceRoad", alert.get("road", ""))
+            )
+            unresolved = bool(alert.get("unresolved", not source_road))
+            network_match = self._network_resolver.resolve_cached(
+                latitude, longitude, source_road, db
+            )
+            if not network_match:
+                alert["sourceRoad"] = source_road
+                alert["unresolved"] = unresolved
+                alert["networkResolved"] = False
+                refresh_traffic_england_flags(alert)
+                updated_json = json.dumps(alert, ensure_ascii=False, separators=(",", ":"))
+                if updated_json != alert_json:
+                    db.execute(
+                        "UPDATE event_state SET alert_json = ? WHERE record_id = ?",
+                        (updated_json, record_id),
+                    )
+                    changed = True
+                continue
+
+            model_road = resolved_road_name(source_road, network_match["road"])
+            if not model_road:
+                continue
+            if source_road.endswith(" SPUR"):
+                model_road += " SPUR"
+
+            previous_location = alert.get("networkLocation", "")
+            model_location = network_match.get("description", "")
+            alert["road"] = model_road
+            alert["sourceRoad"] = source_road
+            alert["unresolved"] = unresolved
+            alert["networkResolved"] = True
+            alert["networkLocation"] = model_location
+            if source_road and model_road and source_road != model_road:
+                alert["description"] = replace_first_road_name(
+                    alert.get("description", ""), model_road
+                )
+            if unresolved and model_location and not previous_location:
+                existing = alert.get("description", "")
+                alert["description"] = "Location : " + model_location + (
+                    "\r\n" + existing if existing else ""
+                )
+            refresh_traffic_england_flags(alert)
+            updated_json = json.dumps(alert, ensure_ascii=False, separators=(",", ":"))
+            if updated_json != alert_json:
+                db.execute(
+                    "UPDATE event_state SET alert_json = ? WHERE record_id = ?",
+                    (updated_json, record_id),
+                )
+                changed = True
+        return changed
 
     def _finalise_refresh_if_idle(self, db, force=False):
         if metadata_get(db, "refresh_in_progress", "0") != "1":
@@ -483,8 +1158,21 @@ class NtisEventProcessor:
         )
         return True
 
+    def _expire_ephemeral_records(self, db):
+        cutoff = datetime.fromtimestamp(
+            time.time() - self.fused_congestion_max_age_seconds(),
+            timezone.utc,
+        ).isoformat()
+        return db.execute(
+            "DELETE FROM event_state "
+            "WHERE ephemeral_key <> '' AND received_at < ?",
+            (cutoff,),
+        ).rowcount
+
     def _apply_publication(self, db, message_id, path, received_at):
-        feed_type, publication_time, records = parse_event_publication(path)
+        feed_type, publication_time, records = parse_event_publication(
+            path, self._network_resolver, db
+        )
         is_full_refresh = "full refresh" in feed_type.lower()
         last_feed_type = metadata_get(db, "last_feed_type")
         last_refresh_epoch = float(
@@ -524,6 +1212,18 @@ class NtisEventProcessor:
                 changed = changed or removed > 0
                 continue
             alert = record["alert"]
+            alert["receivedAt"] = received_at
+            ephemeral_key = alert.get("ephemeralKey", "")
+            if ephemeral_key:
+                # Fused congestion is a rolling sensor-derived snapshot. NTIS
+                # assigns a new record id to each sample, so the network
+                # location is the stable identity Traffic England used.
+                removed = db.execute(
+                    "DELETE FROM event_state "
+                    "WHERE ephemeral_key = ? AND record_id <> ?",
+                    (ephemeral_key, record_id),
+                ).rowcount
+                changed = changed or removed > 0
             previous = db.execute(
                 "SELECT version, alert_json, refresh_generation FROM event_state WHERE record_id = ?",
                 (record_id,),
@@ -541,13 +1241,15 @@ class NtisEventProcessor:
                 """
                 INSERT INTO event_state(
                     record_id, version, version_time, situation_id,
-                    refresh_generation, alert_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    refresh_generation, received_at, ephemeral_key, alert_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(record_id) DO UPDATE SET
                     version = excluded.version,
                     version_time = excluded.version_time,
                     situation_id = excluded.situation_id,
                     refresh_generation = excluded.refresh_generation,
+                    received_at = excluded.received_at,
+                    ephemeral_key = excluded.ephemeral_key,
                     alert_json = excluded.alert_json
                 """,
                 (
@@ -556,6 +1258,8 @@ class NtisEventProcessor:
                     record["versionTime"],
                     alert.get("ntisSituationId", ""),
                     row_generation,
+                    received_at,
+                    ephemeral_key,
                     alert_json,
                 ),
             )
@@ -573,14 +1277,21 @@ class NtisEventProcessor:
         finalised = False
         with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
             db.execute("PRAGMA journal_mode=WAL")
+            rebuild_pending = (
+                metadata_get(db, "traffic_england_rebuild_pending", "0") == "1"
+            )
+            batch_size = (
+                TRAFFIC_ENGLAND_REBUILD_BATCH_SIZE if rebuild_pending else 50
+            )
             rows = db.execute(
                 """
                 SELECT id, path, received_at
                 FROM messages
                 WHERE feed = 'event' AND processed_at IS NULL
                 ORDER BY id
-                LIMIT 50
-                """
+                LIMIT ?
+                """,
+                (batch_size,),
             ).fetchall()
             for message_id, path, received_at in rows:
                 try:
@@ -599,8 +1310,30 @@ class NtisEventProcessor:
                     db.commit()
             if not rows:
                 finalised = self._finalise_refresh_if_idle(db)
+            expired = self._expire_ephemeral_records(db)
+            any_changed = any_changed or expired > 0
+            if self._network_refresh_requested.is_set():
+                self._network_refresh_requested.clear()
+                if not rebuild_pending:
+                    any_changed = self._refresh_network_resolutions(db) or any_changed
+            if rebuild_pending and not rows:
+                self._finalise_refresh_if_idle(db, force=True)
+                self._refresh_network_resolutions(db)
+                metadata_set(
+                    db,
+                    "traffic_england_schema_version",
+                    TRAFFIC_ENGLAND_SCHEMA_VERSION,
+                )
+                metadata_set(db, "traffic_england_rebuild_pending", "0")
+                self._write_snapshot(db)
+                db.commit()
+                logging.info(
+                    "Traffic England compatibility rebuild completed at schema %s",
+                    TRAFFIC_ENGLAND_SCHEMA_VERSION,
+                )
+                return 0
             refresh_active = metadata_get(db, "refresh_in_progress", "0") == "1"
-            if (any_changed or finalised) and not refresh_active:
+            if (any_changed or finalised) and not refresh_active and not rebuild_pending:
                 self._write_snapshot(db)
                 db.commit()
             return len(rows)
@@ -621,9 +1354,10 @@ class ReceiverServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, server_address, handler_class, event_processor):
+    def __init__(self, server_address, handler_class, event_processor, network_resolver):
         super().__init__(server_address, handler_class)
         self.event_processor = event_processor
+        self.network_resolver = network_resolver
 
 
 class ReceiverHandler(BaseHTTPRequestHandler):
@@ -653,6 +1387,17 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "application/json",
             )
             return
+        if path == "/internal/settings":
+            age_seconds = self.server.event_processor.fused_congestion_max_age_seconds()
+            self.send_text(
+                200,
+                json.dumps({
+                    "fusedCongestionMaxAgeSeconds": age_seconds,
+                    "fusedCongestionMaxAgeMinutes": age_seconds // 60,
+                }) + "\n",
+                "application/json; charset=utf-8",
+            )
+            return
         if path == "/internal/events":
             if not SNAPSHOT_PATH.exists():
                 self.send_text(
@@ -669,8 +1414,15 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 }:
                     document["alerts"] = [
                         alert for alert in document.get("alerts", [])
-                        if not alert.get("planned", False)
+                        if alert.get("trafficEnglandUnplanned", False)
                     ]
+                    document["trafficEnglandPublicCount"] = document.get(
+                        "trafficEnglandUnplannedPublicCount",
+                        sum(
+                            1 for alert in document["alerts"]
+                            if alert.get("trafficEnglandVisible", False)
+                        ),
+                    )
                 self.send_text(
                     200,
                     json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n",
@@ -692,6 +1444,33 @@ class ReceiverHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path == "/internal/settings":
+            length_text = self.headers.get("Content-Length")
+            try:
+                content_length = int(length_text or "")
+            except ValueError:
+                self.send_text(411, "A valid Content-Length header is required\n")
+                return
+            if content_length < 0 or content_length > 4096:
+                self.send_text(413, "Settings payload is too large\n")
+                return
+            try:
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                age_seconds = self.server.event_processor.set_fused_congestion_max_age_seconds(
+                    payload["fusedCongestionMaxAgeSeconds"]
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                self.send_text(400, '{"error":"Invalid settings payload"}\n', "application/json")
+                return
+            self.send_text(
+                200,
+                json.dumps({
+                    "fusedCongestionMaxAgeSeconds": age_seconds,
+                    "fusedCongestionMaxAgeMinutes": age_seconds // 60,
+                }) + "\n",
+                "application/json; charset=utf-8",
+            )
+            return
         feed = FEEDS.get(path)
         if feed is None:
             self.send_text(404, "Not found\n")
@@ -781,6 +1560,8 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             )
             if not duplicate and feed == "event":
                 self.server.event_processor.notify()
+            elif not duplicate and feed == "network-model":
+                self.server.network_resolver.invalidate()
             self.send_text(200, "OK\n")
         except Exception:
             logging.exception("Failed to store %s publication", feed)
@@ -799,11 +1580,14 @@ def main():
         format="%(asctime)s %(levelname)s %(message)s",
     )
     initialise_database()
-    event_processor = NtisEventProcessor()
+    network_resolver = NetworkModelResolver()
+    event_processor = NtisEventProcessor(network_resolver)
+    network_resolver.set_change_callback(event_processor.request_network_refresh)
+    network_resolver.start()
     event_processor.start()
-    event_processor.notify()
+    event_processor.request_network_refresh()
     server = ReceiverServer(
-        (BIND_HOST, BIND_PORT), ReceiverHandler, event_processor
+        (BIND_HOST, BIND_PORT), ReceiverHandler, event_processor, network_resolver
     )
 
     def stop_server(_signum, _frame):
@@ -815,6 +1599,7 @@ def main():
     server.serve_forever(poll_interval=0.5)
     server.server_close()
     event_processor.stop()
+    network_resolver.stop()
 
 
 if __name__ == "__main__":

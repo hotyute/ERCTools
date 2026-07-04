@@ -197,6 +197,7 @@ constexpr UINT_PTR kOverlayAnimationTimer = 2;
 constexpr UINT_PTR kSceneCacheRefreshTimer = 3;
 constexpr UINT_PTR kCountdownTimer = 4;
 constexpr UINT_PTR kPrivateUnreadPulseTimer = 5;
+constexpr UINT_PTR kCommsIndicatorPulseTimer = 6;
 constexpr UINT WM_APP_SCENE_CACHE_READY = WM_APP + 60;
 constexpr UINT WM_APP_SCENE_TILE_READY = WM_APP + 61;
 constexpr UINT kInteractionIdleMs = 120;
@@ -524,6 +525,10 @@ public:
             m_privateUnreadPulseUntilMs = GetTickCount64() + 6000;
             SetTimer(m_hwnd, kPrivateUnreadPulseTimer, 90, nullptr);
         }
+        if (m_showCommsIndicator && !m_privateMessageUnreadCounts.empty())
+            SetTimer(m_hwnd, kCommsIndicatorPulseTimer, 420, nullptr);
+        else
+            KillTimer(m_hwnd, kCommsIndicatorPulseTimer);
         Invalidate();
     }
 
@@ -545,6 +550,7 @@ public:
         if (m_privateMessageUnreadCounts.empty()) {
             m_privateUnreadPulseUntilMs = 0;
             KillTimer(m_hwnd, kPrivateUnreadPulseTimer);
+            KillTimer(m_hwnd, kCommsIndicatorPulseTimer);
         }
         if (m_onPrivateChatState)
             m_onPrivateChatState(user.username, true);
@@ -767,6 +773,18 @@ public:
         m_showCountdownPanel = visible;
         if (!visible && m_overlayInputFocus == OverlayInputFocus::Countdown)
             ClearOverlayInputFocus();
+        Invalidate();
+    }
+
+    void SetCommsIndicatorVisible(bool visible)
+    {
+        if (m_showCommsIndicator == visible)
+            return;
+        m_showCommsIndicator = visible;
+        if (visible && !m_privateMessageUnreadCounts.empty())
+            SetTimer(m_hwnd, kCommsIndicatorPulseTimer, 420, nullptr);
+        else
+            KillTimer(m_hwnd, kCommsIndicatorPulseTimer);
         Invalidate();
     }
 
@@ -1463,6 +1481,12 @@ private:
                 Invalidate();
                 return 0;
             }
+            if (wParam == kCommsIndicatorPulseTimer) {
+                if (!m_showCommsIndicator || m_privateMessageUnreadCounts.empty())
+                    KillTimer(m_hwnd, kCommsIndicatorPulseTimer);
+                Invalidate();
+                return 0;
+            }
             break;
 
         case WM_ERASEBKGND:
@@ -1473,6 +1497,8 @@ private:
             m_hoverPoint = POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             m_leftButtonDown = true;
             if (HandleOverlayContextMenuPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+                return 0;
+            if (HitCommsIndicatorInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             if (HandleCountdownPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
@@ -2446,7 +2472,7 @@ private:
     {
         const float left = 18.0f + m_toolbarPanelOffsetX;
         const float top = 18.0f + m_toolbarPanelOffsetY;
-        return AvoidActiveNotification(D2D1::RectF(left, top, left + 274.0f, top + 178.0f));
+        return D2D1::RectF(left, top, left + 274.0f, top + 178.0f);
     }
 
     D2D1_RECT_F BuildToolbarCloseButtonRect() const
@@ -3723,8 +3749,9 @@ private:
 
         size_t userIndex = static_cast<size_t>(-1);
         if (OnlineUserIndexAtPoint(x, y, userIndex)) {
-            if (userIndex < m_onlineUsers.size() && m_onUserAction)
-                m_onUserAction(m_onlineUsers[userIndex], L"private");
+            const std::vector<UsersPanelEntry> entries = UsersPanelEntries();
+            if (userIndex < entries.size() && m_onUserAction)
+                m_onUserAction(entries[userIndex].user, L"private");
             return;
         }
 
@@ -5180,6 +5207,7 @@ private:
     bool HitAnyOverlayInterface(int x, int y) const
     {
         return HitOverlayContextMenu(x, y) ||
+            HitCommsIndicatorInterface(x, y) ||
             HitCountdownInterface(x, y) ||
             HitPrivateChatInterface(x, y) ||
             HitUsersPanelInterface(x, y) ||
@@ -5656,6 +5684,67 @@ private:
         return count > 99 ? L"99+" : std::to_wstring(count);
     }
 
+    struct UsersPanelEntry
+    {
+        OnlineUser user;
+        bool online = false;
+    };
+
+    std::vector<UsersPanelEntry> UsersPanelEntries() const
+    {
+        std::vector<UsersPanelEntry> entries;
+        entries.reserve(m_onlineUsers.size() + 4);
+        std::unordered_set<std::wstring> seen;
+
+        for (const OnlineUser& user : m_onlineUsers) {
+            const std::wstring key = ToLower(Trim(user.username));
+            if (key.empty() || !seen.insert(key).second)
+                continue;
+            entries.push_back({ user, true });
+        }
+
+        auto addOffline = [&](OnlineUser user) {
+            const std::wstring key = ToLower(Trim(user.username));
+            if (key.empty() || !seen.insert(key).second)
+                return;
+            user.lastSeen = L"Offline";
+            entries.push_back({ std::move(user), false });
+        };
+
+        if (m_privateChatVisible)
+            addOffline(m_privateChatUser);
+
+        for (const auto& [username, unreadCount] : m_privateMessageUnreadCounts) {
+            if (unreadCount == 0 || username.empty() || seen.contains(username))
+                continue;
+
+            OnlineUser peer;
+            peer.username = username;
+            for (auto it = m_privateMessages.rbegin(); it != m_privateMessages.rend(); ++it) {
+                if (ToLower(Trim(it->senderUsername)) == username) {
+                    peer.username = it->senderUsername;
+                    peer.displayName = it->senderDisplayName;
+                    peer.position = it->senderPosition;
+                    break;
+                }
+                if (ToLower(Trim(it->recipientUsername)) == username) {
+                    peer.username = it->recipientUsername;
+                    peer.displayName = it->recipientDisplayName;
+                    peer.position = it->recipientPosition;
+                    break;
+                }
+            }
+            addOffline(std::move(peer));
+        }
+
+        return entries;
+    }
+
+    static float OfflineUsersHeaderHeight()
+    {
+        return 27.0f;
+    }
+
     bool HitUsersPanelInterface(int x, int y) const
     {
         const UsersPanelLayout layout = BuildUsersPanelLayout(BuildViewState());
@@ -5711,10 +5800,15 @@ private:
         if (!layout.hasPanel || layout.progress <= 0.04f || !PointInRect(x, y, layout.contentRect))
             return false;
 
+        const std::vector<UsersPanelEntry> entries = UsersPanelEntries();
+        const size_t onlineCount = static_cast<size_t>(std::count_if(
+            entries.begin(), entries.end(), [](const UsersPanelEntry& entry) { return entry.online; }));
         const float contentW = MaxValue(1.0f, layout.contentRect.right - layout.contentRect.left);
         float rowY = layout.contentRect.top + 4.0f;
-        for (size_t i = 0; i < m_onlineUsers.size(); ++i) {
-            const OnlineUser& user = m_onlineUsers[i];
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (i == onlineCount)
+                rowY += OfflineUsersHeaderHeight();
+            const OnlineUser& user = entries[i].user;
             const std::wstring prefix = UserRolePrefixText(user);
             const std::wstring display = UserDisplayText(user);
             const bool unread = PrivateMessageUnreadCount(user) > 0;
@@ -5793,9 +5887,15 @@ private:
             layout.panelRect.top + kOverlayUiPadding + 22.0f);
         m_overlayUi.DrawLabel(L"Users", m_overlayUi.TitleFormat(), titleRect);
 
-        std::wstring countText = m_onlineUsers.empty()
+        const std::vector<UsersPanelEntry> entries = UsersPanelEntries();
+        const size_t onlineCount = static_cast<size_t>(std::count_if(
+            entries.begin(), entries.end(), [](const UsersPanelEntry& entry) { return entry.online; }));
+        const size_t offlineCount = entries.size() - onlineCount;
+        std::wstring countText = onlineCount == 0
             ? L"No online users"
-            : std::to_wstring(m_onlineUsers.size()) + L" online";
+            : std::to_wstring(onlineCount) + L" online";
+        if (offlineCount > 0)
+            countText += L", " + std::to_wstring(offlineCount) + L" offline";
         D2D1_RECT_F countRect = D2D1::RectF(
             layout.panelRect.left + kOverlayUiPadding,
             layout.panelRect.top + kOverlayUiPadding + 23.0f,
@@ -5807,17 +5907,27 @@ private:
         D2D1_RECT_F usersContentClip = layout.contentRect;
         usersContentClip.left = layout.panelRect.left + 1.0f;
         m_rt->PushAxisAlignedClip(usersContentClip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        if (m_onlineUsers.empty()) {
+        if (entries.empty()) {
             D2D1_RECT_F emptyRect = D2D1::RectF(layout.contentRect.left, layout.contentRect.top + 6.0f, layout.contentRect.right, layout.contentRect.top + 42.0f);
-            m_overlayUi.DrawLabel(L"No online users.", m_overlayUi.BodyFormat(), emptyRect, m_overlayUi.MutedTextBrush());
+            m_overlayUi.DrawLabel(L"No online users or private chats.", m_overlayUi.BodyFormat(), emptyRect, m_overlayUi.MutedTextBrush());
         }
         else {
             const float contentW = MaxValue(1.0f, layout.contentRect.right - layout.contentRect.left);
             float y = layout.contentRect.top + 4.0f;
-            for (const OnlineUser& user : m_onlineUsers) {
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (i == onlineCount) {
+                    m_overlayUi.DrawSeparator(layout.contentRect.left, layout.contentRect.right, y + 2.0f);
+                    m_overlayUi.DrawLabel(
+                        L"Offline",
+                        m_overlayUi.SmallFormat(),
+                        D2D1::RectF(layout.contentRect.left, y + 7.0f, layout.contentRect.right, y + 24.0f),
+                        m_overlayUi.MutedTextBrush());
+                    y += OfflineUsersHeaderHeight();
+                }
                 if (y > layout.contentRect.bottom - 10.0f)
                     break;
 
+                const OnlineUser& user = entries[i].user;
                 const std::wstring prefix = UserRolePrefixText(user);
                 const std::wstring display = UserDisplayText(user);
                 const size_t unreadCount = PrivateMessageUnreadCount(user);
@@ -6808,9 +6918,12 @@ private:
                     action = L"kick";
             }
 
+            const std::vector<UsersPanelEntry> entries = UsersPanelEntries();
+            const bool online = index < entries.size() && entries[index].online;
             HideOverlayContextMenus();
-            if (!action.empty() && index < m_onlineUsers.size() && m_onUserAction) {
-                m_onUserAction(m_onlineUsers[index], action);
+            if (!action.empty() && index < entries.size() && m_onUserAction &&
+                (action == L"private" || online)) {
+                m_onUserAction(entries[index].user, action);
                 return true;
             }
             return hitMenu;
@@ -7243,10 +7356,12 @@ private:
             return;
 
         m_overlayUi.DrawGlassPanel(m_userContextMenuRect, 8.0f);
-        const bool hasUser = m_userContextMenuIndex < m_onlineUsers.size();
+        const std::vector<UsersPanelEntry> entries = UsersPanelEntries();
+        const bool hasUser = m_userContextMenuIndex < entries.size();
+        const bool online = hasUser && entries[m_userContextMenuIndex].online;
         m_overlayUi.DrawButton(MakeOverlayButton(L"Private message", ContextMenuItemRect(m_userContextMenuRect, 0, 3), hasUser));
-        m_overlayUi.DrawButton(MakeOverlayButton(L"Mute 15m", ContextMenuItemRect(m_userContextMenuRect, 1, 3), hasUser));
-        m_overlayUi.DrawButton(MakeOverlayButton(L"Kick", ContextMenuItemRect(m_userContextMenuRect, 2, 3), hasUser));
+        m_overlayUi.DrawButton(MakeOverlayButton(L"Mute 15m", ContextMenuItemRect(m_userContextMenuRect, 1, 3), online));
+        m_overlayUi.DrawButton(MakeOverlayButton(L"Kick", ContextMenuItemRect(m_userContextMenuRect, 2, 3), online));
     }
 
     void DrawCountdownPresetContextMenu()
@@ -7910,6 +8025,12 @@ private:
         }
     }
 
+    D2D1_RECT_F BuildFpsCounterRect(const ViewState& view) const
+    {
+        const D2D1_RECT_F rect = D2D1::RectF(18.0f, 18.0f, 76.0f, 46.0f);
+        return ClampRectToView(AvoidActiveNotification(rect), view);
+    }
+
     void DrawFpsCounter()
     {
         if (!m_showFpsCounter || !m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
@@ -7917,11 +8038,55 @@ private:
 
         wchar_t buffer[48]{};
         swprintf_s(buffer, L"FPS %.0f", m_fpsValue);
-        const float width = 78.0f;
-        const float top = m_showToolbarPanel ? BuildToolbarPanelRect().bottom + 8.0f : 18.0f;
-        const D2D1_RECT_F rect = D2D1::RectF(18.0f, top, 18.0f + width, top + 28.0f);
+        const D2D1_RECT_F rect = BuildFpsCounterRect(BuildViewState());
         m_overlayUi.DrawGlassPanel(rect, 8.0f);
         m_overlayUi.DrawLabel(buffer, m_overlayUi.ControlFormat(), D2D1::RectF(rect.left + 9.0f, rect.top + 6.0f, rect.right - 8.0f, rect.bottom - 5.0f));
+    }
+
+    D2D1_RECT_F BuildCommsIndicatorRect(const ViewState& view) const
+    {
+        const D2D1_RECT_F fpsRect = BuildFpsCounterRect(view);
+        const float top = m_showFpsCounter ? fpsRect.bottom + 8.0f : fpsRect.top;
+        const D2D1_RECT_F rect = D2D1::RectF(fpsRect.left, top, fpsRect.left + 58.0f, top + 58.0f);
+        return ClampRectToView(rect, view);
+    }
+
+    std::array<D2D1_RECT_F, 4> BuildCommsIndicatorCells(const ViewState& view) const
+    {
+        const D2D1_RECT_F panel = BuildCommsIndicatorRect(view);
+        constexpr float pad = 6.0f;
+        constexpr float gap = 4.0f;
+        const float width = (panel.right - panel.left - pad * 2.0f - gap) * 0.5f;
+        const float height = (panel.bottom - panel.top - pad * 2.0f - gap) * 0.5f;
+        return {
+            D2D1::RectF(panel.left + pad, panel.top + pad, panel.left + pad + width, panel.top + pad + height),
+            D2D1::RectF(panel.left + pad + width + gap, panel.top + pad, panel.right - pad, panel.top + pad + height),
+            D2D1::RectF(panel.left + pad, panel.top + pad + height + gap, panel.left + pad + width, panel.bottom - pad),
+            D2D1::RectF(panel.left + pad + width + gap, panel.top + pad + height + gap, panel.right - pad, panel.bottom - pad)
+        };
+    }
+
+    bool HitCommsIndicatorInterface(int x, int y) const
+    {
+        return m_showCommsIndicator && PointInRect(x, y, BuildCommsIndicatorRect(BuildViewState()));
+    }
+
+    void DrawCommsIndicator(const ViewState& view)
+    {
+        if (!m_showCommsIndicator || !m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return;
+        const D2D1_RECT_F panel = BuildCommsIndicatorRect(view);
+        m_overlayUi.DrawGlassPanel(panel, 7.0f);
+        const auto cells = BuildCommsIndicatorCells(view);
+        const wchar_t* labels[] = { L"H", L"M", L"C", L"R" };
+        const bool unread = !m_privateMessageUnreadCounts.empty();
+        const bool flash = unread && ((GetTickCount64() / 420) % 2 == 0);
+        for (size_t i = 0; i < cells.size(); ++i) {
+            OverlayButton button = MakeOverlayButton(labels[i], cells[i], true);
+            if (i == 2 && unread)
+                button.hot = button.hot || flash;
+            m_overlayUi.DrawButton(button);
+        }
     }
 
     void TraceSlowPaintStage(const wchar_t* stage, ULONGLONG elapsedMs, bool interactive) const
@@ -9231,6 +9396,7 @@ private:
             DrawUsersPanel(view);
             DrawPrivateChat(view);
             DrawResponderChat(view);
+            DrawCommsIndicator(view);
             DrawOverlayContextMenus();
             UpdateFpsSample();
             DrawFpsCounter();
@@ -9915,6 +10081,7 @@ private:
     bool m_showFpsCounter = false;
     bool m_showToolbarPanel = true;
     bool m_showCountdownPanel = false;
+    bool m_showCommsIndicator = true;
     bool m_avoidOverlaysForNotifications = true;
     bool m_countdownRunning = false;
     bool m_countdownStarted = false;
@@ -10375,6 +10542,11 @@ void MapView::SetToolbarVisible(bool visible)
 void MapView::SetCountdownVisible(bool visible)
 {
     m_impl->SetCountdownVisible(visible);
+}
+
+void MapView::SetCommsIndicatorVisible(bool visible)
+{
+    m_impl->SetCommsIndicatorVisible(visible);
 }
 
 void MapView::SetCountdownPresets(const std::array<std::wstring, 3>& presets)

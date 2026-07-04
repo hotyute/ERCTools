@@ -111,6 +111,7 @@ public:
     void SetFpsCounterVisible(bool visible);
     void SetToolbarVisible(bool visible);
     void SetCountdownVisible(bool visible);
+    void SetCommsIndicatorVisible(bool visible);
     void SetCountdownPresets(const std::array<std::wstring, 3>& presets);
     void SetNotificationAvoidanceEnabled(bool enabled);
     void SetActiveNotification(const AppNotification& notification);

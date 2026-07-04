@@ -13,6 +13,8 @@
 #include "net/binary_protocol.h"
 #include "core/util.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -528,13 +530,16 @@ bool BinaryLogout(const std::wstring& serverBaseUrl, const ClientSession& sessio
 
 bool BinaryPollCollaboration(const std::wstring& serverBaseUrl, const ClientSession& session, uint32_t knownVersion, BinaryPollResult& resultOut)
 {
+    static std::atomic<uint32_t> lastPollPingMs{ 0 };
     resultOut = {};
     BinaryWriter request;
     WriteSessionToken(request, session);
     request.U32(knownVersion);
+    request.U32(lastPollPingMs.load(std::memory_order_acquire));
 
     BinaryCallResult call;
     std::vector<BYTE> payload;
+    const auto pollStarted = std::chrono::steady_clock::now();
     if (!FinishCall(kOpPoll, request, call, payload, serverBaseUrl)) {
         static_cast<BinaryCallResult&>(resultOut) = call;
         return false;
@@ -628,6 +633,17 @@ bool BinaryPollCollaboration(const std::wstring& serverBaseUrl, const ClientSess
             }
             resultOut.incidentExclusions.push_back(std::move(exclusion));
         }
+    }
+
+    uint32_t serverWaitMs = 0;
+    if (reader.U32(serverWaitMs)) {
+        const uint64_t elapsedMs = static_cast<uint64_t>(std::max<int64_t>(1,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - pollStarted).count()));
+        const uint64_t measuredMs = elapsedMs > serverWaitMs ? elapsedMs - serverWaitMs : 1;
+        lastPollPingMs.store(
+            static_cast<uint32_t>(std::min<uint64_t>(measuredMs, 60000u)),
+            std::memory_order_release);
     }
 
     static_cast<BinaryCallResult&>(resultOut) = call;

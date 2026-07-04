@@ -37,7 +37,6 @@
 #endif
 
 
-constexpr int IDC_URL_EDIT = 1001;
 constexpr int IDC_SEARCH_EDIT = 1003;
 constexpr int IDC_SEVERITY_COMBO = 1004;
 constexpr int IDC_LISTVIEW = 1005;
@@ -107,19 +106,14 @@ constexpr int IDM_VIEW_SOUND_CUES = 2054;
 constexpr int IDM_VIEW_COUNTDOWN_TIMER = 2055;
 constexpr int IDM_SETTINGS_GENERAL = 2056;
 constexpr int IDM_SETTINGS_SOUNDS = 2057;
+constexpr int IDM_VIEW_COMMS_INDICATOR = 2058;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
 constexpr int IDC_SETTINGS_CLOSE_BTN = 2104;
 constexpr int IDC_SETTINGS_FILTER_LABEL = 2105;
 constexpr int IDC_SETTINGS_ORDER_LABEL = 2106;
-constexpr int IDC_SETTINGS_ENDPOINT_LABEL = 2107;
 constexpr int IDC_SETTINGS_SERVER_LABEL = 2108;
-constexpr int IDC_SETTINGS_REFRESH_OFF_RADIO = 2109;
-constexpr int IDC_SETTINGS_REFRESH_ON_RADIO = 2110;
-constexpr int IDC_SETTINGS_REFRESH_INTERVAL_EDIT = 2111;
-constexpr int IDC_SETTINGS_REFRESH_LABEL = 2112;
-constexpr int IDC_SETTINGS_REFRESH_INTERVAL_LABEL = 2113;
 constexpr int IDC_SETTINGS_WORLD_LABEL = 2114;
 constexpr int IDC_SETTINGS_WORLD_OFF_RADIO = 2115;
 constexpr int IDC_SETTINGS_WORLD_ON_RADIO = 2116;
@@ -131,7 +125,6 @@ constexpr int IDC_SETTINGS_PUSH_REMOTE_BTN = 2121;
 constexpr int IDC_SETTINGS_ROADS_BTN = 2122;
 constexpr int IDC_SETTINGS_EARTHQUAKE_RADIUS_RATIO_EDIT = 2123;
 constexpr int IDC_SETTINGS_NOTIFICATION_AVOIDANCE_CHECK = 2124;
-constexpr int IDC_SETTINGS_SERVER_FETCH_CHECK = 2125;
 constexpr int IDC_SOUNDS_DEVICE_COMBO = 2130;
 constexpr int IDC_SOUNDS_MASTER_CHECK = 2131;
 constexpr int IDC_SOUNDS_MESSAGE_CHECK = 2132;
@@ -154,6 +147,7 @@ constexpr int IDC_INCIDENT_FILTERS_UNPLANNED_CHECK = 2209;
 constexpr int IDC_INCIDENT_FILTERS_PLANNED_CHECK = 2210;
 constexpr int IDC_INCIDENT_FILTERS_CLOSE_BTN = 2211;
 constexpr int IDC_INCIDENT_FILTERS_SIDE_PANEL_LIST_ONLY_CHECK = 2212;
+constexpr int IDC_INCIDENT_FILTERS_SHOW_UNRESOLVED_CHECK = 2213;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_TITLE_LABEL = 2301;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_DESC_LABEL = 2302;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_ROADS_LABEL = 2303;
@@ -2790,6 +2784,7 @@ private:
         m_map.SetToolbarVisible(m_showMapControls);
         m_map.SetCountdownPresets(m_countdownPresets);
         m_map.SetCountdownVisible(m_showCountdownTimer);
+        m_map.SetCommsIndicatorVisible(m_showCommsIndicator);
         m_map.SetNotificationAvoidanceEnabled(m_avoidOverlaysForNotifications);
         ApplySoundSettings();
         RenderChatHistory();
@@ -3123,6 +3118,10 @@ private:
             ToggleCountdownTimer();
             break;
 
+        case IDM_VIEW_COMMS_INDICATOR:
+            ToggleCommsIndicator();
+            break;
+
         case IDM_VIEW_SOUND_CUES:
             ToggleSoundCues();
             break;
@@ -3387,8 +3386,7 @@ private:
 
     bool ShouldUseServerToFetchData() const
     {
-        return m_useServerToFetchData &&
-            IsOnlineMode() &&
+        return IsOnlineMode() &&
             !ServerBaseUrl().empty() &&
             !m_session.token.empty();
     }
@@ -3510,13 +3508,7 @@ private:
                     target = static_cast<UINT>(it->get<int>());
                 };
 
-            if (settingsVersion >= 2) {
-                readString("alertsEndpoint", m_alertsEndpoint);
-                m_alertsEndpoint = NormalizeUrl(m_alertsEndpoint);
-            }
-            else {
-                m_alertsEndpoint.clear();
-            }
+            m_alertsEndpoint.clear();
             readString("serverBaseUrl", m_serverBaseUrl);
             m_serverBaseUrl = NormalizeUrl(m_serverBaseUrl);
             {
@@ -3527,16 +3519,16 @@ private:
                     m_serverBaseUrl = L"http://213.254.181.35:8081";
                 }
             }
-            readBool("useServerToFetchData", m_useServerToFetchData);
             readString("alertOrder", m_alertOrder);
             readBool("alertFilterUnplannedOnly", m_alertFilterUnplannedOnly);
             readBool("trafficScotlandEnabled", m_trafficScotlandEnabled);
             readString("trafficScotlandIncidentsUrl", m_trafficScotlandIncidentsUrl);
-            readBool("periodicRefreshEnabled", m_periodicRefreshEnabled);
+            m_periodicRefreshEnabled = false;
             readBool("showNotificationHistory", m_showNotificationHistory);
             readBool("showFpsCounter", m_showFpsCounter);
             readBool("showMapControls", m_showMapControls);
             readBool("showCountdownTimer", m_showCountdownTimer);
+            readBool("showCommsIndicator", m_showCommsIndicator);
             {
                 auto it = settings->find("countdownPresets");
                 if (it != settings->end() && it->is_array()) {
@@ -3598,6 +3590,7 @@ private:
             readBool("incidentFilterUnplanned", m_incidentFilterUnplanned);
             readBool("incidentFilterPlanned", m_incidentFilterPlanned);
             readBool("incidentSidePanelListOnly", m_incidentSidePanelListOnly);
+            readBool("showUnresolvedIncidents", m_showUnresolvedIncidents);
             readString("incidentNotifyRoads", m_incidentNotifyRoads);
             readString("incidentNotifyRoadExclusions", m_incidentNotifyRoadExclusions);
             readString("incidentNotifyLaneThresholdText", m_incidentNotifyLaneThresholdText);
@@ -4081,19 +4074,20 @@ private:
                 else
                     ++it;
             }
+            settings.erase("alertsEndpoint");
+            settings.erase("useServerToFetchData");
+            settings.erase("periodicRefreshEnabled");
 
-            settings["alertsEndpoint"] = WideToUtf8(m_alertsEndpoint);
             settings["serverBaseUrl"] = WideToUtf8(m_serverBaseUrl);
-            settings["useServerToFetchData"] = m_useServerToFetchData;
             settings["alertOrder"] = WideToUtf8(m_alertOrder);
             settings["alertFilterUnplannedOnly"] = m_alertFilterUnplannedOnly;
             settings["trafficScotlandEnabled"] = m_trafficScotlandEnabled;
             settings["trafficScotlandIncidentsUrl"] = WideToUtf8(m_trafficScotlandIncidentsUrl);
-            settings["periodicRefreshEnabled"] = m_periodicRefreshEnabled;
             settings["showNotificationHistory"] = m_showNotificationHistory;
             settings["showFpsCounter"] = m_showFpsCounter;
             settings["showMapControls"] = m_showMapControls;
             settings["showCountdownTimer"] = m_showCountdownTimer;
+            settings["showCommsIndicator"] = m_showCommsIndicator;
             settings["countdownPresets"] = json::array({
                 WideToUtf8(m_countdownPresets[0]),
                 WideToUtf8(m_countdownPresets[1]),
@@ -4122,6 +4116,7 @@ private:
             settings["incidentFilterUnplanned"] = m_incidentFilterUnplanned;
             settings["incidentFilterPlanned"] = m_incidentFilterPlanned;
             settings["incidentSidePanelListOnly"] = m_incidentSidePanelListOnly;
+            settings["showUnresolvedIncidents"] = m_showUnresolvedIncidents;
             settings["incidentNotifyRoads"] = WideToUtf8(m_incidentNotifyRoads);
             settings["incidentNotifyRoadExclusions"] = WideToUtf8(m_incidentNotifyRoadExclusions);
             settings["incidentNotifyLaneThresholdText"] = WideToUtf8(m_incidentNotifyLaneThresholdText);
@@ -4977,9 +4972,9 @@ private:
                 }
             }
 
-            if (!result->ok) {
-                if (useServerFetch)
-                    result->error = brokerError.empty() ? L"National Highways NTIS data is unavailable." : brokerError;
+            if (!result->ok && useServerFetch)
+                result->error = brokerError.empty() ? L"National Highways NTIS data is unavailable." : brokerError;
+            if (!result->ok && !useServerFetch) {
                 result->alerts = SampleAlerts();
                 if (!result->error.empty())
                     result->error += L" ";
@@ -5216,7 +5211,8 @@ private:
 
     bool AlertMatchesIncidentNotification(const TrafficAlert& alert) const
     {
-        return RoadMatchesIncidentNotification(alert) &&
+        return alert.trafficEnglandVisible &&
+            RoadMatchesIncidentNotification(alert) &&
             !RoadExcludedFromIncidentNotification(alert) &&
             SeverityAllowedForIncidentNotification(alert) &&
             IncidentTypeAllowedForNotification(alert) &&
@@ -5873,7 +5869,12 @@ private:
 
         m_filteredAlerts.clear();
         for (size_t i = 0; i < m_allAlerts.size(); ++i) {
-            if (TextFilterMatches(m_allAlerts[i]) && SeverityFilterMatches(m_allAlerts[i]) &&
+            const bool resolutionVisible = m_allAlerts[i].trafficEnglandVisible ||
+                (m_showUnresolvedIncidents &&
+                    m_allAlerts[i].trafficEnglandEligible &&
+                    m_allAlerts[i].unresolved &&
+                    m_allAlerts[i].networkResolved);
+            if (resolutionVisible && TextFilterMatches(m_allAlerts[i]) && SeverityFilterMatches(m_allAlerts[i]) &&
                 (!m_incidentSidePanelListOnly || AlertOnIncidentsList(m_allAlerts[i])))
             {
                 m_filteredAlerts.push_back(m_allAlerts[i]);
@@ -8173,6 +8174,7 @@ private:
         AppendMenuW(viewMenu, m_showFpsCounter ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_FPS_COUNTER, L"FPS Counter");
         AppendMenuW(viewMenu, m_showMapControls ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_MAP_CONTROLS, L"Map Controls");
         AppendMenuW(viewMenu, m_showCountdownTimer ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_COUNTDOWN_TIMER, L"Countdown Timer");
+        AppendMenuW(viewMenu, m_showCommsIndicator ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_COMMS_INDICATOR, L"Communications Indicator");
         MENUITEMINFOW historyInfo{};
         historyInfo.cbSize = sizeof(historyInfo);
         historyInfo.fMask = MIIM_FTYPE;
@@ -8184,6 +8186,7 @@ private:
         SetMenuItemInfoW(viewMenu, IDM_VIEW_FPS_COUNTER, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_MAP_CONTROLS, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_COUNTDOWN_TIMER, FALSE, &historyInfo);
+        SetMenuItemInfoW(viewMenu, IDM_VIEW_COMMS_INDICATOR, FALSE, &historyInfo);
         AppendMenuW(aboutMenu, MF_STRING, IDM_ABOUT_APP, L"About ERC Tools...");
         AppendMenuW(aboutMenu, MF_STRING, IDM_ABOUT_LEGEND, L"Legend...");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
@@ -9177,9 +9180,10 @@ private:
         m_incidentUnplannedCheck = CreateWindowExW(0, L"BUTTON", L"Unplanned incidents", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY, 180, 24, parent, ControlId(IDC_INCIDENT_FILTERS_UNPLANNED_CHECK), m_hInst, nullptr);
         m_incidentPlannedCheck = CreateWindowExW(0, L"BUTTON", L"Planned roadworks", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 236, typeY, 170, 24, parent, ControlId(IDC_INCIDENT_FILTERS_PLANNED_CHECK), m_hInst, nullptr);
         m_incidentSidePanelListOnlyCheck = CreateWindowExW(0, L"BUTTON", L"Side panel: only Incidents List", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY + 38, 270, 24, parent, ControlId(IDC_INCIDENT_FILTERS_SIDE_PANEL_LIST_ONLY_CHECK), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 336, typeY + 76, 102, 32, parent, ControlId(IDC_INCIDENT_FILTERS_CLOSE_BTN), m_hInst, nullptr);
+        m_incidentShowUnresolvedCheck = CreateWindowExW(0, L"BUTTON", L"Show unresolved incidents", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY + 70, 270, 24, parent, ControlId(IDC_INCIDENT_FILTERS_SHOW_UNRESOLVED_CHECK), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 336, typeY + 108, 102, 32, parent, ControlId(IDC_INCIDENT_FILTERS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_incidentSevereCheck, m_incidentModerateCheck, m_incidentMinorCheck, m_incidentUnknownCheck, m_incidentUnplannedCheck, m_incidentPlannedCheck, m_incidentSidePanelListOnlyCheck, close }) {
+        for (HWND h : { m_incidentSevereCheck, m_incidentModerateCheck, m_incidentMinorCheck, m_incidentUnknownCheck, m_incidentUnplannedCheck, m_incidentPlannedCheck, m_incidentSidePanelListOnlyCheck, m_incidentShowUnresolvedCheck, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -9191,6 +9195,7 @@ private:
         SizeControlToText(m_incidentUnplannedCheck, 34, 6, 180, 0, 24);
         SizeControlToText(m_incidentPlannedCheck, 34, 6, 170, 0, 24);
         SizeControlToText(m_incidentSidePanelListOnlyCheck, 34, 6, 270, 0, 24);
+        SizeControlToText(m_incidentShowUnresolvedCheck, 34, 6, 270, 0, 24);
         SyncIncidentFilterControls();
         AutoFitWindowToChildren(parent);
     }
@@ -9212,6 +9217,8 @@ private:
             SendMessageW(m_incidentPlannedCheck, BM_SETCHECK, m_incidentFilterPlanned ? BST_CHECKED : BST_UNCHECKED, 0);
         if (m_incidentSidePanelListOnlyCheck)
             SendMessageW(m_incidentSidePanelListOnlyCheck, BM_SETCHECK, m_incidentSidePanelListOnly ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (m_incidentShowUnresolvedCheck)
+            SendMessageW(m_incidentShowUnresolvedCheck, BM_SETCHECK, m_showUnresolvedIncidents ? BST_CHECKED : BST_UNCHECKED, 0);
         m_syncingControls = false;
     }
 
@@ -9240,6 +9247,10 @@ private:
                 m_incidentFilterPlanned = SendMessageW(m_incidentPlannedCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
             else if (id == IDC_INCIDENT_FILTERS_SIDE_PANEL_LIST_ONLY_CHECK) {
                 m_incidentSidePanelListOnly = SendMessageW(m_incidentSidePanelListOnlyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                ApplyFilters(false);
+            }
+            else if (id == IDC_INCIDENT_FILTERS_SHOW_UNRESOLVED_CHECK) {
+                m_showUnresolvedIncidents = SendMessageW(m_incidentShowUnresolvedCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
                 ApplyFilters(false);
             }
 
@@ -12744,7 +12755,6 @@ private:
             }
             std::string body;
             std::wstring error;
-            bool usedServer = false;
             if (useServerFetch) {
                 BinarySourceBundleResult bundle;
                 if (BinaryFetchSourceBundle(server, session, L"earthquakes", 0u, sourceOptions, bundle)) {
@@ -12752,7 +12762,6 @@ private:
                     try {
                         if (ParseEarthquakesFromSourceBundle(bundle, result->events, error)) {
                             result->ok = true;
-                            usedServer = true;
                         }
                     }
                     catch (const std::exception& e) {
@@ -12763,7 +12772,9 @@ private:
                     error = bundle.error.empty() ? L"Server earthquake fetch failed." : bundle.error;
                 }
             }
-            if (!result->ok) {
+            if (!result->ok && useServerFetch)
+                result->error = error.empty() ? L"Server earthquake fetch failed." : error;
+            if (!result->ok && !useServerFetch) {
                 if (HttpGetText(url, body, error)) {
                     try {
                         result->events = ParseEarthquakeEvents(body);
@@ -12776,9 +12787,7 @@ private:
                 }
                 else {
                     result->ok = false;
-                    result->error = (useServerFetch && !usedServer)
-                        ? L"Earthquake fetch failed via server and direct source: " + error
-                        : L"Earthquake fetch failed: " + error;
+                    result->error = L"Earthquake fetch failed: " + error;
                 }
             }
 
@@ -12875,7 +12884,9 @@ private:
                     error = bundle.error.empty() ? L"Server weather systems fetch failed." : bundle.error;
                 }
             }
-            if (!result->ok) {
+            if (!result->ok && useServerFetch && result->error.empty())
+                result->error = error.empty() ? L"Server weather systems fetch failed." : error;
+            if (!result->ok && !useServerFetch) {
                 if (HttpGetText(kWeatherSystemsSourceUrl, body, error)) {
                     try {
                         result->systems = ParseWeatherSystemEvents(body, result->statusText);
@@ -13001,7 +13012,9 @@ private:
                     error = bundle.error.empty() ? L"Server weather warnings fetch failed." : bundle.error;
                 }
             }
-            if (!result->ok) {
+            if (!result->ok && useServerFetch && result->error.empty())
+                result->error = error.empty() ? L"Server weather warnings fetch failed." : error;
+            if (!result->ok && !useServerFetch) {
                 if (HttpGetText(url, body, error)) {
                     try {
                         result->warnings = ParseWeatherWarningEvents(body, result->statusText);
@@ -13114,7 +13127,9 @@ private:
                     error = bundle.error.empty() ? L"Server floods fetch failed." : bundle.error;
                 }
             }
-            if (!result->ok) {
+            if (!result->ok && useServerFetch && result->error.empty())
+                result->error = error.empty() ? L"Server floods fetch failed." : error;
+            if (!result->ok && !useServerFetch) {
                 if (HttpGetText(kFloodsSourceUrl, body, error)) {
                     try {
                         result->floods = ParseFloodEvents(body, result->statusText);
@@ -13365,6 +13380,7 @@ private:
         CheckMenuItem(menu, IDM_VIEW_FPS_COUNTER, MF_BYCOMMAND | (m_showFpsCounter ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(menu, IDM_VIEW_MAP_CONTROLS, MF_BYCOMMAND | (m_showMapControls ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(menu, IDM_VIEW_COUNTDOWN_TIMER, MF_BYCOMMAND | (m_showCountdownTimer ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(menu, IDM_VIEW_COMMS_INDICATOR, MF_BYCOMMAND | (m_showCommsIndicator ? MF_CHECKED : MF_UNCHECKED));
     }
 
     void ToggleNotificationHistory()
@@ -13412,6 +13428,14 @@ private:
         m_showCountdownTimer = !m_showCountdownTimer;
         UpdateViewMenu();
         m_map.SetCountdownVisible(m_showCountdownTimer);
+        SaveSettings();
+    }
+
+    void ToggleCommsIndicator()
+    {
+        m_showCommsIndicator = !m_showCommsIndicator;
+        UpdateViewMenu();
+        m_map.SetCommsIndicatorVisible(m_showCommsIndicator);
         SaveSettings();
     }
 
@@ -15961,71 +15985,38 @@ private:
 
     void CreateSettingsControls(HWND parent)
     {
-        m_urlLabel = CreateAutoLabel(parent, IDC_SETTINGS_ENDPOINT_LABEL, L"Direct road incidents endpoint (optional)", 18, 18);
-        m_urlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 44, 410, 26, parent, ControlId(IDC_URL_EDIT), m_hInst, nullptr);
-        m_serverLabel = CreateAutoLabel(parent, IDC_SETTINGS_SERVER_LABEL, L"Collaboration server", 18, 84);
-        m_serverEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 110, 410, 26, parent, ControlId(IDC_SERVER_EDIT), m_hInst, nullptr);
-        m_settingsServerFetchCheck = CreateWindowExW(
-            0,
-            L"BUTTON",
-            L"Use Server To Fetch Data",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            18,
-            148,
-            230,
-            26,
-            parent,
-            ControlId(IDC_SETTINGS_SERVER_FETCH_CHECK),
-            m_hInst,
-            nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_REFRESH_LABEL, L"Periodic alert refresh", 18, 190);
-        m_settingsRefreshOffRadio = CreateWindowExW(0, L"BUTTON", L"Manual refresh only", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 216, 145, 24, parent, ControlId(IDC_SETTINGS_REFRESH_OFF_RADIO), m_hInst, nullptr);
-        m_settingsRefreshOnRadio = CreateWindowExW(0, L"BUTTON", L"Refresh every", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 216, 120, 24, parent, ControlId(IDC_SETTINGS_REFRESH_ON_RADIO), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_REFRESH_INTERVAL_LABEL, L"Interval", 18, 254);
-        m_settingsRefreshIntervalEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 178, 248, 120, 26, parent, ControlId(IDC_SETTINGS_REFRESH_INTERVAL_EDIT), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_SYNC_LABEL, L"Remote Settings", 18, 292);
-        m_settingsSyncLocalRadio = CreateWindowExW(0, L"BUTTON", L"Local settings", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 318, 130, 24, parent, ControlId(IDC_SETTINGS_SYNC_LOCAL_RADIO), m_hInst, nullptr);
-        m_settingsSyncServerRadio = CreateWindowExW(0, L"BUTTON", L"Remote Settings", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 318, 160, 24, parent, ControlId(IDC_SETTINGS_SYNC_SERVER_RADIO), m_hInst, nullptr);
-        m_settingsPushRemoteBtn = CreateWindowExW(0, L"BUTTON", L"Push Settings Remotely", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 352, 220, 32, parent, ControlId(IDC_SETTINGS_PUSH_REMOTE_BTN), m_hInst, nullptr);
-        CreateAutoLabel(parent, 0, L"Earthquake populated radius ratio (mi per +0.1 mag)", 18, 404);
-        m_settingsEarthquakeRadiusRatioEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 430, 120, 26, parent, ControlId(IDC_SETTINGS_EARTHQUAKE_RADIUS_RATIO_EDIT), m_hInst, nullptr);
+        m_serverLabel = CreateAutoLabel(parent, IDC_SETTINGS_SERVER_LABEL, L"Collaboration and data server", 18, 18);
+        m_serverEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 44, 410, 26, parent, ControlId(IDC_SERVER_EDIT), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_SYNC_LABEL, L"Remote Settings", 18, 86);
+        m_settingsSyncLocalRadio = CreateWindowExW(0, L"BUTTON", L"Local settings", WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 18, 112, 130, 24, parent, ControlId(IDC_SETTINGS_SYNC_LOCAL_RADIO), m_hInst, nullptr);
+        m_settingsSyncServerRadio = CreateWindowExW(0, L"BUTTON", L"Remote Settings", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 178, 112, 160, 24, parent, ControlId(IDC_SETTINGS_SYNC_SERVER_RADIO), m_hInst, nullptr);
+        m_settingsPushRemoteBtn = CreateWindowExW(0, L"BUTTON", L"Push Settings Remotely", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 146, 220, 32, parent, ControlId(IDC_SETTINGS_PUSH_REMOTE_BTN), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Earthquake populated radius ratio (mi per +0.1 mag)", 18, 198);
+        m_settingsEarthquakeRadiusRatioEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 18, 224, 120, 26, parent, ControlId(IDC_SETTINGS_EARTHQUAKE_RADIUS_RATIO_EDIT), m_hInst, nullptr);
         m_settingsNotificationAvoidanceCheck = CreateWindowExW(
             0,
             L"BUTTON",
             L"Move map overlays aside for notifications",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             18,
-            470,
+            264,
             320,
             26,
             parent,
             ControlId(IDC_SETTINGS_NOTIFICATION_AVOIDANCE_CHECK),
             m_hInst,
             nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Road incident filter", 18, 512);
-        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 538, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
-        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Incident display order", 18, 576);
-        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 602, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 648, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_FILTER_LABEL, L"Road incident filter", 18, 306);
+        m_settingsFilterCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 332, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_FILTER), m_hInst, nullptr);
+        CreateAutoLabel(parent, IDC_SETTINGS_ORDER_LABEL, L"Incident display order", 18, 370);
+        m_settingsOrderCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 18, 396, 410, 160, parent, ControlId(IDC_SETTINGS_ALERT_ORDER), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 326, 442, 102, 32, parent, ControlId(IDC_SETTINGS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_urlEdit, m_serverEdit, m_settingsServerFetchCheck, m_settingsRefreshOffRadio, m_settingsRefreshOnRadio, m_settingsRefreshIntervalEdit, m_settingsSyncLocalRadio, m_settingsSyncServerRadio, m_settingsPushRemoteBtn, m_settingsEarthquakeRadiusRatioEdit, m_settingsNotificationAvoidanceCheck, m_settingsFilterCombo, m_settingsOrderCombo, close }) {
+        for (HWND h : { m_serverEdit, m_settingsSyncLocalRadio, m_settingsSyncServerRadio, m_settingsPushRemoteBtn, m_settingsEarthquakeRadiusRatioEdit, m_settingsNotificationAvoidanceCheck, m_settingsFilterCombo, m_settingsOrderCombo, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
-
-        const int radioY = 216;
-        const int radioGap = 12;
-        const int offRadioW = PreferredControlWidth(m_settingsRefreshOffRadio, 34, 160);
-        const int offRadioH = PreferredControlHeight(m_settingsRefreshOffRadio, 6, 24, offRadioW);
-        const int onRadioX = 18 + offRadioW + radioGap;
-        const int onRadioW = PreferredControlWidth(m_settingsRefreshOnRadio, 34, 132);
-        const int onRadioH = PreferredControlHeight(m_settingsRefreshOnRadio, 6, 24, onRadioW);
-        MoveWindow(m_settingsRefreshOffRadio, 18, radioY, offRadioW, offRadioH, TRUE);
-        MoveWindow(m_settingsRefreshOnRadio, onRadioX, radioY, onRadioW, onRadioH, TRUE);
-
-        SendMessageW(m_urlEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Optional direct DATEX/JSON feed URL"));
         SendMessageW(m_serverEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"213.254.181.35:8081"));
-        SendMessageW(m_settingsRefreshIntervalEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"5s, 3s, 10s"));
         SendMessageW(m_settingsEarthquakeRadiusRatioEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"10"));
 
         SendMessageW(m_settingsFilterCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Unplanned only"));
@@ -16041,33 +16032,8 @@ private:
     void SyncSettingsControls()
     {
         m_syncingControls = true;
-        const bool serverFetchControlsLocked = m_useServerToFetchData && IsOnlineMode();
-        if (m_urlEdit)
-            SetWindowTextSafe(m_urlEdit, m_alertsEndpoint);
         if (m_serverEdit)
             SetWindowTextSafe(m_serverEdit, m_serverBaseUrl);
-        if (m_settingsRefreshOffRadio) {
-            SendMessageW(m_settingsRefreshOffRadio, BM_SETCHECK, m_periodicRefreshEnabled ? BST_UNCHECKED : BST_CHECKED, 0);
-            EnableWindow(m_settingsRefreshOffRadio, !serverFetchControlsLocked);
-        }
-        if (m_settingsRefreshOnRadio) {
-            SendMessageW(m_settingsRefreshOnRadio, BM_SETCHECK, m_periodicRefreshEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
-            EnableWindow(m_settingsRefreshOnRadio, !serverFetchControlsLocked);
-        }
-        if (m_settingsRefreshIntervalEdit) {
-            SetWindowTextSafe(m_settingsRefreshIntervalEdit, m_refreshIntervalText);
-            EnableWindow(m_settingsRefreshIntervalEdit, !serverFetchControlsLocked && m_periodicRefreshEnabled);
-        }
-        if (m_settingsWnd) {
-            if (HWND label = GetDlgItem(m_settingsWnd, IDC_SETTINGS_REFRESH_LABEL))
-                EnableWindow(label, !serverFetchControlsLocked);
-            if (HWND label = GetDlgItem(m_settingsWnd, IDC_SETTINGS_REFRESH_INTERVAL_LABEL))
-                EnableWindow(label, !serverFetchControlsLocked);
-        }
-        if (m_settingsServerFetchCheck) {
-            SendMessageW(m_settingsServerFetchCheck, BM_SETCHECK, m_useServerToFetchData ? BST_CHECKED : BST_UNCHECKED, 0);
-            EnableWindow(m_settingsServerFetchCheck, IsOnlineMode());
-        }
         if (m_settingsWorldOffRadio)
             SendMessageW(m_settingsWorldOffRadio, BM_SETCHECK, m_displayWorldMap ? BST_UNCHECKED : BST_CHECKED, 0);
         if (m_settingsWorldOnRadio)
@@ -16109,62 +16075,9 @@ private:
         if (m_syncingControls)
             return;
 
-        if (id == IDC_URL_EDIT && code == EN_CHANGE) {
-            m_alertsEndpoint = NormalizeUrl(GetWindowTextString(m_urlEdit));
-            SaveSettings();
-        }
-        else if (id == IDC_SERVER_EDIT && code == EN_CHANGE) {
+        if (id == IDC_SERVER_EDIT && code == EN_CHANGE) {
             m_serverBaseUrl = NormalizeUrl(GetWindowTextString(m_serverEdit));
             SaveSettings();
-        }
-        else if (id == IDC_SETTINGS_REFRESH_OFF_RADIO && code == BN_CLICKED) {
-            m_periodicRefreshEnabled = false;
-            ApplyRefreshTimer();
-            SyncSettingsControls();
-            SaveSettings();
-        }
-        else if (id == IDC_SETTINGS_REFRESH_ON_RADIO && code == BN_CLICKED) {
-            m_periodicRefreshEnabled = true;
-            UINT parsedMs = 0;
-            if (TryParseRefreshIntervalMilliseconds(GetWindowTextString(m_settingsRefreshIntervalEdit), parsedMs)) {
-                m_refreshIntervalText = Trim(GetWindowTextString(m_settingsRefreshIntervalEdit));
-                m_refreshIntervalMs = parsedMs;
-            }
-            ApplyRefreshTimer();
-            SyncSettingsControls();
-            SaveSettings();
-        }
-        else if (id == IDC_SETTINGS_REFRESH_INTERVAL_EDIT && (code == EN_CHANGE || code == EN_KILLFOCUS)) {
-            UINT parsedMs = 0;
-            std::wstring intervalText = Trim(GetWindowTextString(m_settingsRefreshIntervalEdit));
-            if (TryParseRefreshIntervalMilliseconds(intervalText, parsedMs)) {
-                m_refreshIntervalText = intervalText;
-                m_refreshIntervalMs = parsedMs;
-                if (m_periodicRefreshEnabled)
-                    ApplyRefreshTimer();
-                SaveSettings();
-            }
-            else if (code == EN_KILLFOCUS) {
-                SetWindowTextSafe(m_settingsRefreshIntervalEdit, m_refreshIntervalText);
-                SetStatusText(L"Refresh interval must be at least 1 second, e.g. 5s, 3s, or 10s.");
-            }
-        }
-        else if (id == IDC_SETTINGS_SERVER_FETCH_CHECK && code == BN_CLICKED) {
-            m_useServerToFetchData =
-                SendMessageW(m_settingsServerFetchCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            ApplyRefreshTimer();
-            SyncSettingsControls();
-            SaveSettings();
-            SetStatusText(m_useServerToFetchData
-                ? L"Server data fetching enabled. Refresh cadence is controlled by the server."
-                : L"Direct data fetching enabled.");
-            if (m_useServerToFetchData) {
-                RefreshFeedAsync();
-                FetchEarthquakesAsync(true);
-                FetchWeatherSystemsAsync(true);
-                FetchWeatherWarningsAsync(true);
-                FetchFloodsAsync(true);
-            }
         }
         else if (id == IDC_SETTINGS_WORLD_OFF_RADIO && code == BN_CLICKED) {
             m_displayWorldMap = false;
@@ -16236,13 +16149,11 @@ private:
     HFONT m_boldFont = nullptr;
     HFONT m_headerFont = nullptr;
 
-    HWND m_urlLabel = nullptr;
     HWND m_searchLabel = nullptr;
     HWND m_severityLabel = nullptr;
     HWND m_statusBar = nullptr;
     HWND m_serverLabel = nullptr;
     HWND m_panelTabBtn = nullptr;
-    HWND m_urlEdit = nullptr;
     HWND m_serverEdit = nullptr;
     HWND m_searchEdit = nullptr;
     HWND m_severityCombo = nullptr;
@@ -16268,10 +16179,6 @@ private:
     HWND m_roadDepictionsRoadEdit = nullptr;
     HWND m_settingsFilterCombo = nullptr;
     HWND m_settingsOrderCombo = nullptr;
-    HWND m_settingsRefreshOffRadio = nullptr;
-    HWND m_settingsRefreshOnRadio = nullptr;
-    HWND m_settingsRefreshIntervalEdit = nullptr;
-    HWND m_settingsServerFetchCheck = nullptr;
     HWND m_settingsWorldOffRadio = nullptr;
     HWND m_settingsWorldOnRadio = nullptr;
     HWND m_settingsSyncLocalRadio = nullptr;
@@ -16298,6 +16205,7 @@ private:
     HWND m_incidentUnplannedCheck = nullptr;
     HWND m_incidentPlannedCheck = nullptr;
     HWND m_incidentSidePanelListOnlyCheck = nullptr;
+    HWND m_incidentShowUnresolvedCheck = nullptr;
     HWND m_incidentNotifyRoadsEdit = nullptr;
     HWND m_incidentNotifyRoadExclusionsEdit = nullptr;
     HWND m_incidentNotifyLaneThresholdEdit = nullptr;
@@ -16433,6 +16341,7 @@ private:
     bool m_incidentFilterUnplanned = true;
     bool m_incidentFilterPlanned = true;
     bool m_incidentSidePanelListOnly = false;
+    bool m_showUnresolvedIncidents = false;
     std::wstring m_incidentNotifyRoads = L"M*, A*, A1(M), A2, A15, A16, A17, A20, A4, A52";
     std::wstring m_incidentNotifyRoadExclusions;
     std::wstring m_incidentNotifyLaneThresholdText = L"50%";
@@ -16464,6 +16373,7 @@ private:
     bool m_showFpsCounter = false;
     bool m_showMapControls = true;
     bool m_showCountdownTimer = false;
+    bool m_showCommsIndicator = true;
     std::array<std::wstring, 3> m_countdownPresets{ L"05:00", L"10:00", L"15:00" };
     bool m_avoidOverlaysForNotifications = true;
     bool m_soundCuesEnabled = true;
@@ -16482,7 +16392,6 @@ private:
     bool m_displayWorldMap = false;
     bool m_showIreland = true;
     bool m_syncSettingsFromServer = false;
-    bool m_useServerToFetchData = false;
     bool m_populatedPlacesLoaded = false;
     bool m_populatedPlacesLoadAttempted = false;
     bool m_populatedPlacesDownloadAttempted = false;
@@ -16516,7 +16425,7 @@ private:
     std::wstring m_alertOrder = L"Road";
     std::wstring m_alertsEndpoint;
     std::wstring m_serverBaseUrl = L"http://213.254.181.35:8081";
-    bool m_periodicRefreshEnabled = true;
+    bool m_periodicRefreshEnabled = false;
     bool m_hasLoadedAlerts = false;
     std::wstring m_refreshIntervalText = L"300s";
     UINT m_refreshIntervalMs = 5 * 60 * 1000;

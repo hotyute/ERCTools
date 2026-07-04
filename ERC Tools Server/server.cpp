@@ -7,6 +7,7 @@
 #define NOMINMAX
 
 #include <windows.h>
+#include <commctrl.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <sqlext.h>
@@ -46,6 +47,7 @@
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "comctl32.lib")
 
 using json = nlohmann::json;
 
@@ -76,6 +78,20 @@ struct UserRecord
     std::wstring displayName;
     std::wstring position;
     std::wstring pod;
+};
+
+struct ServerPanelUser
+{
+    std::wstring id;
+    std::wstring username;
+    std::wstring displayName;
+    std::wstring position;
+    std::wstring pod;
+    std::wstring status;
+    std::wstring lastSeen;
+    std::wstring mutedUntil;
+    uint32_t pingMs = 0;
+    bool active = false;
 };
 
 struct HttpRequest
@@ -949,6 +965,27 @@ public:
         return true;
     }
 
+    bool ReportSessionPing(const std::string& bearerToken, uint32_t pingMs, std::wstring& errorOut)
+    {
+        if (bearerToken.empty() || pingMs == 0)
+            return true;
+
+        std::string tokenHash;
+        if (!Sha256Hex(bearerToken, tokenHash)) {
+            errorOut = L"Could not hash bearer token.";
+            return false;
+        }
+
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureSessionContextColumns(db, errorOut))
+            return false;
+        pingMs = std::clamp<uint32_t>(pingMs, 1u, 60000u);
+        return db.Execute(
+            L"UPDATE user_sessions SET last_ping_ms = ? WHERE token_hash = ?",
+            { std::to_wstring(pingMs), Utf8ToWide(tokenHash) },
+            errorOut);
+    }
+
     bool DeleteSession(const std::string& bearerToken, std::wstring& errorOut)
     {
         if (bearerToken.empty()) {
@@ -1025,6 +1062,141 @@ public:
             errorOut.clear();
         }
         return ok;
+    }
+
+    std::vector<ServerPanelUser> ServerPanelUsers(std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return {};
+
+        const std::wstring sql =
+            L"SELECT u.id, u.username, u.display_name, u.position, u.active, "
+            L"COALESCE(DATE_FORMAT(u.muted_until, '%Y-%m-%d %H:%i:%s'), ''), "
+            L"COALESCE((SELECT NULLIF(s.session_pod, '') FROM user_sessions s WHERE s.user_id = u.id "
+            L"ORDER BY COALESCE(s.last_seen_at, s.created_at) DESC LIMIT 1), u.pod, ''), "
+            L"COALESCE(DATE_FORMAT((SELECT MAX(COALESCE(s.last_seen_at, s.created_at)) FROM user_sessions s "
+            L"WHERE s.user_id = u.id), '%Y-%m-%d %H:%i:%s'), DATE_FORMAT(u.last_login_at, '%Y-%m-%d %H:%i:%s'), 'Never'), "
+            L"COALESCE((SELECT s.last_ping_ms FROM user_sessions s WHERE s.user_id = u.id "
+            L"ORDER BY COALESCE(s.last_seen_at, s.created_at) DESC LIMIT 1), 0), "
+            L"CASE WHEN u.active = 0 THEN 'Disabled' WHEN EXISTS(SELECT 1 FROM user_sessions s WHERE s.user_id = u.id "
+            L"AND s.expires_at > CURRENT_TIMESTAMP AND COALESCE(s.last_seen_at, s.created_at) >= "
+            L"DATE_SUB(CURRENT_TIMESTAMP, INTERVAL " + OnlineTimeoutSecondsText() + L" SECOND)) THEN 'Online' ELSE 'Offline' END "
+            L"FROM users u ORDER BY u.active DESC, FIELD(u.position, 'Administrator', 'Supervisor', 'Manager', 'ERC') ASC, u.username";
+
+        auto rows = db.Query(sql, {}, errorOut);
+        if (!errorOut.empty())
+            return {};
+
+        std::vector<ServerPanelUser> users;
+        users.reserve(rows.size());
+        for (const auto& row : rows) {
+            if (row.size() < 10)
+                continue;
+            ServerPanelUser user;
+            user.id = row[0];
+            user.username = row[1];
+            user.displayName = row[2];
+            user.position = row[3];
+            user.active = row[4] != L"0";
+            user.mutedUntil = row[5];
+            user.pod = row[6];
+            user.lastSeen = row[7];
+            user.pingMs = static_cast<uint32_t>(std::max(0, _wtoi(row[8].c_str())));
+            user.status = row[9];
+            users.push_back(std::move(user));
+        }
+        return users;
+    }
+
+    bool ServerConsoleKickUser(const std::wstring& username, std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        UserRecord target;
+        if (!FindAnyUserByUsername(db, username, target, errorOut))
+            return false;
+        LogServerConsoleEvent(db, target, L"kick", L"", errorOut);
+        errorOut.clear();
+        return db.Execute(L"DELETE FROM user_sessions WHERE user_id = ?", { target.id }, errorOut);
+    }
+
+    bool ServerConsoleSetMuted(const std::wstring& username, uint32_t minutes, bool muted, std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        UserRecord target;
+        if (!FindAnyUserByUsername(db, username, target, errorOut))
+            return false;
+
+        bool ok = false;
+        if (muted) {
+            minutes = std::clamp<uint32_t>(minutes == 0 ? 15 : minutes, 1, 24 * 60);
+            ok = db.Execute(
+                L"UPDATE users SET muted_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? MINUTE), muted_by = NULL, muted_at = CURRENT_TIMESTAMP WHERE id = ?",
+                { std::to_wstring(minutes), target.id }, errorOut);
+        }
+        else {
+            ok = db.Execute(
+                L"UPDATE users SET muted_until = NULL, muted_by = NULL, muted_at = NULL WHERE id = ?",
+                { target.id }, errorOut);
+        }
+        if (ok) {
+            LogServerConsoleEvent(db, target, muted ? L"mute" : L"unmute",
+                muted ? std::to_wstring(minutes) + L" minute(s)" : L"", errorOut);
+            errorOut.clear();
+        }
+        return ok;
+    }
+
+    bool ServerConsoleSetUserActive(const std::wstring& username, bool active, std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        UserRecord target;
+        if (!FindAnyUserByUsername(db, username, target, errorOut))
+            return false;
+        if (!db.Execute(L"UPDATE users SET active = ? WHERE id = ?", { active ? L"1" : L"0", target.id }, errorOut))
+            return false;
+        if (!active && !db.Execute(L"DELETE FROM user_sessions WHERE user_id = ?", { target.id }, errorOut))
+            return false;
+        LogServerConsoleEvent(db, target, active ? L"enable" : L"disable", L"", errorOut);
+        errorOut.clear();
+        return true;
+    }
+
+    bool ServerConsoleCreateUser(
+        const std::wstring& username,
+        const std::wstring& displayName,
+        const std::wstring& password,
+        const std::wstring& position,
+        bool active,
+        std::wstring& errorOut)
+    {
+        OdbcConnection db(m_config.databaseConnectionString);
+        if (!EnsureCollaborationSchema(db, errorOut))
+            return false;
+        auto rows = db.Query(L"SELECT COUNT(*) FROM users WHERE username = ?", { TrimWide(username) }, errorOut);
+        if (!errorOut.empty())
+            return false;
+        if (!rows.empty() && !rows.front().empty() && _wtoi(rows.front().front().c_str()) > 0) {
+            errorOut = L"An account with that username already exists.";
+            return false;
+        }
+
+        std::string code;
+        if (!CreateOrUpdateUser(username, displayName, password, position, active, errorOut, code))
+            return false;
+
+        UserRecord created;
+        if (FindAnyUserByUsername(db, username, created, errorOut)) {
+            LogServerConsoleEvent(db, created, L"account_create", L"Created from server panel", errorOut);
+            errorOut.clear();
+        }
+        return true;
     }
 
     json UserLoginTimes(std::wstring& errorOut)
@@ -1534,7 +1706,8 @@ private:
         const ColumnDef columns[] = {
             { L"session_display_name", L"session_display_name VARCHAR(255) NULL DEFAULT NULL" },
             { L"session_position", L"session_position VARCHAR(32) NULL DEFAULT NULL" },
-            { L"session_pod", L"session_pod VARCHAR(32) NULL DEFAULT NULL" }
+            { L"session_pod", L"session_pod VARCHAR(32) NULL DEFAULT NULL" },
+            { L"last_ping_ms", L"last_ping_ms INT UNSIGNED NULL DEFAULT NULL" }
         };
 
         for (const ColumnDef& column : columns) {
@@ -1662,6 +1835,41 @@ private:
         const auto& row = rows.front();
         userOut = UserRecord{ row[0], row[1], row[2], row[3], row[4] };
         return true;
+    }
+
+    bool FindAnyUserByUsername(OdbcConnection& db, const std::wstring& username, UserRecord& userOut, std::wstring& errorOut)
+    {
+        const std::wstring cleanUsername = TrimWide(username);
+        if (cleanUsername.empty()) {
+            errorOut = L"Username is required.";
+            return false;
+        }
+        auto rows = db.Query(
+            L"SELECT id, username, display_name, position, pod FROM users WHERE username = ? LIMIT 1",
+            { cleanUsername }, errorOut);
+        if (!errorOut.empty())
+            return false;
+        if (rows.empty() || rows.front().size() < 5) {
+            errorOut = L"User was not found.";
+            return false;
+        }
+        const auto& row = rows.front();
+        userOut = UserRecord{ row[0], row[1], row[2], row[3], row[4] };
+        return true;
+    }
+
+    void LogServerConsoleEvent(
+        OdbcConnection& db,
+        const UserRecord& target,
+        const std::wstring& eventType,
+        const std::wstring& details,
+        std::wstring& errorOut)
+    {
+        db.Execute(
+            L"INSERT INTO user_session_audit (event_type, target_user_id, username, display_name, position, pod, actor_username, details, created_at) "
+            L"VALUES (?, ?, ?, ?, ?, ?, 'server-console', ?, CURRENT_TIMESTAMP)",
+            { eventType, target.id, target.username, target.displayName, target.position, target.pod, details },
+            errorOut);
     }
 
     static bool CanManageTarget(const UserRecord& actor, const UserRecord& target, std::wstring& errorOut)
@@ -1845,8 +2053,10 @@ static std::wstring NormalizeAbsoluteUrl(std::wstring url)
     return url;
 }
 
-static bool ServerHttpGetText(
+static bool ServerHttpRequestText(
     const std::wstring& inputUrl,
+    const wchar_t* method,
+    const std::string& requestBody,
     std::string& bodyOut,
     std::wstring& errorOut,
     DWORD timeoutMs = 15000)
@@ -1901,7 +2111,7 @@ static bool ServerHttpGetText(
     }
 
     DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
-    WinHttpHandle request(WinHttpOpenRequest(connect, L"GET", object.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
+    WinHttpHandle request(WinHttpOpenRequest(connect, method, object.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
     if (!request) {
         errorOut = L"WinHttpOpenRequest failed: " + WinErrorText(GetLastError());
         return false;
@@ -1919,7 +2129,11 @@ static bool ServerHttpGetText(
         L"Accept: application/json, text/html, text/plain, */*\r\n"
         L"Accept-Encoding: identity\r\n"
         L"Cache-Control: no-cache\r\n";
-    if (!WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1L), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+    if (!requestBody.empty())
+        headers += L"Content-Type: application/json; charset=utf-8\r\n";
+    LPVOID requestData = requestBody.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(requestBody.data());
+    const DWORD requestSize = static_cast<DWORD>(requestBody.size());
+    if (!WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1L), requestData, requestSize, requestSize, 0) ||
         !WinHttpReceiveResponse(request, nullptr))
     {
         errorOut = L"Source request failed: " + WinErrorText(GetLastError());
@@ -1958,6 +2172,25 @@ static bool ServerHttpGetText(
     }
 
     return true;
+}
+
+static bool ServerHttpGetText(
+    const std::wstring& inputUrl,
+    std::string& bodyOut,
+    std::wstring& errorOut,
+    DWORD timeoutMs = 15000)
+{
+    return ServerHttpRequestText(inputUrl, L"GET", {}, bodyOut, errorOut, timeoutMs);
+}
+
+static bool ServerHttpPostJsonText(
+    const std::wstring& inputUrl,
+    const std::string& requestBody,
+    std::string& bodyOut,
+    std::wstring& errorOut,
+    DWORD timeoutMs = 5000)
+{
+    return ServerHttpRequestText(inputUrl, L"POST", requestBody, bodyOut, errorOut, timeoutMs);
 }
 
 static bool JsonBoolOption(const json& options, const char* key, bool fallback)
@@ -2216,6 +2449,7 @@ public:
         m_ntisPollIntervalMs.store(
             ClampNtisPollIntervalMs(static_cast<uint64_t>(std::max(1, m_config.ntisPollIntervalSeconds)) * 1000ull),
             std::memory_order_release);
+        RefreshFusedCongestionFreshnessMinutes();
         m_serveStaleSourceCache.store(m_config.serveStaleSourceCache, std::memory_order_release);
         m_sourceRefreshThread = std::thread([this]() { SourceRefreshLoop(); });
     }
@@ -2265,6 +2499,43 @@ public:
         return !m_config.ntisEventSnapshotUrl.empty();
     }
 
+    uint32_t FusedCongestionFreshnessMinutes() const
+    {
+        return m_fusedCongestionFreshnessMinutes.load(std::memory_order_acquire);
+    }
+
+    bool RefreshFusedCongestionFreshnessMinutes()
+    {
+        std::string response;
+        std::wstring error;
+        if (!ServerHttpGetText(NtisSettingsUrl(), response, error, 2000))
+            return false;
+        try {
+            const json document = json::parse(response);
+            const uint32_t minutes = static_cast<uint32_t>(std::clamp(
+                document.value("fusedCongestionMaxAgeMinutes", 10), 2, 10));
+            m_fusedCongestionFreshnessMinutes.store(minutes, std::memory_order_release);
+            return true;
+        }
+        catch (...) {
+            return false;
+        }
+    }
+
+    bool SetFusedCongestionFreshnessMinutes(uint32_t minutes)
+    {
+        minutes = std::clamp<uint32_t>(minutes, 2u, 10u);
+        std::string response;
+        std::wstring error;
+        const std::string body = json{
+            { "fusedCongestionMaxAgeSeconds", minutes * 60u }
+        }.dump();
+        if (!ServerHttpPostJsonText(NtisSettingsUrl(), body, response, error, 2000))
+            return false;
+        m_fusedCongestionFreshnessMinutes.store(minutes, std::memory_order_release);
+        return true;
+    }
+
     uint32_t SourceFetchIntervalMsFor(const std::wstring& sourceType) const
     {
         const uint32_t general = SourceFetchIntervalMs();
@@ -2284,6 +2555,50 @@ public:
         std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
         m_sourceCache.clear();
         m_sourceCacheChanged.notify_all();
+    }
+
+    std::vector<ServerPanelUser> ServerPanelUsers(std::wstring& errorOut)
+    {
+        return m_database.ServerPanelUsers(errorOut);
+    }
+
+    bool ServerConsoleKickUser(const std::wstring& username, std::wstring& errorOut)
+    {
+        const bool ok = m_database.ServerConsoleKickUser(username, errorOut);
+        if (ok)
+            NotifyCollaborationChanged();
+        return ok;
+    }
+
+    bool ServerConsoleSetMuted(const std::wstring& username, uint32_t minutes, bool muted, std::wstring& errorOut)
+    {
+        const bool ok = m_database.ServerConsoleSetMuted(username, minutes, muted, errorOut);
+        if (ok)
+            NotifyCollaborationChanged();
+        return ok;
+    }
+
+    bool ServerConsoleSetUserActive(const std::wstring& username, bool active, std::wstring& errorOut)
+    {
+        const bool ok = m_database.ServerConsoleSetUserActive(username, active, errorOut);
+        if (ok)
+            NotifyCollaborationChanged();
+        return ok;
+    }
+
+    bool ServerConsoleCreateUser(
+        const std::wstring& username,
+        const std::wstring& displayName,
+        const std::wstring& password,
+        const std::wstring& position,
+        bool active,
+        std::wstring& errorOut)
+    {
+        const bool ok = m_database.ServerConsoleCreateUser(
+            username, displayName, password, position, active, errorOut);
+        if (ok)
+            NotifyCollaborationChanged();
+        return ok;
     }
 
     BinaryResponse HandleBinary(uint16_t opcode, const std::vector<unsigned char>& payload)
@@ -2316,7 +2631,7 @@ public:
 
             switch (opcode) {
             case kBinaryPoll:
-                return HandleBinaryPoll(opcode, reader, user);
+                return HandleBinaryPoll(opcode, reader, user, WideToUtf8(token));
             case kBinarySendChat:
                 return HandleBinarySendChat(opcode, reader, user);
             case kBinaryClearChat:
@@ -3022,11 +3337,21 @@ private:
         return BinaryOk(kBinaryLogin, writer);
     }
 
-    BinaryResponse HandleBinaryPoll(uint16_t opcode, BinaryReader& reader, const UserRecord& user)
+    BinaryResponse HandleBinaryPoll(uint16_t opcode, BinaryReader& reader, const UserRecord& user, const std::string& bearerToken)
     {
         uint32_t knownVersion = 0;
         reader.U32(knownVersion);
+        uint32_t pingMs = 0;
+        if (reader.U32(pingMs) && pingMs > 0) {
+            std::wstring pingError;
+            m_database.ReportSessionPing(bearerToken, pingMs, pingError);
+        }
+        const auto waitStarted = std::chrono::steady_clock::now();
         WaitForCollaborationChange(knownVersion);
+        const uint32_t waitMs = static_cast<uint32_t>(std::min<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - waitStarted).count(),
+            std::numeric_limits<uint32_t>::max()));
 
         std::wstring error;
         json chat = m_database.ChatMessages(error);
@@ -3080,6 +3405,7 @@ private:
             for (const auto& item : incidentExclusions)
                 WriteIncidentExclusionJson(writer, item);
         }
+        writer.U32(waitMs);
         return BinaryOk(opcode, writer);
     }
 
@@ -3855,6 +4181,15 @@ private:
         return L"";
     }
 
+    std::wstring NtisSettingsUrl() const
+    {
+        std::wstring url = m_config.ntisEventSnapshotUrl;
+        const size_t internal = url.find(L"/internal/");
+        if (internal != std::wstring::npos)
+            return url.substr(0, internal) + L"/internal/settings";
+        return url;
+    }
+
     std::mutex m_collaborationMutex;
     std::condition_variable m_collaborationChanged;
     std::atomic<uint32_t> m_collaborationVersion{ 1 };
@@ -3869,6 +4204,7 @@ private:
     std::atomic_bool m_sourceRefreshStop{ false };
     std::atomic<uint32_t> m_sourceFetchIntervalMs{ 60u * 1000u };
     std::atomic<uint32_t> m_ntisPollIntervalMs{ 2u * 1000u };
+    std::atomic<uint32_t> m_fusedCongestionFreshnessMinutes{ 10u };
     std::atomic_bool m_serveStaleSourceCache{ true };
     ServerConfig m_config;
     Database m_database;
@@ -4091,24 +4427,155 @@ static void WorkerLoop(BlockingSocketQueue& queue, ErcServer& server)
     }
 }
 
+constexpr int kServerSettingsTab = 5100;
 constexpr int kServerSettingsIntervalEdit = 5101;
 constexpr int kServerSettingsApplyButton = 5102;
 constexpr int kServerSettingsStaleCheck = 5103;
 constexpr int kServerSettingsClearCacheButton = 5104;
 constexpr int kServerSettingsStatusLabel = 5105;
 constexpr int kServerSettingsNtisIntervalEdit = 5107;
+constexpr int kServerSettingsFusedFreshnessSlider = 5108;
+constexpr int kServerSettingsFusedFreshnessValue = 5109;
+constexpr int kServerSettingsSourceLabel = 5110;
+constexpr int kServerSettingsNtisLabel = 5111;
+constexpr int kServerSettingsFreshnessLabel = 5112;
+constexpr int kServerUsersSummary = 5120;
+constexpr int kServerUsersList = 5121;
+constexpr int kServerUsersRefresh = 5122;
+constexpr int kServerUsersKick = 5123;
+constexpr int kServerUsersMute = 5124;
+constexpr int kServerUsersUnmute = 5125;
+constexpr int kServerUsersDisable = 5126;
+constexpr int kServerUsersEnable = 5127;
+constexpr int kServerUsersActionStatus = 5128;
+constexpr int kServerUsersCreate = 5129;
+constexpr int kServerCreateUsername = 5201;
+constexpr int kServerCreateDisplayName = 5202;
+constexpr int kServerCreatePassword = 5203;
+constexpr int kServerCreatePosition = 5204;
+constexpr int kServerCreateActive = 5205;
+constexpr int kServerCreateSubmit = 5206;
+constexpr int kServerCreateCancel = 5207;
 
 struct ServerSettingsWindowState
 {
     ErcServer* server = nullptr;
+    std::vector<ServerPanelUser> users;
+    int activeTab = 0;
+    int userRefreshTick = 0;
 };
+
+static const int kServerPageControlIds[] = {
+    kServerSettingsIntervalEdit, kServerSettingsApplyButton, kServerSettingsStaleCheck,
+    kServerSettingsClearCacheButton, kServerSettingsStatusLabel, kServerSettingsNtisIntervalEdit,
+    kServerSettingsFusedFreshnessSlider, kServerSettingsFusedFreshnessValue,
+    kServerSettingsSourceLabel, kServerSettingsNtisLabel, kServerSettingsFreshnessLabel
+};
+
+static const int kUsersPageControlIds[] = {
+    kServerUsersSummary, kServerUsersList, kServerUsersRefresh, kServerUsersKick,
+    kServerUsersMute, kServerUsersUnmute, kServerUsersDisable, kServerUsersEnable,
+    kServerUsersActionStatus, kServerUsersCreate
+};
+
+static void SetServerPanelTab(HWND hwnd, int tab)
+{
+    auto* state = reinterpret_cast<ServerSettingsWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (state)
+        state->activeTab = tab == 1 ? 1 : 0;
+    for (int id : kServerPageControlIds)
+        ShowWindow(GetDlgItem(hwnd, id), tab == 0 ? SW_SHOW : SW_HIDE);
+    for (int id : kUsersPageControlIds)
+        ShowWindow(GetDlgItem(hwnd, id), tab == 1 ? SW_SHOW : SW_HIDE);
+}
+
+static int SelectedServerPanelUserIndex(HWND hwnd)
+{
+    HWND list = GetDlgItem(hwnd, kServerUsersList);
+    return list ? ListView_GetNextItem(list, -1, LVNI_SELECTED) : -1;
+}
+
+static void SetServerUserActionStatus(HWND hwnd, const std::wstring& text)
+{
+    SetWindowTextW(GetDlgItem(hwnd, kServerUsersActionStatus), text.c_str());
+}
+
+static void UpdateServerUserButtons(HWND hwnd)
+{
+    auto* state = reinterpret_cast<ServerSettingsWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    const int index = SelectedServerPanelUserIndex(hwnd);
+    const bool selected = state && index >= 0 && static_cast<size_t>(index) < state->users.size();
+    const bool active = selected && state->users[static_cast<size_t>(index)].active;
+    EnableWindow(GetDlgItem(hwnd, kServerUsersKick), selected && state->users[static_cast<size_t>(index)].status == L"Online");
+    EnableWindow(GetDlgItem(hwnd, kServerUsersMute), selected && active);
+    EnableWindow(GetDlgItem(hwnd, kServerUsersUnmute), selected && active);
+    EnableWindow(GetDlgItem(hwnd, kServerUsersDisable), selected && active);
+    EnableWindow(GetDlgItem(hwnd, kServerUsersEnable), selected && !active);
+}
+
+static void RefreshServerPanelUsers(HWND hwnd)
+{
+    auto* state = reinterpret_cast<ServerSettingsWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    HWND list = GetDlgItem(hwnd, kServerUsersList);
+    if (!state || !state->server || !list)
+        return;
+
+    std::wstring selectedUsername;
+    const int selected = SelectedServerPanelUserIndex(hwnd);
+    if (selected >= 0 && static_cast<size_t>(selected) < state->users.size())
+        selectedUsername = state->users[static_cast<size_t>(selected)].username;
+
+    std::wstring error;
+    std::vector<ServerPanelUser> users = state->server->ServerPanelUsers(error);
+    if (!error.empty()) {
+        SetServerUserActionStatus(hwnd, L"Could not refresh users: " + error);
+        return;
+    }
+
+    state->users = std::move(users);
+    SendMessageW(list, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(list);
+    size_t online = 0;
+    int restoreSelection = -1;
+    for (size_t i = 0; i < state->users.size(); ++i) {
+        const ServerPanelUser& user = state->users[i];
+        if (user.status == L"Online")
+            ++online;
+        const std::wstring identity = user.displayName.empty() || user.displayName == user.username
+            ? user.username
+            : user.displayName + L" (" + user.username + L")";
+        const std::wstring ping = user.status == L"Online" && user.pingMs > 0
+            ? std::to_wstring(user.pingMs) + L" ms" : L"--";
+        const std::wstring muted = user.mutedUntil.empty() ? L"No" : user.mutedUntil;
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = static_cast<int>(i);
+        item.pszText = const_cast<wchar_t*>(identity.c_str());
+        ListView_InsertItem(list, &item);
+        const std::wstring values[] = { user.position, user.pod, user.status, ping, user.lastSeen, muted };
+        for (int column = 0; column < static_cast<int>(_countof(values)); ++column)
+            ListView_SetItemText(list, static_cast<int>(i), column + 1, const_cast<wchar_t*>(values[column].c_str()));
+        if (!selectedUsername.empty() && user.username == selectedUsername)
+            restoreSelection = static_cast<int>(i);
+    }
+    if (restoreSelection >= 0)
+        ListView_SetItemState(list, restoreSelection, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    SendMessageW(list, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(list, nullptr, TRUE);
+
+    const std::wstring summary = std::to_wstring(online) + L" online | " +
+        std::to_wstring(state->users.size()) + L" account(s)";
+    SetWindowTextW(GetDlgItem(hwnd, kServerUsersSummary), summary.c_str());
+    UpdateServerUserButtons(hwnd);
+}
 
 static std::wstring ServerSettingsStatusText(ErcServer& server)
 {
     std::wstringstream text;
     text << L"Source cache entries: " << server.SourceCacheEntryCount()
         << L" | general interval: " << (server.SourceFetchIntervalMs() / 1000u) << L"s"
-        << L" | NTIS poll: " << (server.NtisPollIntervalMs() / 1000u) << L"s";
+        << L" | NTIS poll: " << (server.NtisPollIntervalMs() / 1000u) << L"s"
+        << L" | congestion freshness: " << server.FusedCongestionFreshnessMinutes() << L"m";
     return text.str();
 }
 
@@ -4124,6 +4591,18 @@ static void UpdateServerSettingsWindow(HWND hwnd)
     }
     if (HWND stale = GetDlgItem(hwnd, kServerSettingsStaleCheck)) {
         SendMessageW(stale, BM_SETCHECK, state->server->ServeStaleSourceCache() ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    HWND slider = GetDlgItem(hwnd, kServerSettingsFusedFreshnessSlider);
+    const bool sliderActive = slider && GetCapture() == slider;
+    if (slider) {
+        if (!sliderActive)
+            SendMessageW(slider, TBM_SETPOS, TRUE, state->server->FusedCongestionFreshnessMinutes());
+    }
+    if (!sliderActive) {
+        HWND value = GetDlgItem(hwnd, kServerSettingsFusedFreshnessValue);
+        const std::wstring text = std::to_wstring(state->server->FusedCongestionFreshnessMinutes()) + L" minutes";
+        if (value)
+            SetWindowTextW(value, text.c_str());
     }
 }
 
@@ -4149,6 +4628,157 @@ static uint32_t ParseNtisIntervalEditSeconds(HWND edit)
     return ClampNtisPollIntervalMs(static_cast<uint64_t>(seconds) * 1000ull) / 1000u;
 }
 
+struct ServerCreateAccountState
+{
+    ErcServer* server = nullptr;
+    bool created = false;
+};
+
+static std::wstring WindowText(HWND hwnd)
+{
+    const int length = GetWindowTextLengthW(hwnd);
+    std::wstring text(static_cast<size_t>(std::max(0, length)) + 1, L'\0');
+    if (length > 0) {
+        GetWindowTextW(hwnd, text.data(), length + 1);
+        text.resize(static_cast<size_t>(length));
+    }
+    else {
+        text.clear();
+    }
+    return text;
+}
+
+static LRESULT CALLBACK ServerCreateAccountWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_NCCREATE: {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE: {
+        HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        HINSTANCE instance = GetModuleHandleW(nullptr);
+        const struct Field { const wchar_t* label; int id; int y; DWORD style; } fields[] = {
+            { L"Username", kServerCreateUsername, 20, ES_AUTOHSCROLL },
+            { L"Display name", kServerCreateDisplayName, 58, ES_AUTOHSCROLL },
+            { L"Password", kServerCreatePassword, 96, ES_AUTOHSCROLL | ES_PASSWORD }
+        };
+        for (const Field& field : fields) {
+            HWND label = CreateWindowExW(0, L"STATIC", field.label, WS_CHILD | WS_VISIBLE,
+                16, field.y + 4, 100, 20, hwnd, nullptr, instance, nullptr);
+            HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | field.style,
+                122, field.y, 236, 25, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(field.id)), instance, nullptr);
+            SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        }
+        HWND positionLabel = CreateWindowExW(0, L"STATIC", L"Position", WS_CHILD | WS_VISIBLE,
+            16, 138, 100, 20, hwnd, nullptr, instance, nullptr);
+        HWND position = CreateWindowExW(0, WC_COMBOBOXW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            122, 134, 236, 140, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerCreatePosition)), instance, nullptr);
+        for (const wchar_t* role : { L"Administrator", L"Supervisor", L"Manager", L"ERC" })
+            SendMessageW(position, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(role));
+        SendMessageW(position, CB_SETCURSEL, 3, 0);
+        HWND active = CreateWindowExW(0, L"BUTTON", L"Account enabled",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            122, 170, 170, 24, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerCreateActive)), instance, nullptr);
+        SendMessageW(active, BM_SETCHECK, BST_CHECKED, 0);
+        HWND submit = CreateWindowExW(0, L"BUTTON", L"Create",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            196, 208, 78, 28, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerCreateSubmit)), instance, nullptr);
+        HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            282, 208, 76, 28, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerCreateCancel)), instance, nullptr);
+        for (HWND control : { positionLabel, position, active, submit, cancel })
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SetFocus(GetDlgItem(hwnd, kServerCreateUsername));
+        return 0;
+    }
+    case WM_COMMAND: {
+        const int id = LOWORD(wParam);
+        if (id == kServerCreateCancel && HIWORD(wParam) == BN_CLICKED) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (id == kServerCreateSubmit && HIWORD(wParam) == BN_CLICKED) {
+            auto* state = reinterpret_cast<ServerCreateAccountState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (!state || !state->server)
+                return 0;
+            const std::wstring username = TrimWide(WindowText(GetDlgItem(hwnd, kServerCreateUsername)));
+            const std::wstring displayName = TrimWide(WindowText(GetDlgItem(hwnd, kServerCreateDisplayName)));
+            const std::wstring password = WindowText(GetDlgItem(hwnd, kServerCreatePassword));
+            HWND positionBox = GetDlgItem(hwnd, kServerCreatePosition);
+            const int selection = static_cast<int>(SendMessageW(positionBox, CB_GETCURSEL, 0, 0));
+            wchar_t positionBuffer[64]{};
+            if (selection >= 0)
+                SendMessageW(positionBox, CB_GETLBTEXT, selection, reinterpret_cast<LPARAM>(positionBuffer));
+            const bool active = SendMessageW(GetDlgItem(hwnd, kServerCreateActive), BM_GETCHECK, 0, 0) == BST_CHECKED;
+            std::wstring error;
+            if (!state->server->ServerConsoleCreateUser(
+                username, displayName, password, positionBuffer, active, error))
+            {
+                MessageBoxW(hwnd, error.c_str(), L"Create Account", MB_OK | MB_ICONWARNING);
+                return 0;
+            }
+            state->created = true;
+            MessageBoxW(hwnd, L"The account was created.", L"Create Account", MB_OK | MB_ICONINFORMATION);
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static bool RunServerCreateAccountWindow(HWND owner, ErcServer& server)
+{
+    constexpr const wchar_t* className = L"ERCToolsServerCreateAccountWindow";
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = ServerCreateAccountWndProc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = className;
+    RegisterClassExW(&wc);
+
+    ServerCreateAccountState state{ &server, false };
+    HWND window = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
+        className, L"Create Account",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 394, 286,
+        owner, nullptr, instance, &state);
+    if (!window)
+        return false;
+
+    EnableWindow(owner, FALSE);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+    MSG message{};
+    while (IsWindow(window) && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(window, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    return state.created;
+}
+
 static LRESULT CALLBACK ServerSettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -4164,35 +4794,88 @@ static LRESULT CALLBACK ServerSettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam
         ErcServer* server = state ? state->server : nullptr;
         HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 
-        CreateWindowExW(0, L"STATIC", L"ERC Tools Server", WS_CHILD | WS_VISIBLE,
-            18, 16, 260, 24, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        CreateWindowExW(0, L"STATIC", L"Source fetch interval (seconds)", WS_CHILD | WS_VISIBLE,
-            18, 54, 220, 20, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-            18, 78, 110, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsIntervalEdit)), GetModuleHandleW(nullptr), nullptr);
-        HWND apply = CreateWindowExW(0, L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            140, 78, 86, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsApplyButton)), GetModuleHandleW(nullptr), nullptr);
-        CreateWindowExW(0, L"STATIC", L"NTIS snapshot poll (seconds)", WS_CHILD | WS_VISIBLE,
-            250, 54, 220, 20, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        HWND ntisEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-            250, 78, 110, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsNtisIntervalEdit)), GetModuleHandleW(nullptr), nullptr);
-        HWND stale = CreateWindowExW(0, L"BUTTON", L"Serve stale cache if an upstream fetch fails", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            18, 118, 330, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsStaleCheck)), GetModuleHandleW(nullptr), nullptr);
-        HWND clear = CreateWindowExW(0, L"BUTTON", L"Clear Source Cache", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            18, 154, 150, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsClearCacheButton)), GetModuleHandleW(nullptr), nullptr);
-        HWND status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            18, 198, 600, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsStatusLabel)), GetModuleHandleW(nullptr), nullptr);
+        HWND tab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+            8, 8, 680, 360, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsTab)), GetModuleHandleW(nullptr), nullptr);
+        TCITEMW tabItem{};
+        tabItem.mask = TCIF_TEXT;
+        tabItem.pszText = const_cast<wchar_t*>(L"Server");
+        TabCtrl_InsertItem(tab, 0, &tabItem);
+        tabItem.pszText = const_cast<wchar_t*>(L"Users");
+        TabCtrl_InsertItem(tab, 1, &tabItem);
 
-        for (HWND control : { edit, apply, ntisEdit, stale, clear, status })
+        HWND sourceLabel = CreateWindowExW(0, L"STATIC", L"Fetch interval (seconds)", WS_CHILD | WS_VISIBLE,
+            24, 43, 142, 20, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsSourceLabel)), GetModuleHandleW(nullptr), nullptr);
+        HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+            24, 63, 100, 25, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsIntervalEdit)), GetModuleHandleW(nullptr), nullptr);
+        HWND apply = CreateWindowExW(0, L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            282, 63, 72, 25, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsApplyButton)), GetModuleHandleW(nullptr), nullptr);
+        HWND ntisLabel = CreateWindowExW(0, L"STATIC", L"NTIS poll (seconds)", WS_CHILD | WS_VISIBLE,
+            154, 43, 125, 20, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsNtisLabel)), GetModuleHandleW(nullptr), nullptr);
+        HWND ntisEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+            154, 63, 100, 25, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsNtisIntervalEdit)), GetModuleHandleW(nullptr), nullptr);
+        HWND freshLabel = CreateWindowExW(0, L"STATIC", L"Congestion inference", WS_CHILD | WS_VISIBLE,
+            24, 103, 150, 20, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsFreshnessLabel)), GetModuleHandleW(nullptr), nullptr);
+        HWND freshnessValue = CreateWindowExW(0, L"STATIC", L"10 minutes", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            555, 103, 105, 20, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsFusedFreshnessValue)), GetModuleHandleW(nullptr), nullptr);
+        HWND freshnessSlider = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
+            24, 124, 636, 34, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsFusedFreshnessSlider)), GetModuleHandleW(nullptr), nullptr);
+        HWND stale = CreateWindowExW(0, L"BUTTON", L"Serve stale cache if an upstream fetch fails", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            24, 170, 310, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsStaleCheck)), GetModuleHandleW(nullptr), nullptr);
+        HWND clear = CreateWindowExW(0, L"BUTTON", L"Clear Source Cache", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            510, 166, 150, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsClearCacheButton)), GetModuleHandleW(nullptr), nullptr);
+        HWND status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+            24, 212, 636, 40, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerSettingsStatusLabel)), GetModuleHandleW(nullptr), nullptr);
+
+        HWND usersSummary = CreateWindowExW(0, L"STATIC", L"Loading users...", WS_CHILD,
+            24, 43, 300, 20, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerUsersSummary)), GetModuleHandleW(nullptr), nullptr);
+        HWND usersRefresh = CreateWindowExW(0, L"BUTTON", L"Refresh", WS_CHILD | BS_PUSHBUTTON,
+            582, 38, 78, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerUsersRefresh)), GetModuleHandleW(nullptr), nullptr);
+        HWND usersList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+            WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+            24, 70, 636, 210, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerUsersList)), GetModuleHandleW(nullptr), nullptr);
+        ListView_SetExtendedListViewStyle(usersList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+        const wchar_t* columnNames[] = { L"User", L"Role", L"Pod", L"Status", L"Ping", L"Last seen", L"Muted until" };
+        const int columnWidths[] = { 158, 82, 46, 62, 54, 122, 108 };
+        for (int i = 0; i < static_cast<int>(_countof(columnNames)); ++i) {
+            LVCOLUMNW column{};
+            column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            column.pszText = const_cast<wchar_t*>(columnNames[i]);
+            column.cx = columnWidths[i];
+            column.iSubItem = i;
+            ListView_InsertColumn(usersList, i, &column);
+        }
+        HWND kick = CreateWindowExW(0, L"BUTTON", L"Kick", WS_CHILD | BS_PUSHBUTTON,
+            24, 292, 70, 27, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerUsersKick)), GetModuleHandleW(nullptr), nullptr);
+        HWND mute = CreateWindowExW(0, L"BUTTON", L"Mute 15m", WS_CHILD | BS_PUSHBUTTON,
+            102, 292, 82, 27, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerUsersMute)), GetModuleHandleW(nullptr), nullptr);
+        HWND unmute = CreateWindowExW(0, L"BUTTON", L"Unmute", WS_CHILD | BS_PUSHBUTTON,
+            192, 292, 76, 27, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerUsersUnmute)), GetModuleHandleW(nullptr), nullptr);
+        HWND disable = CreateWindowExW(0, L"BUTTON", L"Disable", WS_CHILD | BS_PUSHBUTTON,
+            276, 292, 76, 27, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerUsersDisable)), GetModuleHandleW(nullptr), nullptr);
+        HWND enable = CreateWindowExW(0, L"BUTTON", L"Enable", WS_CHILD | BS_PUSHBUTTON,
+            360, 292, 76, 27, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerUsersEnable)), GetModuleHandleW(nullptr), nullptr);
+        HWND createUser = CreateWindowExW(0, L"BUTTON", L"Create", WS_CHILD | BS_PUSHBUTTON,
+            582, 292, 78, 27, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerUsersCreate)), GetModuleHandleW(nullptr), nullptr);
+        HWND actionStatus = CreateWindowExW(0, L"STATIC", L"Select an account to manage it.", WS_CHILD,
+            24, 329, 636, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerUsersActionStatus)), GetModuleHandleW(nullptr), nullptr);
+
+        for (HWND control : { tab, sourceLabel, edit, apply, ntisLabel, ntisEdit, freshLabel, freshnessValue,
+            freshnessSlider, stale, clear, status, usersSummary, usersRefresh, usersList, kick, mute, unmute,
+            disable, enable, createUser, actionStatus })
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+        SendMessageW(freshnessSlider, TBM_SETRANGE, TRUE, MAKELPARAM(2, 10));
+        SendMessageW(freshnessSlider, TBM_SETTICFREQ, 1, 0);
 
         if (server) {
             const std::wstring seconds = std::to_wstring(server->SourceFetchIntervalMs() / 1000u);
             SetWindowTextW(edit, seconds.c_str());
             const std::wstring ntisSeconds = std::to_wstring(server->NtisPollIntervalMs() / 1000u);
             SetWindowTextW(ntisEdit, ntisSeconds.c_str());
+            SendMessageW(freshnessSlider, TBM_SETPOS, TRUE, server->FusedCongestionFreshnessMinutes());
             SendMessageW(stale, BM_SETCHECK, server->ServeStaleSourceCache() ? BST_CHECKED : BST_UNCHECKED, 0);
         }
+        SetServerPanelTab(hwnd, 0);
         UpdateServerSettingsWindow(hwnd);
         SetTimer(hwnd, 1, 1000, nullptr);
         return 0;
@@ -4229,12 +4912,108 @@ static LRESULT CALLBACK ServerSettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam
             UpdateServerSettingsWindow(hwnd);
             return 0;
         }
+        if (id == kServerUsersRefresh && HIWORD(wParam) == BN_CLICKED) {
+            RefreshServerPanelUsers(hwnd);
+            return 0;
+        }
+        if (id == kServerUsersCreate && HIWORD(wParam) == BN_CLICKED) {
+            if (RunServerCreateAccountWindow(hwnd, *server)) {
+                SetServerUserActionStatus(hwnd, L"Account created.");
+                RefreshServerPanelUsers(hwnd);
+            }
+            return 0;
+        }
+        if ((id == kServerUsersKick || id == kServerUsersMute || id == kServerUsersUnmute ||
+            id == kServerUsersDisable || id == kServerUsersEnable) && HIWORD(wParam) == BN_CLICKED)
+        {
+            const int index = SelectedServerPanelUserIndex(hwnd);
+            if (!state || index < 0 || static_cast<size_t>(index) >= state->users.size())
+                return 0;
+            const ServerPanelUser selected = state->users[static_cast<size_t>(index)];
+            if (id == kServerUsersDisable) {
+                const std::wstring prompt = L"Disable " + selected.username + L" and end all active sessions?";
+                if (MessageBoxW(hwnd, prompt.c_str(), L"ERC Tools Server", MB_YESNO | MB_ICONWARNING) != IDYES)
+                    return 0;
+            }
+
+            std::wstring error;
+            bool ok = false;
+            std::wstring action;
+            if (id == kServerUsersKick) {
+                action = L"Kicked";
+                ok = server->ServerConsoleKickUser(selected.username, error);
+            }
+            else if (id == kServerUsersMute) {
+                action = L"Muted";
+                ok = server->ServerConsoleSetMuted(selected.username, 15, true, error);
+            }
+            else if (id == kServerUsersUnmute) {
+                action = L"Unmuted";
+                ok = server->ServerConsoleSetMuted(selected.username, 0, false, error);
+            }
+            else if (id == kServerUsersDisable) {
+                action = L"Disabled";
+                ok = server->ServerConsoleSetUserActive(selected.username, false, error);
+            }
+            else if (id == kServerUsersEnable) {
+                action = L"Enabled";
+                ok = server->ServerConsoleSetUserActive(selected.username, true, error);
+            }
+            SetServerUserActionStatus(hwnd, ok
+                ? action + L" " + selected.username + L"."
+                : L"Action failed: " + error);
+            RefreshServerPanelUsers(hwnd);
+            return 0;
+        }
         break;
     }
 
-    case WM_TIMER:
-        UpdateServerSettingsWindow(hwnd);
+    case WM_NOTIFY: {
+        const auto* header = reinterpret_cast<NMHDR*>(lParam);
+        if (!header)
+            break;
+        if (header->idFrom == kServerSettingsTab && header->code == TCN_SELCHANGE) {
+            const int tab = TabCtrl_GetCurSel(header->hwndFrom);
+            SetServerPanelTab(hwnd, tab);
+            if (tab == 1)
+                RefreshServerPanelUsers(hwnd);
+            return 0;
+        }
+        if (header->idFrom == kServerUsersList && header->code == LVN_ITEMCHANGED) {
+            UpdateServerUserButtons(hwnd);
+            return 0;
+        }
+        break;
+    }
+
+    case WM_HSCROLL: {
+        auto* state = reinterpret_cast<ServerSettingsWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        ErcServer* server = state ? state->server : nullptr;
+        HWND slider = GetDlgItem(hwnd, kServerSettingsFusedFreshnessSlider);
+        if (!server || reinterpret_cast<HWND>(lParam) != slider)
+            break;
+        const uint32_t minutes = static_cast<uint32_t>(SendMessageW(slider, TBM_GETPOS, 0, 0));
+        if (HWND value = GetDlgItem(hwnd, kServerSettingsFusedFreshnessValue)) {
+            const std::wstring text = std::to_wstring(minutes) + L" minutes";
+            SetWindowTextW(value, text.c_str());
+        }
+        const int scrollCode = LOWORD(wParam);
+        if (scrollCode != TB_THUMBTRACK && !server->SetFusedCongestionFreshnessMinutes(minutes)) {
+            MessageBoxW(hwnd, L"The NTIS receiver did not accept the freshness setting.", L"ERC Tools Server", MB_OK | MB_ICONWARNING);
+            UpdateServerSettingsWindow(hwnd);
+        }
         return 0;
+    }
+
+    case WM_TIMER: {
+        UpdateServerSettingsWindow(hwnd);
+        auto* state = reinterpret_cast<ServerSettingsWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (state && state->activeTab == 1 && ++state->userRefreshTick >= 2) {
+            state->userRefreshTick = 0;
+            RefreshServerPanelUsers(hwnd);
+        }
+        return 0;
+    }
 
     case WM_DESTROY: {
         KillTimer(hwnd, 1);
@@ -4251,6 +5030,8 @@ static void RunServerSettingsWindow(ErcServer& server)
 {
     constexpr const wchar_t* className = L"ERCToolsServerSettingsWindow";
     HINSTANCE instance = GetModuleHandleW(nullptr);
+    INITCOMMONCONTROLSEX commonControls{ sizeof(commonControls), ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES };
+    InitCommonControlsEx(&commonControls);
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = ServerSettingsWndProc;
@@ -4264,12 +5045,12 @@ static void RunServerSettingsWindow(ErcServer& server)
     HWND hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW,
         className,
-        L"ERC Tools Server Settings",
+        L"ERC Tools Server",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        650,
-        280,
+        715,
+        415,
         nullptr,
         nullptr,
         instance,

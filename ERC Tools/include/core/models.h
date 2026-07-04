@@ -36,6 +36,11 @@ struct TrafficAlert
     double longitude = 0.0;
     bool hasLocation = false;
     bool excluded = false;
+    bool unresolved = false;
+    bool networkResolved = false;
+    bool trafficEnglandEligible = true;
+    bool trafficEnglandUnplanned = true;
+    bool trafficEnglandVisible = true;
 };
 
 struct IncidentExclusion

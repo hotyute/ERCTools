@@ -998,6 +998,17 @@ TrafficAlert ParseAlertObject(const json& obj)
             });
     a.eventType = NormalizeAlertDescription(a.eventType);
 
+    TryGetBoolByKeys(*props, { "unresolved", "unresolvedSource" }, a.unresolved) ||
+        TryGetBoolByKeys(obj, { "unresolved", "unresolvedSource" }, a.unresolved);
+    TryGetBoolByKeys(*props, { "networkResolved" }, a.networkResolved) ||
+        TryGetBoolByKeys(obj, { "networkResolved" }, a.networkResolved);
+    TryGetBoolByKeys(*props, { "trafficEnglandEligible" }, a.trafficEnglandEligible) ||
+        TryGetBoolByKeys(obj, { "trafficEnglandEligible" }, a.trafficEnglandEligible);
+    TryGetBoolByKeys(*props, { "trafficEnglandUnplanned" }, a.trafficEnglandUnplanned) ||
+        TryGetBoolByKeys(obj, { "trafficEnglandUnplanned" }, a.trafficEnglandUnplanned);
+    TryGetBoolByKeys(*props, { "trafficEnglandVisible" }, a.trafficEnglandVisible) ||
+        TryGetBoolByKeys(obj, { "trafficEnglandVisible" }, a.trafficEnglandVisible);
+
     a.updatedText = PickDateText(*props, { "updated", "lastUpdated", "lastUpdatedTime", "lastUpdatedTimestamp", "timestamp", "created", "published", "last_update" });
     if (a.updatedText.empty())
         a.updatedText = PickDateText(obj, { "updated", "lastUpdated", "lastUpdatedTime", "lastUpdatedTimestamp", "timestamp", "created", "published", "last_update" });

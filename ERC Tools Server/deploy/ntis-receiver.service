@@ -10,6 +10,10 @@ Group=erc-ntis
 Environment=NTIS_BIND_HOST=127.0.0.1
 Environment=NTIS_BIND_PORT=18080
 Environment=NTIS_DATA_DIR=/var/lib/erc-tools/ntis
+Environment=NTIS_FUSED_CONGESTION_MAX_AGE_SECONDS=600
+# Optional overrides for the National Highways public Network Model Link layer.
+Environment=NTIS_NETWORK_MODEL_SEARCH_METRES=2500
+Environment=NTIS_NETWORK_MODEL_CACHE_DAYS=7
 ExecStart=/usr/bin/python3 /opt/erc-tools/ntis_receiver.py
 Restart=on-failure
 RestartSec=3

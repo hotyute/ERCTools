@@ -47,6 +47,12 @@ This only bypasses ODBC for account creation. `ERC Tools Server.exe` still needs
 
 The preferred online road source is the National Highways NTIS Event Data push feed. The hardened receiver in `deploy/ntis_receiver.py` stores every DATEX II publication, merges overlapping full-refresh partitions by stable record id, applies incremental lifecycle updates, and exposes a compact current snapshot on localhost. The ERC Tools Server polls that local snapshot and advances the client-facing source generation only when its contents change.
 
+The receiver recreates the former public Traffic England Alerts contract. **Unplanned Only** contains current, confirmed, non-completed `INCIDENT` and `CONGESTION` records with a general-public presentation and a resolved Strategic Road Network identity. **All Events** additionally includes the other Traffic England categories and preserves the former public-page exception for unconfirmed roadworks. Raw NTIS records remain in the internal snapshot with explicit eligibility flags, but do not leak into the default map, side panel, or notification checks.
+
+Sensor-derived `Fused Traffic Data` congestion is a rolling publication: NTIS assigns a new event id to replacement samples instead of ending the previous id. The receiver therefore uses the DATEX II network-location references as the stable identity, retains only the newest sample for each location, and expires samples after 10 minutes by default. The server settings panel can adjust this evidence-based compatibility window from 2 to 10 minutes while running; the receiver persists the selected value. `NTIS_FUSED_CONGESTION_MAX_AGE_SECONDS` supplies the initial default for a fresh receiver database.
+
+Events whose public text does not contain a road number are tagged as source-unresolved. The receiver resolves their coordinates asynchronously against the National Highways Network Model Link layer and caches the result for seven days. The same lookup refines ambiguous route names, including upgrading `A1` to `A1(M)` where the Network Model identifies the motorway section. A genuine Network Model push publication invalidates the cached matches. The client hides source-unresolved incidents by default; users can include successfully resolved records from **Roads > Incident Filters > Show unresolved incidents**.
+
 ```json
 {
   "ntisEventSnapshotUrl": "http://127.0.0.1:18080/internal/events",

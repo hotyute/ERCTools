@@ -7,6 +7,21 @@
 #include "data/parsers/parsing.h"
 #include "core/util.h"
 
+namespace
+{
+std::wstring TrafficEnglandUpdatedText(const std::wstring& value)
+{
+    if (value.size() >= 19 &&
+        value[4] == L'-' && value[7] == L'-' &&
+        (value[10] == L'T' || value[10] == L' ') &&
+        value[13] == L':' && value[16] == L':')
+    {
+        return value.substr(0, 10) + L" " + value.substr(11, 8);
+    }
+    return value;
+}
+}
+
 bool ParseNtisTrafficSnapshot(
     const std::string& text,
     bool includePlanned,
@@ -38,18 +53,22 @@ bool ParseNtisTrafficSnapshot(
         for (const json& item : root["alerts"]) {
             if (!item.is_object())
                 continue;
-            if (!includePlanned && item.value("planned", false))
-                continue;
-
             TrafficAlert alert = ParseAlertObject(item);
+            alert.updatedText = TrafficEnglandUpdatedText(alert.updatedText);
+            if (!includePlanned && !alert.trafficEnglandUnplanned)
+                continue;
             if (alert.id.empty() || !seenIds.insert(alert.id).second)
                 continue;
             alertsOut.push_back(std::move(alert));
         }
 
         const unsigned long long generation = root.value("generation", 0ull);
-        statusOut = L"National Highways NTIS: " + std::to_wstring(alertsOut.size()) +
-            L" current incident(s)";
+        const size_t publicCount = root.value("trafficEnglandPublicCount", alertsOut.size());
+        const size_t currentRecordCount = root.value("currentRecordCount", alertsOut.size());
+        statusOut = L"National Highways NTIS: " + std::to_wstring(publicCount) +
+            L" Traffic England-compatible public incident(s)";
+        if (currentRecordCount != publicCount)
+            statusOut += L" from " + std::to_wstring(currentRecordCount) + L" current NTIS record(s)";
         if (generation > 0)
             statusOut += L" (snapshot " + std::to_wstring(generation) + L")";
         statusOut += L".";
