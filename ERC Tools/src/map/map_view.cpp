@@ -304,6 +304,7 @@ public:
     using PanelCloseCallback = std::function<void(const std::wstring& panelName)>;
     using MapDisplayModeCallback = std::function<void(bool displayWorldMap)>;
     using IrelandVisibilityCallback = std::function<void(bool visible)>;
+    using OverlayPositionsChangedCallback = std::function<void(const MapOverlayPositions& positions)>;
 
     bool Create(HWND parent, int x, int y, int w, int h)
     {
@@ -452,6 +453,11 @@ public:
     void SetIrelandVisibilityCallback(IrelandVisibilityCallback cb)
     {
         m_onIrelandVisibility = std::move(cb);
+    }
+
+    void SetOverlayPositionsChangedCallback(OverlayPositionsChangedCallback cb)
+    {
+        m_onOverlayPositionsChanged = std::move(cb);
     }
 
     void SetChatClearEnabled(bool enabled)
@@ -786,6 +792,64 @@ public:
         else
             KillTimer(m_hwnd, kCommsIndicatorPulseTimer);
         Invalidate();
+    }
+
+    void SetOverlayPositions(const MapOverlayPositions& positions)
+    {
+        m_toolbarPanelOffsetX = positions.mapControlsX;
+        m_toolbarPanelOffsetY = positions.mapControlsY;
+        m_countdownPanelOffsetX = positions.countdownX;
+        m_countdownPanelOffsetY = positions.countdownY;
+        m_usersPanelOffsetX = positions.usersX;
+        m_usersPanelOffsetY = positions.usersY;
+        m_privateChatOffsetX = positions.privateChatX;
+        m_privateChatOffsetY = positions.privateChatY;
+        m_responderChatOffsetX = positions.responderChatX;
+        m_responderChatOffsetY = positions.responderChatY;
+        m_notificationHistoryCollapsed = positions.notificationHistoryCollapsed;
+        m_usersPanelCollapsed = positions.usersCollapsed;
+        m_responderChatCollapsed = positions.responderChatCollapsed;
+        m_notificationHistoryOpenProgress =
+            m_showNotificationHistory && !m_notificationHistoryCollapsed ? 1.0f : 0.0f;
+        m_usersPanelOpenProgress = m_showUsersPanel && !m_usersPanelCollapsed ? 1.0f : 0.0f;
+        m_responderChatOpenProgress = m_responderChatCollapsed ? 0.0f : 1.0f;
+
+        // Restored state must supersede visibility animations started during setup.
+        m_notificationHistoryAnimationStart = m_notificationHistoryOpenProgress;
+        m_notificationHistoryAnimationTarget = m_notificationHistoryOpenProgress;
+        m_notificationHistoryAnimating = false;
+        m_usersPanelAnimationStart = m_usersPanelOpenProgress;
+        m_usersPanelAnimationTarget = m_usersPanelOpenProgress;
+        m_usersPanelAnimating = false;
+        m_responderChatAnimationStart = m_responderChatOpenProgress;
+        m_responderChatAnimationTarget = m_responderChatOpenProgress;
+        m_responderChatAnimating = false;
+        Invalidate();
+    }
+
+    MapOverlayPositions OverlayPositions() const
+    {
+        MapOverlayPositions positions;
+        positions.mapControlsX = m_toolbarPanelOffsetX;
+        positions.mapControlsY = m_toolbarPanelOffsetY;
+        positions.countdownX = m_countdownPanelOffsetX;
+        positions.countdownY = m_countdownPanelOffsetY;
+        positions.usersX = m_usersPanelOffsetX;
+        positions.usersY = m_usersPanelOffsetY;
+        positions.privateChatX = m_privateChatOffsetX;
+        positions.privateChatY = m_privateChatOffsetY;
+        positions.responderChatX = m_responderChatOffsetX;
+        positions.responderChatY = m_responderChatOffsetY;
+        positions.notificationHistoryCollapsed = m_notificationHistoryCollapsed;
+        positions.usersCollapsed = m_usersPanelCollapsed;
+        positions.responderChatCollapsed = m_responderChatCollapsed;
+        return positions;
+    }
+
+    void NotifyOverlayPositionsChanged() const
+    {
+        if (m_onOverlayPositionsChanged)
+            m_onOverlayPositionsChanged(OverlayPositions());
     }
 
     void SetCountdownPresets(const std::array<std::wstring, 3>& presets)
@@ -2472,7 +2536,7 @@ private:
     {
         const float left = 18.0f + m_toolbarPanelOffsetX;
         const float top = 18.0f + m_toolbarPanelOffsetY;
-        return D2D1::RectF(left, top, left + 274.0f, top + 178.0f);
+        return AvoidActiveNotification(D2D1::RectF(left, top, left + 274.0f, top + 178.0f));
     }
 
     D2D1_RECT_F BuildToolbarCloseButtonRect() const
@@ -3618,6 +3682,7 @@ private:
             m_dragging = false;
             m_interactivePan = false;
             KillTimer(m_hwnd, kInteractionIdleTimer);
+            NotifyOverlayPositionsChanged();
             Invalidate();
             return;
         }
@@ -3628,6 +3693,7 @@ private:
             m_dragging = false;
             m_interactivePan = false;
             KillTimer(m_hwnd, kInteractionIdleTimer);
+            NotifyOverlayPositionsChanged();
             Invalidate();
             return;
         }
@@ -3638,6 +3704,7 @@ private:
             m_dragging = false;
             m_interactivePan = false;
             KillTimer(m_hwnd, kInteractionIdleTimer);
+            NotifyOverlayPositionsChanged();
             Invalidate();
             return;
         }
@@ -3648,6 +3715,7 @@ private:
             m_dragging = false;
             m_interactivePan = false;
             KillTimer(m_hwnd, kInteractionIdleTimer);
+            NotifyOverlayPositionsChanged();
             Invalidate();
             return;
         }
@@ -3658,6 +3726,7 @@ private:
             m_dragging = false;
             m_interactivePan = false;
             KillTimer(m_hwnd, kInteractionIdleTimer);
+            NotifyOverlayPositionsChanged();
             Invalidate();
             return;
         }
@@ -5765,6 +5834,7 @@ private:
             ClearOverlayInputFocus();
             m_usersPanelCollapsed = !m_usersPanelCollapsed;
             StartUsersPanelAnimation(m_usersPanelCollapsed ? 0.0f : 1.0f);
+            NotifyOverlayPositionsChanged();
             Invalidate();
             return true;
         }
@@ -6408,6 +6478,7 @@ private:
             if (m_responderChatCollapsed)
                 ClearOverlayInputFocus();
             StartResponderChatAnimation(m_responderChatCollapsed ? 0.0f : 1.0f);
+            NotifyOverlayPositionsChanged();
             Invalidate();
             return true;
         }
@@ -6996,6 +7067,7 @@ private:
             ClearOverlayInputFocus();
             m_notificationHistoryCollapsed = !m_notificationHistoryCollapsed;
             StartNotificationHistoryAnimation(m_notificationHistoryCollapsed ? 0.0f : 1.0f);
+            NotifyOverlayPositionsChanged();
             Invalidate();
             return true;
         }
@@ -10015,6 +10087,7 @@ private:
     PanelCloseCallback m_onPanelClose;
     MapDisplayModeCallback m_onMapDisplayMode;
     IrelandVisibilityCallback m_onIrelandVisibility;
+    OverlayPositionsChangedCallback m_onOverlayPositionsChanged;
 
     int m_zoom = kDefaultZoom;
     double m_centerLat = kDefaultCenterLat;
@@ -10371,6 +10444,11 @@ void MapView::SetIrelandVisibilityCallback(IrelandVisibilityCallback cb)
     m_impl->SetIrelandVisibilityCallback(std::move(cb));
 }
 
+void MapView::SetOverlayPositionsChangedCallback(OverlayPositionsChangedCallback cb)
+{
+    m_impl->SetOverlayPositionsChangedCallback(std::move(cb));
+}
+
 void MapView::SetChatClearEnabled(bool enabled)
 {
     m_impl->SetChatClearEnabled(enabled);
@@ -10547,6 +10625,16 @@ void MapView::SetCountdownVisible(bool visible)
 void MapView::SetCommsIndicatorVisible(bool visible)
 {
     m_impl->SetCommsIndicatorVisible(visible);
+}
+
+void MapView::SetOverlayPositions(const MapOverlayPositions& positions)
+{
+    m_impl->SetOverlayPositions(positions);
+}
+
+MapOverlayPositions MapView::OverlayPositions() const
+{
+    return m_impl->OverlayPositions();
 }
 
 void MapView::SetCountdownPresets(const std::array<std::wstring, 3>& presets)

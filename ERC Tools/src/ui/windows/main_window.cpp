@@ -2486,6 +2486,8 @@ private:
         case WM_DESTROY:
             LogoutOnlineSession(L"client_destroyed");
             g_appQuitting.store(true);
+            if (m_map.Hwnd())
+                m_mapOverlayPositions = m_map.OverlayPositions();
             SaveSettings();
             RemoveNotificationIcon();
             KillTimer(m_hwnd, kAlertRefreshTimerId);
@@ -2764,6 +2766,10 @@ private:
             SaveSettings();
             SetStatusText(visible ? L"Ireland depiction enabled." : L"Ireland depiction hidden.");
             });
+        m_map.SetOverlayPositionsChangedCallback([this](const MapOverlayPositions& positions) {
+            m_mapOverlayPositions = positions;
+            SaveSettings();
+            });
         m_map.SetChatClearEnabled(CanClearResponderChat());
         m_map.SetNotificationPolygons(m_incidentNotificationRegions);
         m_map.SetNotificationPolygonsVisible(m_showIncidentNotificationRegionPolygons);
@@ -2785,6 +2791,7 @@ private:
         m_map.SetCountdownPresets(m_countdownPresets);
         m_map.SetCountdownVisible(m_showCountdownTimer);
         m_map.SetCommsIndicatorVisible(m_showCommsIndicator);
+        m_map.SetOverlayPositions(m_mapOverlayPositions);
         m_map.SetNotificationAvoidanceEnabled(m_avoidOverlaysForNotifications);
         ApplySoundSettings();
         RenderChatHistory();
@@ -3525,10 +3532,42 @@ private:
             readString("trafficScotlandIncidentsUrl", m_trafficScotlandIncidentsUrl);
             m_periodicRefreshEnabled = false;
             readBool("showNotificationHistory", m_showNotificationHistory);
+            readBool("showUsersOverlay", m_showUsersOverlay);
             readBool("showFpsCounter", m_showFpsCounter);
             readBool("showMapControls", m_showMapControls);
             readBool("showCountdownTimer", m_showCountdownTimer);
             readBool("showCommsIndicator", m_showCommsIndicator);
+            {
+                auto positionsIt = settings->find("mapOverlayPositions");
+                if (positionsIt != settings->end() && positionsIt->is_object()) {
+                    auto readPosition = [&](const char* key, float& target) {
+                        auto it = positionsIt->find(key);
+                        if (it != positionsIt->end() && it->is_number()) {
+                            const double value = it->get<double>();
+                            if (std::isfinite(value))
+                                target = static_cast<float>(value);
+                        }
+                    };
+                    auto readCollapsed = [&](const char* key, bool& target) {
+                        auto it = positionsIt->find(key);
+                        if (it != positionsIt->end() && it->is_boolean())
+                            target = it->get<bool>();
+                    };
+                    readPosition("mapControlsX", m_mapOverlayPositions.mapControlsX);
+                    readPosition("mapControlsY", m_mapOverlayPositions.mapControlsY);
+                    readPosition("countdownX", m_mapOverlayPositions.countdownX);
+                    readPosition("countdownY", m_mapOverlayPositions.countdownY);
+                    readPosition("usersX", m_mapOverlayPositions.usersX);
+                    readPosition("usersY", m_mapOverlayPositions.usersY);
+                    readPosition("privateChatX", m_mapOverlayPositions.privateChatX);
+                    readPosition("privateChatY", m_mapOverlayPositions.privateChatY);
+                    readPosition("responderChatX", m_mapOverlayPositions.responderChatX);
+                    readPosition("responderChatY", m_mapOverlayPositions.responderChatY);
+                    readCollapsed("notificationHistoryCollapsed", m_mapOverlayPositions.notificationHistoryCollapsed);
+                    readCollapsed("usersCollapsed", m_mapOverlayPositions.usersCollapsed);
+                    readCollapsed("responderChatCollapsed", m_mapOverlayPositions.responderChatCollapsed);
+                }
+            }
             {
                 auto it = settings->find("countdownPresets");
                 if (it != settings->end() && it->is_array()) {
@@ -4084,10 +4123,26 @@ private:
             settings["trafficScotlandEnabled"] = m_trafficScotlandEnabled;
             settings["trafficScotlandIncidentsUrl"] = WideToUtf8(m_trafficScotlandIncidentsUrl);
             settings["showNotificationHistory"] = m_showNotificationHistory;
+            settings["showUsersOverlay"] = m_showUsersOverlay;
             settings["showFpsCounter"] = m_showFpsCounter;
             settings["showMapControls"] = m_showMapControls;
             settings["showCountdownTimer"] = m_showCountdownTimer;
             settings["showCommsIndicator"] = m_showCommsIndicator;
+            settings["mapOverlayPositions"] = {
+                { "mapControlsX", m_mapOverlayPositions.mapControlsX },
+                { "mapControlsY", m_mapOverlayPositions.mapControlsY },
+                { "countdownX", m_mapOverlayPositions.countdownX },
+                { "countdownY", m_mapOverlayPositions.countdownY },
+                { "usersX", m_mapOverlayPositions.usersX },
+                { "usersY", m_mapOverlayPositions.usersY },
+                { "privateChatX", m_mapOverlayPositions.privateChatX },
+                { "privateChatY", m_mapOverlayPositions.privateChatY },
+                { "responderChatX", m_mapOverlayPositions.responderChatX },
+                { "responderChatY", m_mapOverlayPositions.responderChatY },
+                { "notificationHistoryCollapsed", m_mapOverlayPositions.notificationHistoryCollapsed },
+                { "usersCollapsed", m_mapOverlayPositions.usersCollapsed },
+                { "responderChatCollapsed", m_mapOverlayPositions.responderChatCollapsed }
+                };
             settings["countdownPresets"] = json::array({
                 WideToUtf8(m_countdownPresets[0]),
                 WideToUtf8(m_countdownPresets[1]),
@@ -13389,6 +13444,7 @@ private:
         UpdateViewMenu();
         m_map.SetNotificationHistoryVisible(m_showNotificationHistory);
         RenderNotificationHistory();
+        m_mapOverlayPositions = m_map.OverlayPositions();
         SaveSettings();
     }
 
@@ -13468,6 +13524,8 @@ private:
         RenderOnlineUsers();
         if (m_showUsersOverlay)
             PollServerAsync();
+        m_mapOverlayPositions = m_map.OverlayPositions();
+        SaveSettings();
     }
 
     void ToggleShowEarthquakes()
@@ -16374,6 +16432,7 @@ private:
     bool m_showMapControls = true;
     bool m_showCountdownTimer = false;
     bool m_showCommsIndicator = true;
+    MapOverlayPositions m_mapOverlayPositions;
     std::array<std::wstring, 3> m_countdownPresets{ L"05:00", L"10:00", L"15:00" };
     bool m_avoidOverlaysForNotifications = true;
     bool m_soundCuesEnabled = true;

@@ -7,6 +7,23 @@
 #include "core/common.h"
 #include "core/models.h"
 
+struct MapOverlayPositions
+{
+    float mapControlsX = 0.0f;
+    float mapControlsY = 0.0f;
+    float countdownX = 0.0f;
+    float countdownY = 0.0f;
+    float usersX = 0.0f;
+    float usersY = 0.0f;
+    float privateChatX = 0.0f;
+    float privateChatY = 0.0f;
+    float responderChatX = 0.0f;
+    float responderChatY = 0.0f;
+    bool notificationHistoryCollapsed = false;
+    bool usersCollapsed = false;
+    bool responderChatCollapsed = false;
+};
+
 class MapView
 {
 public:
@@ -38,6 +55,7 @@ public:
     using PanelCloseCallback = std::function<void(const std::wstring& panelName)>;
     using MapDisplayModeCallback = std::function<void(bool displayWorldMap)>;
     using IrelandVisibilityCallback = std::function<void(bool visible)>;
+    using OverlayPositionsChangedCallback = std::function<void(const MapOverlayPositions& positions)>;
 
     MapView();
     ~MapView();
@@ -74,6 +92,7 @@ public:
     void SetPanelCloseCallback(PanelCloseCallback cb);
     void SetMapDisplayModeCallback(MapDisplayModeCallback cb);
     void SetIrelandVisibilityCallback(IrelandVisibilityCallback cb);
+    void SetOverlayPositionsChangedCallback(OverlayPositionsChangedCallback cb);
     void SetChatClearEnabled(bool enabled);
     void SetAlerts(const std::vector<TrafficAlert>& alerts);
     void SetIncidentOverlayVisible(bool visible);
@@ -112,6 +131,8 @@ public:
     void SetToolbarVisible(bool visible);
     void SetCountdownVisible(bool visible);
     void SetCommsIndicatorVisible(bool visible);
+    void SetOverlayPositions(const MapOverlayPositions& positions);
+    MapOverlayPositions OverlayPositions() const;
     void SetCountdownPresets(const std::array<std::wstring, 3>& presets);
     void SetNotificationAvoidanceEnabled(bool enabled);
     void SetActiveNotification(const AppNotification& notification);
