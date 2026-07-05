@@ -12,6 +12,7 @@
 
 #include "net/binary_protocol.h"
 #include "core/util.h"
+#include "../../../shared/payload_codec.h"
 
 #include <atomic>
 #include <chrono>
@@ -45,6 +46,7 @@ constexpr uint16_t kOpAddIncidentExclusion = 16;
 constexpr uint16_t kOpRemoveIncidentExclusion = 17;
 constexpr uint16_t kOpFetchSourceBundle = 18;
 constexpr uint16_t kOpWaitSourceBundle = 19;
+constexpr uint16_t kOpUnifiedSync = 20;
 
 static void WriteU16(std::vector<BYTE>& out, uint16_t value)
 {
@@ -293,6 +295,14 @@ static bool ExchangeFrame(
     std::vector<BYTE>& responsePayloadOut,
     std::wstring& errorOut)
 {
+    static std::mutex persistentSyncMutex;
+    static SOCKET persistentSyncSocket = INVALID_SOCKET;
+    static std::wstring persistentSyncServer;
+    std::unique_lock<std::mutex> persistentLock(persistentSyncMutex, std::defer_lock);
+    const bool persistent = opcode == kOpUnifiedSync;
+    if (persistent)
+        persistentLock.lock();
+
     protocolAvailableOut = false;
     statusOut = 0;
     responsePayloadOut.clear();
@@ -310,34 +320,59 @@ static bool ExchangeFrame(
     if (!ParseServerEndpoint(serverBaseUrl, endpoint, errorOut))
         return false;
 
-    addrinfoW hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    std::wstring port = std::to_wstring(endpoint.port);
-    addrinfoW* results = nullptr;
-    if (GetAddrInfoW(endpoint.host.c_str(), port.c_str(), &hints, &results) != 0 || !results) {
-        errorOut = L"Could not resolve collaboration server.";
-        return false;
-    }
-
     SOCKET sock = INVALID_SOCKET;
-    for (addrinfoW* it = results; it; it = it->ai_next) {
-        sock = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
-        if (sock == INVALID_SOCKET)
-            continue;
-        DWORD timeout = (opcode == kOpFetchSourceBundle || opcode == kOpWaitSourceBundle) ? 90000 : (opcode == kOpPoll ? 30000 : 2500);
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        BOOL noDelay = TRUE;
-        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
-        if (connect(sock, it->ai_addr, static_cast<int>(it->ai_addrlen)) == 0)
-            break;
-        closesocket(sock);
-        sock = INVALID_SOCKET;
+    if (persistent && persistentSyncSocket != INVALID_SOCKET && persistentSyncServer == serverBaseUrl) {
+        sock = persistentSyncSocket;
     }
-    FreeAddrInfoW(results);
+    else {
+        if (persistentSyncSocket != INVALID_SOCKET && persistent) {
+            shutdown(persistentSyncSocket, SD_BOTH);
+            closesocket(persistentSyncSocket);
+            persistentSyncSocket = INVALID_SOCKET;
+        }
+
+        addrinfoW hints{};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        std::wstring port = std::to_wstring(endpoint.port);
+        addrinfoW* results = nullptr;
+        if (GetAddrInfoW(endpoint.host.c_str(), port.c_str(), &hints, &results) != 0 || !results) {
+            errorOut = L"Could not resolve collaboration server.";
+            return false;
+        }
+
+        for (addrinfoW* it = results; it; it = it->ai_next) {
+            sock = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+            if (sock == INVALID_SOCKET)
+                continue;
+            DWORD timeout = (opcode == kOpFetchSourceBundle || opcode == kOpWaitSourceBundle || opcode == kOpUnifiedSync)
+                ? 90000
+                : (opcode == kOpPoll ? 30000 : 2500);
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+            BOOL noDelay = TRUE;
+            setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+            if (connect(sock, it->ai_addr, static_cast<int>(it->ai_addrlen)) == 0)
+                break;
+            closesocket(sock);
+            sock = INVALID_SOCKET;
+        }
+        FreeAddrInfoW(results);
+        if (persistent && sock != INVALID_SOCKET) {
+            persistentSyncSocket = sock;
+            persistentSyncServer = serverBaseUrl;
+        }
+    }
+
+    const auto closeTransport = [&]() {
+        shutdown(sock, SD_BOTH);
+        closesocket(sock);
+        if (persistent) {
+            persistentSyncSocket = INVALID_SOCKET;
+            persistentSyncServer.clear();
+        }
+    };
 
     if (sock == INVALID_SOCKET) {
         errorOut = L"Could not connect to collaboration server binary stream.";
@@ -351,13 +386,13 @@ static bool ExchangeFrame(
         ok = RecvExact(sock, header, sizeof(header));
 
     if (!ok) {
-        closesocket(sock);
+        closeTransport();
         errorOut = L"Binary collaboration transport did not receive a complete response.";
         return false;
     }
 
     if (std::memcmp(header, "ERCR", 4) != 0) {
-        closesocket(sock);
+        closeTransport();
         errorOut = L"Server does not support the binary collaboration protocol yet.";
         return false;
     }
@@ -368,20 +403,20 @@ static bool ExchangeFrame(
     statusOut = ReadU16Raw(header + 8);
     uint32_t payloadLen = ReadU32Raw(header + 10);
     if (version != kProtocolVersion || responseOpcode != opcode || payloadLen > kMaxBinaryPayload) {
-        closesocket(sock);
+        closeTransport();
         errorOut = L"Binary collaboration protocol response was invalid.";
         return false;
     }
 
     responsePayloadOut.resize(payloadLen);
     if (payloadLen > 0 && !RecvExact(sock, responsePayloadOut.data(), payloadLen)) {
-        closesocket(sock);
+        closeTransport();
         errorOut = L"Binary collaboration response ended early.";
         return false;
     }
 
-    shutdown(sock, SD_BOTH);
-    closesocket(sock);
+    if (!persistent)
+        closeTransport();
     return true;
 }
 
@@ -834,6 +869,126 @@ static bool ReadSourceBlobs(BinaryReader& reader, uint32_t blobCount, BinarySour
     return true;
 }
 
+static bool ReadCompressedSourceBlobs(
+    BinaryReader& reader,
+    uint32_t blobCount,
+    BinarySourceBundleResult& resultOut);
+
+struct CachedSourcePayload
+{
+    uint32_t generation = 0;
+    std::unordered_map<std::wstring, std::string> bodies;
+};
+
+static std::mutex g_sourcePayloadCacheMutex;
+static std::unordered_map<std::wstring, CachedSourcePayload> g_sourcePayloadCache;
+
+static std::wstring SourcePayloadCacheKey(const std::wstring& serverBaseUrl, const std::wstring& sourceType)
+{
+    return serverBaseUrl + L"|" + sourceType;
+}
+
+static void CacheFullSourcePayload(
+    const std::wstring& serverBaseUrl,
+    const std::wstring& sourceType,
+    const BinarySourceBundleResult& source)
+{
+    CachedSourcePayload cached;
+    cached.generation = source.generation;
+    for (const auto& blob : source.blobs) {
+        if (blob.ok)
+            cached.bodies[blob.name] = blob.body;
+    }
+    std::lock_guard<std::mutex> lock(g_sourcePayloadCacheMutex);
+    g_sourcePayloadCache[SourcePayloadCacheKey(serverBaseUrl, sourceType)] = std::move(cached);
+}
+
+static uint32_t ValidatedKnownGeneration(
+    const std::wstring& serverBaseUrl,
+    const std::wstring& sourceType,
+    uint32_t requestedGeneration)
+{
+    if (requestedGeneration == 0)
+        return 0;
+    std::lock_guard<std::mutex> lock(g_sourcePayloadCacheMutex);
+    const auto found = g_sourcePayloadCache.find(SourcePayloadCacheKey(serverBaseUrl, sourceType));
+    return found != g_sourcePayloadCache.end() && found->second.generation == requestedGeneration
+        ? requestedGeneration
+        : 0;
+}
+
+static bool MaterializeSourceDelta(
+    const std::wstring& serverBaseUrl,
+    const std::wstring& sourceType,
+    BinarySourceBundleResult& source,
+    std::wstring& errorOut)
+{
+    if (!source.delta) {
+        CacheFullSourcePayload(serverBaseUrl, sourceType, source);
+        return true;
+    }
+
+    std::lock_guard<std::mutex> lock(g_sourcePayloadCacheMutex);
+    const auto cacheIt = g_sourcePayloadCache.find(SourcePayloadCacheKey(serverBaseUrl, sourceType));
+    if (cacheIt == g_sourcePayloadCache.end() || cacheIt->second.generation != source.baseGeneration) {
+        g_sourcePayloadCache.erase(SourcePayloadCacheKey(serverBaseUrl, sourceType));
+        errorOut = L"Source delta did not match the local generation; a full snapshot is required.";
+        return false;
+    }
+
+    try {
+        for (BinarySourceBlob& blob : source.blobs) {
+            const auto bodyIt = cacheIt->second.bodies.find(blob.name);
+            if (!blob.ok || bodyIt == cacheIt->second.bodies.end()) {
+                errorOut = L"Source delta did not have a matching local payload.";
+                return false;
+            }
+
+            const json delta = json::parse(blob.body);
+            const json oldRoot = json::parse(bodyIt->second);
+            const std::string collection = delta.value("collection", "");
+            if (collection.empty() || !oldRoot.contains(collection) || !oldRoot[collection].is_array()) {
+                errorOut = L"Source delta collection was invalid.";
+                return false;
+            }
+
+            std::unordered_map<std::string, json> items;
+            for (const auto& item : oldRoot[collection]) {
+                if (item.is_object() && item.contains("id") && item["id"].is_string())
+                    items[item["id"].get<std::string>()] = item;
+            }
+            for (const auto& id : delta.value("removed", json::array())) {
+                if (id.is_string())
+                    items.erase(id.get<std::string>());
+            }
+            for (const auto& item : delta.value("upserts", json::array())) {
+                if (item.is_object() && item.contains("id") && item["id"].is_string())
+                    items[item["id"].get<std::string>()] = item;
+            }
+
+            json rebuilt = delta.value("root", json::object());
+            rebuilt[collection] = json::array();
+            for (const auto& id : delta.value("order", json::array())) {
+                if (!id.is_string())
+                    continue;
+                const auto item = items.find(id.get<std::string>());
+                if (item != items.end())
+                    rebuilt[collection].push_back(item->second);
+            }
+
+            blob.body = rebuilt.dump();
+            bodyIt->second = blob.body;
+        }
+        cacheIt->second.generation = source.generation;
+        source.delta = false;
+        return true;
+    }
+    catch (const std::exception& e) {
+        errorOut = L"Source delta could not be applied: " + Utf8ToWide(e.what());
+        return false;
+    }
+}
+
 bool BinaryFetchSourceBundle(
     const std::wstring& serverBaseUrl,
     const ClientSession& session,
@@ -879,6 +1034,7 @@ bool BinaryFetchSourceBundle(
     if (!ReadSourceBlobs(reader, blobCount, resultOut))
         return false;
     reader.U32(resultOut.generation);
+    CacheFullSourcePayload(serverBaseUrl, sourceType, resultOut);
 
     return true;
 }
@@ -937,6 +1093,173 @@ bool BinaryWaitSourceBundle(
     resultOut.fromCache = fromCache != 0;
     if (!ReadSourceBlobs(reader, blobCount, resultOut))
         return false;
+    return true;
+}
+
+static bool ReadCompressedSourceBlobs(
+    BinaryReader& reader,
+    uint32_t blobCount,
+    BinarySourceBundleResult& resultOut)
+{
+    resultOut.blobs.reserve(blobCount);
+    for (uint32_t i = 0; i < blobCount; ++i) {
+        BinarySourceBlob blob;
+        uint32_t ok = 0;
+        uint32_t method = 0;
+        uint32_t originalSize = 0;
+        std::string encodedText;
+        if (!reader.Text(blob.name) || !reader.Text(blob.url) || !reader.U32(ok) ||
+            !reader.U32(method) || !reader.U32(originalSize) ||
+            !reader.Bytes(encodedText) || !reader.Text(blob.error))
+        {
+            resultOut.error = L"Compressed source update was incomplete.";
+            return false;
+        }
+
+        std::vector<unsigned char> encoded(encodedText.begin(), encodedText.end());
+        if (!erc::payload::Decode(method, originalSize, encoded, blob.body)) {
+            resultOut.error = L"Compressed source update could not be decoded.";
+            return false;
+        }
+        blob.ok = ok != 0;
+        resultOut.blobs.push_back(std::move(blob));
+    }
+    return true;
+}
+
+bool BinaryUnifiedSync(
+    const std::wstring& serverBaseUrl,
+    const ClientSession& session,
+    uint32_t knownCollaborationVersion,
+    const std::vector<BinarySourceSubscription>& subscriptions,
+    BinaryUnifiedSyncResult& resultOut)
+{
+    static std::atomic<uint32_t> lastPingMs{ 0 };
+    BinaryWriter request;
+    WriteSessionToken(request, session);
+    request.U32(knownCollaborationVersion);
+    request.U32(lastPingMs.load(std::memory_order_acquire));
+    request.U32(static_cast<uint32_t>(subscriptions.size()));
+    for (const auto& subscription : subscriptions) {
+        request.Text(subscription.sourceType);
+        request.U32(ValidatedKnownGeneration(serverBaseUrl, subscription.sourceType, subscription.knownGeneration));
+        request.JsonText(subscription.options);
+    }
+
+    BinaryCallResult call;
+    std::vector<BYTE> payload;
+    const auto started = std::chrono::steady_clock::now();
+    if (!FinishCall(kOpUnifiedSync, request, call, payload, serverBaseUrl)) {
+        resultOut = {};
+        static_cast<BinaryCallResult&>(resultOut) = call;
+        return false;
+    }
+
+    resultOut = {};
+    static_cast<BinaryCallResult&>(resultOut) = call;
+    BinaryReader reader(payload);
+    uint32_t collaborationChanged = 0;
+    if (!reader.U32(resultOut.collaborationVersion) || !reader.U32(collaborationChanged)) {
+        resultOut.ok = false;
+        resultOut.error = L"Unified synchronization response was incomplete.";
+        return false;
+    }
+    resultOut.collaborationChanged = collaborationChanged != 0;
+
+    if (resultOut.collaborationChanged) {
+        uint32_t count = 0;
+        if (!reader.U32(count))
+            return false;
+        resultOut.chat.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            ChatMessage item;
+            if (!ReadChat(reader, item))
+                return false;
+            resultOut.chat.push_back(std::move(item));
+        }
+        if (!reader.U32(count))
+            return false;
+        resultOut.notes.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            MapNote item;
+            if (!ReadNote(reader, item))
+                return false;
+            resultOut.notes.push_back(std::move(item));
+        }
+        if (!reader.U32(count))
+            return false;
+        resultOut.users.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            OnlineUser item;
+            if (!ReadOnlineUser(reader, item))
+                return false;
+            resultOut.users.push_back(std::move(item));
+        }
+        if (!reader.U32(count))
+            return false;
+        resultOut.privateMessages.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            PrivateMessage item;
+            if (!ReadPrivateMessage(reader, item))
+                return false;
+            resultOut.privateMessages.push_back(std::move(item));
+        }
+        if (!reader.U32(count))
+            return false;
+        resultOut.incidentExclusions.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            IncidentExclusion item;
+            if (!ReadIncidentExclusion(reader, item))
+                return false;
+            resultOut.incidentExclusions.push_back(std::move(item));
+        }
+    }
+
+    uint32_t sourceCount = 0;
+    if (!reader.U32(sourceCount) || sourceCount > 16) {
+        resultOut.ok = false;
+        resultOut.error = L"Unified synchronization source list was invalid.";
+        return false;
+    }
+    resultOut.sources.reserve(sourceCount);
+    for (uint32_t i = 0; i < sourceCount; ++i) {
+        std::wstring sourceType;
+        BinarySourceBundleResult source;
+        uint32_t blobCount = 0;
+        uint32_t delta = 0;
+        if (!reader.Text(sourceType) || !reader.U32(source.generation) ||
+            !reader.U32(source.ageMs) || !reader.U32(delta) ||
+            !reader.U32(source.baseGeneration) || !reader.U32(blobCount) ||
+            !ReadCompressedSourceBlobs(reader, blobCount, source))
+        {
+            resultOut.ok = false;
+            if (resultOut.error.empty())
+                resultOut.error = source.error.empty() ? L"Unified source update was incomplete." : source.error;
+            return false;
+        }
+        source.ok = true;
+        source.protocolAvailable = true;
+        source.changed = true;
+        source.fromCache = true;
+        source.delta = delta != 0;
+        if (!MaterializeSourceDelta(serverBaseUrl, sourceType, source, resultOut.error)) {
+            resultOut.ok = false;
+            return false;
+        }
+        resultOut.sources.emplace_back(std::move(sourceType), std::move(source));
+    }
+    if (!reader.U32(resultOut.waitMs)) {
+        resultOut.ok = false;
+        resultOut.error = L"Unified synchronization timing data was missing.";
+        return false;
+    }
+
+    const uint32_t elapsedMs = static_cast<uint32_t>(std::min<long long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count(),
+        60000));
+    if (resultOut.waitMs < elapsedMs)
+        lastPingMs.store(std::max<uint32_t>(1u, elapsedMs - resultOut.waitMs), std::memory_order_release);
     return true;
 }
 

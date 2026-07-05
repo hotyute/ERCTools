@@ -329,6 +329,7 @@ enum class ServerSourceKind : uint32_t
 {
     None = 0,
     Roads,
+    TrafficScotland,
     Earthquakes,
     WeatherSystems,
     WeatherWarnings,
@@ -2807,11 +2808,13 @@ private:
         SetTimer(m_hwnd, kEarthquakeRefreshTimerId, 10 * 60 * 1000, nullptr);
         SetTimer(m_hwnd, kWeatherSystemsRefreshTimerId, 10 * 60 * 1000, nullptr);
 
-        RefreshFeedAsync();
-        FetchEarthquakesAsync(true);
-        FetchWeatherSystemsAsync(true);
-        FetchWeatherWarningsAsync(true);
-        FetchFloodsAsync(true);
+        if (!ShouldUseServerToFetchData()) {
+            RefreshFeedAsync();
+            FetchEarthquakesAsync(true);
+            FetchWeatherSystemsAsync(true);
+            FetchWeatherWarningsAsync(true);
+            FetchFloodsAsync(true);
+        }
         if (IsOnlineMode()) {
             PollServerAsync();
             CheckForClientUpdateAsync();
@@ -4581,11 +4584,13 @@ private:
     {
         m_serverSourceSyncEpoch.fetch_add(1, std::memory_order_acq_rel);
         m_roadsSourceGeneration = 0;
+        m_trafficScotlandSourceGeneration = 0;
         m_earthquakeSourceGeneration = 0;
         m_weatherSystemsSourceGeneration = 0;
         m_weatherWarningsSourceGeneration = 0;
         m_floodsSourceGeneration = 0;
         m_roadsSourceWaitInProgress.store(false);
+        m_trafficScotlandSourceWaitInProgress.store(false);
         m_earthquakeSourceWaitInProgress.store(false);
         m_weatherSystemsSourceWaitInProgress.store(false);
         m_weatherWarningsSourceWaitInProgress.store(false);
@@ -4596,6 +4601,7 @@ private:
     {
         m_serverSourceSyncEpoch.fetch_add(1, std::memory_order_acq_rel);
         m_roadsSourceWaitInProgress.store(false);
+        m_trafficScotlandSourceWaitInProgress.store(false);
         m_earthquakeSourceWaitInProgress.store(false);
         m_weatherSystemsSourceWaitInProgress.store(false);
         m_weatherWarningsSourceWaitInProgress.store(false);
@@ -4607,6 +4613,8 @@ private:
         switch (source) {
         case ServerSourceKind::Roads:
             return &m_roadsSourceWaitInProgress;
+        case ServerSourceKind::TrafficScotland:
+            return &m_trafficScotlandSourceWaitInProgress;
         case ServerSourceKind::Earthquakes:
             return &m_earthquakeSourceWaitInProgress;
         case ServerSourceKind::WeatherSystems:
@@ -4631,6 +4639,8 @@ private:
         switch (source) {
         case ServerSourceKind::Roads:
             return m_roadsSourceGeneration;
+        case ServerSourceKind::TrafficScotland:
+            return m_trafficScotlandSourceGeneration;
         case ServerSourceKind::Earthquakes:
             return m_earthquakeSourceGeneration;
         case ServerSourceKind::WeatherSystems:
@@ -4652,6 +4662,9 @@ private:
         switch (source) {
         case ServerSourceKind::Roads:
             m_roadsSourceGeneration = generation;
+            break;
+        case ServerSourceKind::TrafficScotland:
+            m_trafficScotlandSourceGeneration = generation;
             break;
         case ServerSourceKind::Earthquakes:
             m_earthquakeSourceGeneration = generation;
@@ -4675,6 +4688,8 @@ private:
         switch (source) {
         case ServerSourceKind::Roads:
             return L"roads";
+        case ServerSourceKind::TrafficScotland:
+            return L"traffic_scotland";
         case ServerSourceKind::Earthquakes:
             return L"earthquakes";
         case ServerSourceKind::WeatherSystems:
@@ -4693,11 +4708,11 @@ private:
         switch (source) {
         case ServerSourceKind::Roads: {
             return {
-                { "unplannedOnly", m_alertFilterUnplannedOnly },
-                { "trafficScotlandEnabled", m_trafficScotlandEnabled },
-                { "trafficScotlandIncidentsUrl", WideToUtf8(m_trafficScotlandIncidentsUrl) }
+                { "unplannedOnly", m_alertFilterUnplannedOnly }
             };
         }
+        case ServerSourceKind::TrafficScotland:
+            return { { "trafficScotlandIncidentsUrl", WideToUtf8(m_trafficScotlandIncidentsUrl) } };
         case ServerSourceKind::Earthquakes:
             return { { "url", WideToUtf8(EarthquakeQueryUrl()) } };
         case ServerSourceKind::WeatherSystems:
@@ -4737,10 +4752,122 @@ private:
             delete signal;
     }
 
+    static bool PostUnifiedSourceUpdate(
+        HWND hwnd,
+        ServerSourceKind source,
+        uint32_t epoch,
+        BinarySourceBundleResult bundle,
+        bool unplannedOnly,
+        std::wstring& errorOut)
+    {
+        errorOut.clear();
+        switch (source) {
+        case ServerSourceKind::Roads:
+        case ServerSourceKind::TrafficScotland: {
+            auto* result = new FeedResult{};
+            result->serverSourced = true;
+            result->serverSource = source;
+            result->serverGeneration = bundle.generation;
+            result->serverSyncEpoch = epoch;
+            std::wstring status;
+            const bool parseScotland = source == ServerSourceKind::TrafficScotland;
+            if (ParseRoadAlertsFromSourceBundle(bundle, parseScotland, unplannedOnly, result->alerts, status, errorOut)) {
+                result->ok = true;
+                result->error = status;
+                if (!PostMessageW(hwnd, WM_APP_FEED_READY, 0, reinterpret_cast<LPARAM>(result))) {
+                    delete result;
+                    return false;
+                }
+                return true;
+            }
+            delete result;
+            return false;
+        }
+        case ServerSourceKind::Earthquakes: {
+            auto* result = new EarthquakeResult{};
+            result->notify = true;
+            result->serverSourced = true;
+            result->serverSource = source;
+            result->serverGeneration = bundle.generation;
+            result->serverSyncEpoch = epoch;
+            try {
+                result->ok = ParseEarthquakesFromSourceBundle(bundle, result->events, errorOut);
+            }
+            catch (const std::exception& e) {
+                errorOut = L"Server earthquake parse failed: " + Utf8ToWide(e.what());
+            }
+            if (result->ok && PostMessageW(hwnd, WM_APP_EARTHQUAKE_READY, 0, reinterpret_cast<LPARAM>(result)))
+                return true;
+            delete result;
+            return false;
+        }
+        case ServerSourceKind::WeatherSystems: {
+            auto* result = new WeatherSystemsResult{};
+            result->notify = true;
+            result->serverSourced = true;
+            result->serverSource = source;
+            result->serverGeneration = bundle.generation;
+            result->serverSyncEpoch = epoch;
+            try {
+                result->ok = ParseWeatherSystemsFromSourceBundle(bundle, result->systems, result->statusText, errorOut);
+            }
+            catch (const std::exception& e) {
+                errorOut = L"Server weather systems parse failed: " + Utf8ToWide(e.what());
+            }
+            if (result->ok && PostMessageW(hwnd, WM_APP_WEATHER_READY, 0, reinterpret_cast<LPARAM>(result)))
+                return true;
+            delete result;
+            return false;
+        }
+        case ServerSourceKind::WeatherWarnings: {
+            auto* result = new WeatherWarningsResult{};
+            result->notify = true;
+            result->serverSourced = true;
+            result->serverSource = source;
+            result->serverGeneration = bundle.generation;
+            result->serverSyncEpoch = epoch;
+            try {
+                result->ok = ParseWeatherWarningsFromSourceBundle(bundle, result->warnings, result->statusText, errorOut);
+            }
+            catch (const std::exception& e) {
+                errorOut = L"Server weather warnings parse failed: " + Utf8ToWide(e.what());
+            }
+            if (result->ok && PostMessageW(hwnd, WM_APP_WEATHER_WARNINGS_READY, 0, reinterpret_cast<LPARAM>(result)))
+                return true;
+            delete result;
+            return false;
+        }
+        case ServerSourceKind::Floods: {
+            auto* result = new FloodsResult{};
+            result->notify = true;
+            result->serverSourced = true;
+            result->serverSource = source;
+            result->serverGeneration = bundle.generation;
+            result->serverSyncEpoch = epoch;
+            try {
+                result->ok = ParseFloodsFromSourceBundle(bundle, result->floods, result->statusText, errorOut);
+            }
+            catch (const std::exception& e) {
+                errorOut = L"Server floods parse failed: " + Utf8ToWide(e.what());
+            }
+            if (result->ok && PostMessageW(hwnd, WM_APP_FLOODS_READY, 0, reinterpret_cast<LPARAM>(result)))
+                return true;
+            delete result;
+            return false;
+        }
+        default:
+            errorOut = L"Unknown server source update.";
+            return false;
+        }
+    }
+
     void ScheduleServerSourceWait(ServerSourceKind source)
     {
         if (!ShouldUseServerToFetchData() || g_appQuitting.load() || !IsWindow(m_hwnd))
             return;
+
+        // Source changes now share the unified synchronization stream.
+        return;
 
         std::atomic_bool* flag = ServerSourceWaitFlag(source);
         if (!flag || flag->exchange(true))
@@ -4943,11 +5070,7 @@ private:
         const ClientSession session = m_session;
         const uint32_t serverSyncEpoch = m_serverSourceSyncEpoch.load(std::memory_order_acquire);
         const uint32_t requestedIntervalMs = useServerFetch ? 0u : (m_periodicRefreshEnabled ? m_refreshIntervalMs : 30000u);
-        json sourceOptions = {
-            { "unplannedOnly", unplannedOnly },
-            { "trafficScotlandEnabled", scotlandOptions.enabled },
-            { "trafficScotlandIncidentsUrl", WideToUtf8(scotlandOptions.incidentsUrl) }
-        };
+        json sourceOptions = { { "unplannedOnly", unplannedOnly } };
 
         ScheduleBackgroundTask([hwnd, url, unplannedOnly, scotlandOptions, useServerFetch, server, session, serverSyncEpoch, requestedIntervalMs, sourceOptions]() {
             auto* result = new FeedResult{};
@@ -4967,7 +5090,7 @@ private:
                     std::wstring brokerParseError;
                     if (ParseRoadAlertsFromSourceBundle(
                         bundle,
-                        scotlandOptions.enabled,
+                        false,
                         unplannedOnly,
                         result->alerts,
                         brokerStatus,
@@ -5070,13 +5193,27 @@ private:
 
         const bool feedOk = result->ok;
         const std::wstring feedWarning = result->error;
-        const size_t scotlandCount = static_cast<size_t>(std::count_if(
-            result->alerts.begin(),
-            result->alerts.end(),
-            [](const TrafficAlert& alert) {
-                return alert.id.rfind(L"traffic-scotland:", 0) == 0;
-            }));
-        m_allAlerts = result->alerts;
+        if (serverSourced && serverSource == ServerSourceKind::Roads) {
+            m_ntisAlerts = std::move(result->alerts);
+            m_allAlerts = m_ntisAlerts;
+            m_allAlerts.insert(m_allAlerts.end(), m_trafficScotlandAlerts.begin(), m_trafficScotlandAlerts.end());
+        }
+        else if (serverSourced && serverSource == ServerSourceKind::TrafficScotland) {
+            m_trafficScotlandAlerts = std::move(result->alerts);
+            m_allAlerts = m_ntisAlerts;
+            m_allAlerts.insert(m_allAlerts.end(), m_trafficScotlandAlerts.begin(), m_trafficScotlandAlerts.end());
+        }
+        else {
+            m_allAlerts = std::move(result->alerts);
+            m_ntisAlerts.clear();
+            m_trafficScotlandAlerts.clear();
+        }
+        const size_t scotlandCount = m_trafficScotlandAlerts.empty()
+            ? static_cast<size_t>(std::count_if(
+                m_allAlerts.begin(),
+                m_allAlerts.end(),
+                [](const TrafficAlert& alert) { return alert.id.rfind(L"traffic-scotland:", 0) == 0; }))
+            : m_trafficScotlandAlerts.size();
         DownloadMissingLaneImagesAsync(m_allAlerts);
         SortAlertsForCurrentOrder();
         for (TrafficAlert& alert : m_allAlerts)
@@ -6494,9 +6631,73 @@ private:
         std::wstring authHeaders = BearerAuthHeader(m_session);
         ClientSession session = m_session;
         uint32_t knownVersion = m_collaborationVersion;
-        ScheduleBackgroundTask([hwnd, server, authHeaders, session, knownVersion]() {
+        const uint32_t syncEpoch = m_serverSourceSyncEpoch.load(std::memory_order_acquire);
+        const bool unplannedOnly = m_alertFilterUnplannedOnly;
+        std::vector<BinarySourceSubscription> subscriptions;
+        const auto subscribe = [&](ServerSourceKind source) {
+            subscriptions.push_back({ ServerSourceType(source), ServerSourceGeneration(source), ServerSourceOptions(source) });
+        };
+        subscribe(ServerSourceKind::Roads);
+        if (m_trafficScotlandEnabled)
+            subscribe(ServerSourceKind::TrafficScotland);
+        subscribe(ServerSourceKind::Earthquakes);
+        subscribe(ServerSourceKind::WeatherSystems);
+        subscribe(ServerSourceKind::WeatherWarnings);
+        subscribe(ServerSourceKind::Floods);
+
+        ScheduleBackgroundTask([hwnd, server, authHeaders, session, knownVersion, syncEpoch, unplannedOnly, subscriptions = std::move(subscriptions)]() mutable {
             auto* result = new ServerResult{};
             result->action = ServerAction::Poll;
+
+            BinaryUnifiedSyncResult unified;
+            if (BinaryUnifiedSync(server, session, knownVersion, subscriptions, unified)) {
+                if (unified.collaborationChanged) {
+                    result->chat = std::move(unified.chat);
+                    result->notes = std::move(unified.notes);
+                    result->users = std::move(unified.users);
+                    result->privateMessages = std::move(unified.privateMessages);
+                    result->incidentExclusions = std::move(unified.incidentExclusions);
+                    result->chatOk = true;
+                    result->notesOk = true;
+                    result->usersOk = true;
+                    result->privateMessagesOk = true;
+                    result->incidentExclusionsOk = true;
+                }
+                result->collaborationVersion = unified.collaborationVersion;
+                result->ok = true;
+
+                for (auto& [sourceType, bundle] : unified.sources) {
+                    ServerSourceKind source = ServerSourceKind::None;
+                    if (sourceType == L"roads") source = ServerSourceKind::Roads;
+                    else if (sourceType == L"traffic_scotland") source = ServerSourceKind::TrafficScotland;
+                    else if (sourceType == L"earthquakes") source = ServerSourceKind::Earthquakes;
+                    else if (sourceType == L"weather_systems") source = ServerSourceKind::WeatherSystems;
+                    else if (sourceType == L"weather_warnings") source = ServerSourceKind::WeatherWarnings;
+                    else if (sourceType == L"floods") source = ServerSourceKind::Floods;
+
+                    std::wstring sourceError;
+                    if (source != ServerSourceKind::None &&
+                        !PostUnifiedSourceUpdate(hwnd, source, syncEpoch, std::move(bundle), unplannedOnly, sourceError) &&
+                        result->error.empty())
+                    {
+                        result->error = sourceError;
+                    }
+                }
+
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
+            if (unified.protocolAvailable) {
+                result->error = unified.error;
+                if (!g_appQuitting.load() && IsWindow(hwnd))
+                    PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
+                else
+                    delete result;
+                return;
+            }
 
             BinaryPollResult binary;
             if (BinaryPollCollaboration(server, session, knownVersion, binary)) {
@@ -9728,14 +9929,31 @@ private:
             m_trafficScotlandIncidentsUrl = NormalizeUrl(GetWindowTextString(m_trafficScotlandUrlEdit));
             SaveSettings();
             SetWindowTextSafe(m_trafficScotlandStatusLabel, L"Refreshing Traffic Scotland incidents...");
-            RefreshFeedAsync();
+            if (ShouldUseServerToFetchData()) {
+                StartServerSourceSyncEpoch();
+                PollServerAsync();
+            }
+            else {
+                RefreshFeedAsync();
+            }
             return;
         }
         if (id == IDC_TRAFFIC_SCOTLAND_ENABLED && code == BN_CLICKED) {
             m_trafficScotlandEnabled =
                 SendMessageW(m_trafficScotlandEnabledCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
             SaveSettings();
-            RefreshFeedAsync();
+            if (ShouldUseServerToFetchData()) {
+                if (!m_trafficScotlandEnabled) {
+                    m_trafficScotlandAlerts.clear();
+                    m_allAlerts = m_ntisAlerts;
+                    ApplyFilters(false);
+                }
+                StartServerSourceSyncEpoch();
+                PollServerAsync();
+            }
+            else {
+                RefreshFeedAsync();
+            }
             return;
         }
         if (id == IDC_TRAFFIC_SCOTLAND_URL && code == EN_KILLFOCUS) {
@@ -16345,6 +16563,8 @@ private:
     ClientSession m_session;
 
     std::vector<TrafficAlert> m_allAlerts;
+    std::vector<TrafficAlert> m_ntisAlerts;
+    std::vector<TrafficAlert> m_trafficScotlandAlerts;
     std::vector<TrafficAlert> m_filteredAlerts;
     std::vector<ChatMessage> m_chatMessages;
     std::vector<PrivateMessage> m_privateMessages;
@@ -16495,11 +16715,13 @@ private:
     std::atomic_bool m_floodsFetchInProgress{ false };
     std::atomic<uint32_t> m_serverSourceSyncEpoch{ 1 };
     std::atomic_bool m_roadsSourceWaitInProgress{ false };
+    std::atomic_bool m_trafficScotlandSourceWaitInProgress{ false };
     std::atomic_bool m_earthquakeSourceWaitInProgress{ false };
     std::atomic_bool m_weatherSystemsSourceWaitInProgress{ false };
     std::atomic_bool m_weatherWarningsSourceWaitInProgress{ false };
     std::atomic_bool m_floodsSourceWaitInProgress{ false };
     uint32_t m_roadsSourceGeneration = 0;
+    uint32_t m_trafficScotlandSourceGeneration = 0;
     uint32_t m_earthquakeSourceGeneration = 0;
     uint32_t m_weatherSystemsSourceGeneration = 0;
     uint32_t m_weatherWarningsSourceGeneration = 0;

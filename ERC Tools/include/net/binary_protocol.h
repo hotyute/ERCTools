@@ -50,9 +50,31 @@ struct BinarySourceBundleResult : BinaryCallResult
 {
     bool fromCache = false;
     bool changed = true;
+    bool delta = false;
     uint32_t ageMs = 0;
     uint32_t generation = 0;
+    uint32_t baseGeneration = 0;
     std::vector<BinarySourceBlob> blobs;
+};
+
+struct BinarySourceSubscription
+{
+    std::wstring sourceType;
+    uint32_t knownGeneration = 0;
+    json options = json::object();
+};
+
+struct BinaryUnifiedSyncResult : BinaryCallResult
+{
+    bool collaborationChanged = false;
+    uint32_t collaborationVersion = 0;
+    uint32_t waitMs = 0;
+    std::vector<ChatMessage> chat;
+    std::vector<MapNote> notes;
+    std::vector<OnlineUser> users;
+    std::vector<PrivateMessage> privateMessages;
+    std::vector<IncidentExclusion> incidentExclusions;
+    std::vector<std::pair<std::wstring, BinarySourceBundleResult>> sources;
 };
 
 bool BinaryLogin(
@@ -93,6 +115,12 @@ bool BinaryWaitSourceBundle(
     uint32_t waitTimeoutMs,
     const json& options,
     BinarySourceBundleResult& resultOut);
+bool BinaryUnifiedSync(
+    const std::wstring& serverBaseUrl,
+    const ClientSession& session,
+    uint32_t knownCollaborationVersion,
+    const std::vector<BinarySourceSubscription>& subscriptions,
+    BinaryUnifiedSyncResult& resultOut);
 bool BinaryCreateAccount(
     const std::wstring& serverBaseUrl,
     const ClientSession& session,

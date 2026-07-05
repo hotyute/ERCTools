@@ -14,6 +14,8 @@
 #include <bcrypt.h>
 #include <winhttp.h>
 
+#include "../shared/payload_codec.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -30,6 +32,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -137,6 +140,7 @@ constexpr uint16_t kBinaryAddIncidentExclusion = 16;
 constexpr uint16_t kBinaryRemoveIncidentExclusion = 17;
 constexpr uint16_t kBinaryFetchSourceBundle = 18;
 constexpr uint16_t kBinaryWaitSourceBundle = 19;
+constexpr uint16_t kBinarySyncStream = 20;
 
 struct BinaryResponse
 {
@@ -205,6 +209,13 @@ public:
     }
 
     void Bytes(const std::string& value)
+    {
+        const size_t length = std::min<size_t>(value.size(), kMaxBinaryPayload);
+        U32(static_cast<uint32_t>(length));
+        m_data.insert(m_data.end(), value.begin(), value.begin() + length);
+    }
+
+    void Bytes(const std::vector<unsigned char>& value)
     {
         const size_t length = std::min<size_t>(value.size(), kMaxBinaryPayload);
         U32(static_cast<uint32_t>(length));
@@ -1998,6 +2009,7 @@ struct SourceBlob
     bool ok = false;
     std::string body;
     std::wstring error;
+    std::shared_ptr<const erc::payload::Encoded> encoded;
 };
 
 struct SourceBundle
@@ -2010,9 +2022,11 @@ struct SourceBundle
 struct SourceCacheEntry
 {
     SourceBundle bundle;
+    SourceBundle deltaBundle;
     std::wstring sourceType;
     json options = json::object();
     uint32_t generation = 0;
+    uint32_t deltaBaseGeneration = 0;
 };
 
 static std::wstring WinErrorText(DWORD error)
@@ -2219,6 +2233,8 @@ static void AddFetchedBlob(
     blob.name = name;
     blob.url = url;
     blob.ok = ServerHttpGetText(url, blob.body, blob.error, timeoutMs);
+    if (blob.ok)
+        blob.encoded = std::make_shared<const erc::payload::Encoded>(erc::payload::Encode(blob.body));
     blobs.push_back(std::move(blob));
 }
 
@@ -2326,8 +2342,12 @@ static bool BuildSourceBundle(
             errorOut = L"National Highways NTIS event snapshot URL is not configured.";
         }
 
+        // Retain the combined bundle for older clients during a rolling upgrade.
         if (JsonBoolOption(options, "trafficScotlandEnabled", false)) {
-            const std::wstring scotlandUrl = NormalizeAbsoluteUrl(JsonWideOption(options, "trafficScotlandIncidentsUrl", L"https://www.traffic.gov.scot/traffic-information/incidents"));
+            const std::wstring scotlandUrl = NormalizeAbsoluteUrl(JsonWideOption(
+                options,
+                "trafficScotlandIncidentsUrl",
+                L"https://www.traffic.gov.scot/traffic-information/incidents"));
             AddFetchedBlob(bundleOut.blobs, L"traffic_scotland_list", scotlandUrl);
             if (!bundleOut.blobs.empty() && bundleOut.blobs.back().ok) {
                 std::vector<std::wstring> sids = ExtractTrafficScotlandSids(bundleOut.blobs.back().body);
@@ -2336,6 +2356,22 @@ static bool BuildSourceBundle(
                     const std::wstring detailUrl = L"https://www.traffic.gov.scot/more-details?sid=" + sids[i] + L"&type=incidents";
                     AddFetchedBlob(bundleOut.blobs, L"traffic_scotland_detail:" + sids[i], detailUrl);
                 }
+            }
+        }
+
+    }
+    else if (source == L"traffic_scotland") {
+        const std::wstring scotlandUrl = NormalizeAbsoluteUrl(JsonWideOption(
+            options,
+            "trafficScotlandIncidentsUrl",
+            L"https://www.traffic.gov.scot/traffic-information/incidents"));
+        AddFetchedBlob(bundleOut.blobs, L"traffic_scotland_list", scotlandUrl);
+        if (!bundleOut.blobs.empty() && bundleOut.blobs.back().ok) {
+            std::vector<std::wstring> sids = ExtractTrafficScotlandSids(bundleOut.blobs.back().body);
+            constexpr size_t maxScotlandDetails = 250;
+            for (size_t i = 0; i < sids.size() && i < maxScotlandDetails; ++i) {
+                const std::wstring detailUrl = L"https://www.traffic.gov.scot/more-details?sid=" + sids[i] + L"&type=incidents";
+                AddFetchedBlob(bundleOut.blobs, L"traffic_scotland_detail:" + sids[i], detailUrl);
             }
         }
     }
@@ -2662,6 +2698,8 @@ public:
                 return HandleBinaryFetchSourceBundle(opcode, reader, user);
             case kBinaryWaitSourceBundle:
                 return HandleBinaryWaitSourceBundle(opcode, reader, user);
+            case kBinarySyncStream:
+                return HandleBinarySyncStream(opcode, reader, user, WideToUtf8(token));
             case kBinaryCreateAccount:
                 return HandleBinaryCreateAccount(opcode, reader, user);
             default:
@@ -2846,6 +2884,7 @@ private:
     {
         m_collaborationVersion.fetch_add(1, std::memory_order_acq_rel);
         m_collaborationChanged.notify_all();
+        m_sourceCacheChanged.notify_all();
     }
 
     void WaitForCollaborationChange(uint32_t knownVersion)
@@ -2898,6 +2937,96 @@ private:
         return generation;
     }
 
+    static size_t EncodedBundleBytes(const SourceBundle& bundle)
+    {
+        size_t total = 0;
+        for (const SourceBlob& blob : bundle.blobs)
+            total += blob.encoded ? blob.encoded->bytes.size() : blob.body.size();
+        return total;
+    }
+
+    static bool BuildCollectionDelta(
+        const SourceBundle& previous,
+        const SourceBundle& current,
+        const std::wstring& sourceType,
+        uint32_t baseGeneration,
+        SourceBundle& deltaOut)
+    {
+        const std::wstring normalized = ToLower(TrimWide(sourceType));
+        const char* collectionKey = normalized == L"roads" ? "alerts" :
+            (normalized == L"earthquakes" ? "features" : nullptr);
+        if (!collectionKey || previous.blobs.size() != 1 || current.blobs.size() != 1)
+            return false;
+
+        const SourceBlob& oldBlob = previous.blobs.front();
+        const SourceBlob& newBlob = current.blobs.front();
+        if (!oldBlob.ok || !newBlob.ok || oldBlob.name != newBlob.name)
+            return false;
+
+        try {
+            json oldRoot = json::parse(oldBlob.body);
+            json newRoot = json::parse(newBlob.body);
+            if (!oldRoot.contains(collectionKey) || !oldRoot[collectionKey].is_array() ||
+                !newRoot.contains(collectionKey) || !newRoot[collectionKey].is_array())
+            {
+                return false;
+            }
+
+            std::unordered_map<std::string, json> oldItems;
+            for (const auto& item : oldRoot[collectionKey]) {
+                if (item.is_object() && item.contains("id") && item["id"].is_string())
+                    oldItems[item["id"].get<std::string>()] = item;
+            }
+
+            json upserts = json::array();
+            json order = json::array();
+            std::unordered_set<std::string> currentIds;
+            for (const auto& item : newRoot[collectionKey]) {
+                if (!item.is_object() || !item.contains("id") || !item["id"].is_string())
+                    return false;
+                const std::string id = item["id"].get<std::string>();
+                currentIds.insert(id);
+                order.push_back(id);
+                const auto previousItem = oldItems.find(id);
+                if (previousItem == oldItems.end() || previousItem->second != item)
+                    upserts.push_back(item);
+            }
+
+            json removed = json::array();
+            for (const auto& [id, item] : oldItems) {
+                (void)item;
+                if (currentIds.find(id) == currentIds.end())
+                    removed.push_back(id);
+            }
+
+            newRoot.erase(collectionKey);
+            json delta = {
+                { "_ercDelta", 1 },
+                { "baseGeneration", baseGeneration },
+                { "collection", collectionKey },
+                { "root", std::move(newRoot) },
+                { "upserts", std::move(upserts) },
+                { "removed", std::move(removed) },
+                { "order", std::move(order) }
+            };
+
+            SourceBlob deltaBlob;
+            deltaBlob.name = newBlob.name;
+            deltaBlob.url = newBlob.url;
+            deltaBlob.ok = true;
+            deltaBlob.body = delta.dump();
+            deltaBlob.encoded = std::make_shared<const erc::payload::Encoded>(erc::payload::Encode(deltaBlob.body));
+            deltaOut = {};
+            deltaOut.fetchedAt = current.fetchedAt;
+            deltaOut.status = current.status;
+            deltaOut.blobs.push_back(std::move(deltaBlob));
+            return EncodedBundleBytes(deltaOut) + 256 < EncodedBundleBytes(current);
+        }
+        catch (...) {
+            return false;
+        }
+    }
+
     void StoreSourceCacheEntryLocked(
         const std::wstring& key,
         SourceBundle fresh,
@@ -2906,10 +3035,21 @@ private:
         uint32_t* generationOut = nullptr)
     {
         SourceCacheEntry entry;
+        const auto previous = m_sourceCache.find(key);
         entry.bundle = std::move(fresh);
         entry.sourceType = sourceType;
         entry.options = options;
         entry.generation = NextSourceCacheGenerationLocked();
+        if (previous != m_sourceCache.end() &&
+            BuildCollectionDelta(
+                previous->second.bundle,
+                entry.bundle,
+                sourceType,
+                previous->second.generation,
+                entry.deltaBundle))
+        {
+            entry.deltaBaseGeneration = previous->second.generation;
+        }
         if (generationOut)
             *generationOut = entry.generation;
         m_sourceCache[key] = std::move(entry);
@@ -3233,6 +3373,188 @@ private:
             writer.Text(blob.error);
         }
         writer.U32(generation);
+        return BinaryOk(opcode, writer);
+    }
+
+    struct UnifiedSourceSubscription
+    {
+        std::wstring sourceType;
+        uint32_t knownGeneration = 0;
+        json options = json::object();
+    };
+
+    bool UnifiedStateChangedLocked(
+        uint32_t knownCollaborationVersion,
+        const std::vector<UnifiedSourceSubscription>& subscriptions) const
+    {
+        if (knownCollaborationVersion == 0 || knownCollaborationVersion != CollaborationVersion())
+            return true;
+        for (const auto& subscription : subscriptions) {
+            const auto it = m_sourceCache.find(SourceCacheKey(subscription.sourceType, subscription.options));
+            if (it == m_sourceCache.end() || subscription.knownGeneration == 0 ||
+                it->second.generation != subscription.knownGeneration)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool WriteCollaborationSnapshot(BinaryWriter& writer, const UserRecord& user, std::wstring& error)
+    {
+        json chat = m_database.ChatMessages(error);
+        if (!error.empty())
+            return false;
+        json notes = m_database.Notes(error);
+        if (!error.empty())
+            return false;
+        json users = m_database.OnlineUsers(error);
+        if (!error.empty())
+            return false;
+        json privateMessages = m_database.PrivateMessages(user, error);
+        if (!error.empty())
+            return false;
+        json incidentExclusions = m_database.IncidentExclusions(error);
+        if (!error.empty())
+            return false;
+
+        writer.U32(chat.is_array() ? static_cast<uint32_t>(chat.size()) : 0);
+        if (chat.is_array()) {
+            for (const auto& item : chat)
+                WriteChatJson(writer, item);
+        }
+        writer.U32(notes.is_array() ? static_cast<uint32_t>(notes.size()) : 0);
+        if (notes.is_array()) {
+            for (const auto& item : notes)
+                WriteNoteJson(writer, item);
+        }
+        writer.U32(users.is_array() ? static_cast<uint32_t>(users.size()) : 0);
+        if (users.is_array()) {
+            for (const auto& item : users)
+                WriteOnlineUserJson(writer, item);
+        }
+        writer.U32(privateMessages.is_array() ? static_cast<uint32_t>(privateMessages.size()) : 0);
+        if (privateMessages.is_array()) {
+            for (const auto& item : privateMessages)
+                WritePrivateMessageJson(writer, item);
+        }
+        writer.U32(incidentExclusions.is_array() ? static_cast<uint32_t>(incidentExclusions.size()) : 0);
+        if (incidentExclusions.is_array()) {
+            for (const auto& item : incidentExclusions)
+                WriteIncidentExclusionJson(writer, item);
+        }
+        return true;
+    }
+
+    static void WriteCompressedSourceBundle(
+        BinaryWriter& writer,
+        const SourceCacheEntry& entry,
+        uint32_t knownGeneration)
+    {
+        const bool useDelta = entry.deltaBaseGeneration != 0 &&
+            knownGeneration == entry.deltaBaseGeneration &&
+            !entry.deltaBundle.blobs.empty();
+        const SourceBundle& payloadBundle = useDelta ? entry.deltaBundle : entry.bundle;
+        writer.Text(entry.sourceType);
+        writer.U32(entry.generation);
+        writer.U32(SourceBundleAgeMs(entry.bundle));
+        writer.U32(useDelta ? 1u : 0u);
+        writer.U32(useDelta ? entry.deltaBaseGeneration : 0u);
+        writer.U32(static_cast<uint32_t>(payloadBundle.blobs.size()));
+        for (const SourceBlob& blob : payloadBundle.blobs) {
+            writer.Text(blob.name);
+            writer.Text(blob.url);
+            writer.U32(blob.ok ? 1u : 0u);
+            const auto encoded = blob.encoded
+                ? blob.encoded
+                : std::make_shared<const erc::payload::Encoded>(erc::payload::Encode(blob.body));
+            writer.U32(encoded->method);
+            writer.U32(encoded->originalSize);
+            writer.Bytes(encoded->bytes);
+            writer.Text(blob.error);
+        }
+    }
+
+    BinaryResponse HandleBinarySyncStream(
+        uint16_t opcode,
+        BinaryReader& reader,
+        const UserRecord& user,
+        const std::string& bearerToken)
+    {
+        uint32_t knownCollaborationVersion = 0;
+        uint32_t pingMs = 0;
+        uint32_t subscriptionCount = 0;
+        if (!reader.U32(knownCollaborationVersion) || !reader.U32(pingMs) ||
+            !reader.U32(subscriptionCount) || subscriptionCount > 16)
+        {
+            return BinaryError(opcode, 400, "invalid_payload", L"Unified synchronization request is incomplete.");
+        }
+
+        std::vector<UnifiedSourceSubscription> subscriptions;
+        subscriptions.reserve(subscriptionCount);
+        for (uint32_t i = 0; i < subscriptionCount; ++i) {
+            UnifiedSourceSubscription subscription;
+            if (!reader.Text(subscription.sourceType) || !reader.U32(subscription.knownGeneration) ||
+                !reader.Json(subscription.options))
+            {
+                return BinaryError(opcode, 400, "invalid_payload", L"Unified source subscription is incomplete.");
+            }
+            if (!subscription.options.is_object())
+                subscription.options = json::object();
+            subscriptions.push_back(std::move(subscription));
+        }
+
+        if (pingMs > 0) {
+            std::wstring pingError;
+            m_database.ReportSessionPing(bearerToken, pingMs, pingError);
+        }
+
+        for (const auto& subscription : subscriptions) {
+            std::wstring seedError;
+            if (!EnsureSourceCacheEntry(subscription.sourceType, subscription.options, seedError))
+                return BinaryError(opcode, 502, "source_fetch_failed", seedError);
+        }
+
+        const auto waitStarted = std::chrono::steady_clock::now();
+        {
+            std::unique_lock<std::mutex> lock(m_sourceCacheMutex);
+            m_sourceCacheChanged.wait_for(lock, std::chrono::seconds(25), [&]() {
+                return UnifiedStateChangedLocked(knownCollaborationVersion, subscriptions);
+            });
+        }
+        const uint32_t waitMs = static_cast<uint32_t>(std::min<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - waitStarted).count(),
+            std::numeric_limits<uint32_t>::max()));
+
+        BinaryWriter writer;
+        const uint32_t collaborationVersion = CollaborationVersion();
+        const bool collaborationChanged = knownCollaborationVersion == 0 ||
+            knownCollaborationVersion != collaborationVersion;
+        writer.U32(collaborationVersion);
+        writer.U32(collaborationChanged ? 1u : 0u);
+        if (collaborationChanged) {
+            std::wstring collaborationError;
+            if (!WriteCollaborationSnapshot(writer, user, collaborationError))
+                return BinaryError(opcode, 500, "database_error", collaborationError);
+        }
+
+        std::vector<std::pair<SourceCacheEntry, uint32_t>> changedSources;
+        {
+            std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
+            for (const auto& subscription : subscriptions) {
+                const auto it = m_sourceCache.find(SourceCacheKey(subscription.sourceType, subscription.options));
+                if (it != m_sourceCache.end() &&
+                    (subscription.knownGeneration == 0 || it->second.generation != subscription.knownGeneration))
+                {
+                    changedSources.emplace_back(it->second, subscription.knownGeneration);
+                }
+            }
+        }
+        writer.U32(static_cast<uint32_t>(changedSources.size()));
+        for (const auto& [source, knownGeneration] : changedSources)
+            WriteCompressedSourceBundle(writer, source, knownGeneration);
+        writer.U32(waitMs);
         return BinaryOk(opcode, writer);
     }
 
@@ -4408,12 +4730,15 @@ static void WorkerLoop(BlockingSocketQueue& queue, ErcServer& server)
     SOCKET s = INVALID_SOCKET;
     while (queue.Pop(s)) {
         if (IsBinaryRequest(s)) {
-            uint16_t opcode = 0;
-            std::vector<unsigned char> payload;
-            if (ReadBinaryRequest(s, opcode, payload))
+            for (;;) {
+                uint16_t opcode = 0;
+                std::vector<unsigned char> payload;
+                if (!ReadBinaryRequest(s, opcode, payload))
+                    break;
                 SendBinaryResponse(s, server.HandleBinary(opcode, payload));
-            else
-                SendBinaryResponse(s, BinaryResponse{ 0, 400, {} });
+                if (opcode != kBinarySyncStream)
+                    break;
+            }
         }
         else {
             HttpRequest request;
