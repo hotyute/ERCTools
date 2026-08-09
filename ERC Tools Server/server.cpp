@@ -3509,17 +3509,19 @@ private:
             m_database.ReportSessionPing(bearerToken, pingMs, pingError);
         }
 
+        std::vector<UnifiedSourceSubscription> seededSubscriptions;
+        seededSubscriptions.reserve(subscriptions.size());
         for (const auto& subscription : subscriptions) {
             std::wstring seedError;
-            if (!EnsureSourceCacheEntry(subscription.sourceType, subscription.options, seedError))
-                return BinaryError(opcode, 502, "source_fetch_failed", seedError);
+            if (EnsureSourceCacheEntry(subscription.sourceType, subscription.options, seedError))
+                seededSubscriptions.push_back(subscription);
         }
 
         const auto waitStarted = std::chrono::steady_clock::now();
         {
             std::unique_lock<std::mutex> lock(m_sourceCacheMutex);
             m_sourceCacheChanged.wait_for(lock, std::chrono::seconds(25), [&]() {
-                return UnifiedStateChangedLocked(knownCollaborationVersion, subscriptions);
+                return UnifiedStateChangedLocked(knownCollaborationVersion, seededSubscriptions);
             });
         }
         const uint32_t waitMs = static_cast<uint32_t>(std::min<int64_t>(
@@ -3542,7 +3544,7 @@ private:
         std::vector<std::pair<SourceCacheEntry, uint32_t>> changedSources;
         {
             std::lock_guard<std::mutex> lock(m_sourceCacheMutex);
-            for (const auto& subscription : subscriptions) {
+            for (const auto& subscription : seededSubscriptions) {
                 const auto it = m_sourceCache.find(SourceCacheKey(subscription.sourceType, subscription.options));
                 if (it != m_sourceCache.end() &&
                     (subscription.knownGeneration == 0 || it->second.generation != subscription.knownGeneration))

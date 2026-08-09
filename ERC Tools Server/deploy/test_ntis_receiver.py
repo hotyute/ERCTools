@@ -100,6 +100,32 @@ class TrafficEnglandCompatibilityTests(unittest.TestCase):
         self.assertIn("Reason : Road Management", alert["description"])
         self.assertNotIn("Other Road Management", alert["description"])
 
+    def test_plain_other_road_management_matches_former_public_label(self):
+        alert = self.normalise(make_record(
+            record_type="RoadOrCarriagewayOrLaneManagement",
+            comments=[
+                "The M1 southbound between junctions J14 and J13",
+                "Other",
+                "Currently Active",
+            ],
+        ))
+        self.assertEqual("Road Management", alert["title"])
+        self.assertIn("Reason : Road Management", alert["description"])
+        self.assertNotIn("Reason : Other", alert["description"])
+
+    def test_plain_other_vehicle_obstruction_matches_public_bucket(self):
+        alert = self.normalise(make_record(
+            record_type="VehicleObstruction",
+            comments=[
+                "The M1 southbound between junctions J15 and J14",
+                "Other",
+                "Currently Active",
+            ],
+        ))
+        self.assertEqual("Vehicle obstruction", alert["title"])
+        self.assertIn("Reason : Vehicle obstruction", alert["description"])
+        self.assertNotIn("Reason : Other", alert["description"])
+
     def test_other_authority_operation_matches_police_incident_label(self):
         alert = self.normalise(make_record(
             record_type="AuthorityOperation",
@@ -137,6 +163,24 @@ class TrafficEnglandCompatibilityTests(unittest.TestCase):
             None,
         )
         self.assertFalse(result["current"])
+
+    def test_current_alert_preserves_validity_window(self):
+        alert = self.normalise(
+            make_record(overall_end="2026-07-03T12:30:00Z")
+        )
+        self.assertEqual("active", alert["validityStatus"])
+        self.assertEqual("2026-07-03T12:30:00Z", alert["overallEndTime"])
+        self.assertTrue(ntis_receiver.cached_alert_is_current(
+            alert,
+            ntis_receiver.parse_iso_time("2026-07-03T12:29:00Z"),
+        ))
+        self.assertFalse(ntis_receiver.cached_alert_is_current(
+            alert,
+            ntis_receiver.parse_iso_time("2026-07-03T12:31:00Z"),
+        ))
+
+    def test_legacy_cached_alert_without_validity_metadata_remains_current(self):
+        self.assertTrue(ntis_receiver.cached_alert_is_current({"id": "legacy"}))
 
     def test_unconfirmed_incident_is_not_public(self):
         alert = self.normalise(make_record(probability="probable"))

@@ -31,7 +31,7 @@ FEEDS = {
 }
 SNAPSHOT_PATH = DATA_DIR / "current" / "events.json"
 FULL_REFRESH_IDLE_SECONDS = 10.0
-TRAFFIC_ENGLAND_SCHEMA_VERSION = "2026-07-04-public-reasons-v4"
+TRAFFIC_ENGLAND_SCHEMA_VERSION = "2026-07-08-public-reasons-v5"
 TRAFFIC_ENGLAND_REBUILD_BATCH_SIZE = 500
 DEFAULT_FUSED_CONGESTION_MAX_AGE_SECONDS = int(
     os.environ.get("NTIS_FUSED_CONGESTION_MAX_AGE_SECONDS", "600")
@@ -235,6 +235,14 @@ def normalise_reason_for_record(value, record_type):
     # AuthorityOperation whose authorityOperationType is "other".
     if record_type == "AuthorityOperation" and reason.lower() == "other":
         return "Police incident"
+    # Some NTIS road/lane-management records expose the subtype as the
+    # shorter "Other" value instead of "Other Road Management".
+    if record_type == "RoadOrCarriagewayOrLaneManagement" and reason.lower() == "other":
+        return "Road Management"
+    # Generic vehicle-obstruction records can also arrive with only the
+    # subtype "Other"; keep that in the public Vehicle obstruction bucket.
+    if record_type == "VehicleObstruction" and reason.lower() == "other":
+        return "Vehicle obstruction"
     return reason
 
 
@@ -306,22 +314,51 @@ def extract_coordinates(record):
     return None, None
 
 
-def record_is_current(record, publication_time):
-    if descendant_text(record, "cancel").lower() == "true":
-        return False
-    if descendant_text(record, "end").lower() == "true":
+def validity_is_current(status, start_text="", end_text="",
+                        cancelled=False, ended=False, now=None):
+    if cancelled or ended:
         return False
 
-    now = parse_iso_time(publication_time) or utc_now()
-    start = parse_iso_time(descendant_text(record, "overallStartTime"))
-    end = parse_iso_time(descendant_text(record, "overallEndTime"))
+    now = now or utc_now()
+    start = parse_iso_time(start_text)
+    end = parse_iso_time(end_text)
     within_validity = (start is None or start <= now) and (end is None or now <= end)
-    status = descendant_text(record, "validityStatus").lower()
-    if status == "active":
-        return within_validity
-    if status == "definedbyvaliditytimespec":
-        return within_validity
-    return False
+    return (status or "").lower() in {
+        "active",
+        "definedbyvaliditytimespec",
+    } and within_validity
+
+
+def record_is_current(record, publication_time):
+    return validity_is_current(
+        descendant_text(record, "validityStatus"),
+        descendant_text(record, "overallStartTime"),
+        descendant_text(record, "overallEndTime"),
+        descendant_text(record, "cancel").lower() == "true",
+        descendant_text(record, "end").lower() == "true",
+        parse_iso_time(publication_time) or utc_now(),
+    )
+
+
+def cached_alert_is_current(alert, now=None):
+    validity_keys = (
+        "validityStatus",
+        "overallStartTime",
+        "overallEndTime",
+        "cancelled",
+        "ended",
+    )
+    if not any(key in alert for key in validity_keys):
+        return True
+
+    return validity_is_current(
+        alert.get("validityStatus", ""),
+        alert.get("overallStartTime", ""),
+        alert.get("overallEndTime", ""),
+        bool(alert.get("cancelled", False)),
+        bool(alert.get("ended", False)),
+        now,
+    )
 
 
 def map_severity(value, event_type="", delay_seconds=0.0):
@@ -415,7 +452,19 @@ def normalise_record(
     if not record_id:
         return None
 
-    current = record_is_current(record, publication_time)
+    validity_status = descendant_text(record, "validityStatus")
+    overall_start_time = descendant_text(record, "overallStartTime")
+    overall_end_time = descendant_text(record, "overallEndTime")
+    cancelled = descendant_text(record, "cancel").lower() == "true"
+    ended = descendant_text(record, "end").lower() == "true"
+    current = validity_is_current(
+        validity_status,
+        overall_start_time,
+        overall_end_time,
+        cancelled,
+        ended,
+        parse_iso_time(publication_time) or utc_now(),
+    )
     if not current:
         return {
             "recordId": record_id,
@@ -484,6 +533,11 @@ def normalise_record(
         "confirmed": descendant_text(record, "probabilityOfOccurrence").lower() == "certain",
         "completed": False,
         "current": True,
+        "validityStatus": validity_status,
+        "overallStartTime": overall_start_time,
+        "overallEndTime": overall_end_time,
+        "cancelled": cancelled,
+        "ended": ended,
         "hasPublicPresentation": bool(comments),
         "informationStatus": information_status or "real",
         "sourceName": source_name,
@@ -995,9 +1049,28 @@ class NtisEventProcessor:
 
     def _write_snapshot(self, db):
         rows = db.execute(
-            "SELECT alert_json FROM event_state ORDER BY record_id"
+            "SELECT record_id, alert_json FROM event_state ORDER BY record_id"
         ).fetchall()
-        alerts = [json.loads(row[0]) for row in rows]
+        alerts = []
+        expired = []
+        snapshot_now = utc_now()
+        for record_id, alert_json in rows:
+            alert = json.loads(alert_json)
+            if not cached_alert_is_current(alert, snapshot_now):
+                expired.append((record_id,))
+                continue
+            alerts.append(alert)
+
+        if expired:
+            db.executemany(
+                "DELETE FROM event_state WHERE record_id = ?",
+                expired,
+            )
+            logging.info(
+                "Expired %d NTIS record(s) from the current snapshot.",
+                len(expired),
+            )
+
         alerts.sort(key=lambda item: (
             item.get("planned", False),
             item.get("road", ""),

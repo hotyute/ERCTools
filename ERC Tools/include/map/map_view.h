@@ -19,6 +19,13 @@ struct MapOverlayPositions
     float privateChatY = 0.0f;
     float responderChatX = 0.0f;
     float responderChatY = 0.0f;
+    float fpsX = 0.0f;
+    float fpsY = 0.0f;
+    float commsX = 0.0f;
+    float commsY = 0.0f;
+    float roadIncidentsX = 0.0f;
+    float roadIncidentsY = 0.0f;
+    bool roadIncidentsCollapsed = false;
     bool notificationHistoryCollapsed = false;
     bool usersCollapsed = false;
     bool responderChatCollapsed = false;
@@ -56,6 +63,7 @@ public:
     using MapDisplayModeCallback = std::function<void(bool displayWorldMap)>;
     using IrelandVisibilityCallback = std::function<void(bool visible)>;
     using OverlayPositionsChangedCallback = std::function<void(const MapOverlayPositions& positions)>;
+    using RoadIncidentFilterCallback = std::function<void(const std::wstring& searchText, int severityIndex)>;
 
     MapView();
     ~MapView();
@@ -93,9 +101,13 @@ public:
     void SetMapDisplayModeCallback(MapDisplayModeCallback cb);
     void SetIrelandVisibilityCallback(IrelandVisibilityCallback cb);
     void SetOverlayPositionsChangedCallback(OverlayPositionsChangedCallback cb);
+    void SetRoadIncidentFilterCallback(RoadIncidentFilterCallback cb);
     void SetChatClearEnabled(bool enabled);
     void SetAlerts(const std::vector<TrafficAlert>& alerts);
     void SetIncidentOverlayVisible(bool visible);
+    void SetRoadIncidentPanelAlerts(const std::vector<TrafficAlert>& alerts);
+    void SetRoadIncidentPanelFilter(const std::wstring& searchText, int severityIndex);
+    void SetRoadIncidentPanelVisible(bool visible);
     void SetNotes(const std::vector<MapNote>& notes);
     void SetChatMessages(const std::vector<ChatMessage>& messages);
     void SetPrivateMessages(const std::vector<PrivateMessage>& messages);

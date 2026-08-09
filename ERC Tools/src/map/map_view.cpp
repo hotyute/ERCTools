@@ -265,7 +265,23 @@ class MapView::Impl
         NoteEditor,
         ResponderChat,
         PrivateChat,
-        Countdown
+        Countdown,
+        RoadSearch
+    };
+
+    enum class OverlayPanelKind
+    {
+        None,
+        MapControls,
+        Countdown,
+        RoadIncidents,
+        Notification,
+        Users,
+        PrivateChat,
+        ResponderChat,
+        Comms,
+        Fps,
+        NoteEditor
     };
 
     struct PolygonPointHit
@@ -305,6 +321,7 @@ public:
     using MapDisplayModeCallback = std::function<void(bool displayWorldMap)>;
     using IrelandVisibilityCallback = std::function<void(bool visible)>;
     using OverlayPositionsChangedCallback = std::function<void(const MapOverlayPositions& positions)>;
+    using RoadIncidentFilterCallback = std::function<void(const std::wstring& searchText, int severityIndex)>;
 
     bool Create(HWND parent, int x, int y, int w, int h)
     {
@@ -460,6 +477,11 @@ public:
         m_onOverlayPositionsChanged = std::move(cb);
     }
 
+    void SetRoadIncidentFilterCallback(RoadIncidentFilterCallback cb)
+    {
+        m_onRoadIncidentFilter = std::move(cb);
+    }
+
     void SetChatClearEnabled(bool enabled)
     {
         if (m_canClearResponderChat == enabled)
@@ -481,6 +503,30 @@ public:
             return;
 
         m_showIncidentOverlayLabels = visible;
+        Invalidate();
+    }
+
+    void SetRoadIncidentPanelAlerts(const std::vector<TrafficAlert>& alerts)
+    {
+        m_roadIncidentPanelAlerts = alerts;
+        const float maxScroll = MaxRoadIncidentPanelScroll(BuildRoadIncidentPanelLayout(BuildViewState()));
+        m_roadIncidentPanelScroll = ClampValue(m_roadIncidentPanelScroll, 0.0f, maxScroll);
+        Invalidate();
+    }
+
+    void SetRoadIncidentPanelFilter(const std::wstring& searchText, int severityIndex)
+    {
+        m_roadIncidentSearch = searchText;
+        m_roadIncidentSeverityIndex = ClampValue(severityIndex, 0, 4);
+        m_roadIncidentPanelScroll = 0.0f;
+        Invalidate();
+    }
+
+    void SetRoadIncidentPanelVisible(bool visible)
+    {
+        m_showRoadIncidentPanel = visible;
+        if (!visible && m_overlayInputFocus == OverlayInputFocus::RoadSearch)
+            ClearOverlayInputFocus();
         Invalidate();
     }
 
@@ -806,6 +852,14 @@ public:
         m_privateChatOffsetY = positions.privateChatY;
         m_responderChatOffsetX = positions.responderChatX;
         m_responderChatOffsetY = positions.responderChatY;
+        m_fpsCounterOffsetX = positions.fpsX;
+        m_fpsCounterOffsetY = positions.fpsY;
+        m_commsIndicatorOffsetX = positions.commsX;
+        m_commsIndicatorOffsetY = positions.commsY;
+        m_roadIncidentPanelOffsetX = positions.roadIncidentsX;
+        m_roadIncidentPanelOffsetY = positions.roadIncidentsY;
+        m_roadIncidentPanelCollapsed = positions.roadIncidentsCollapsed;
+        m_roadIncidentPanelOpenProgress = m_showRoadIncidentPanel && !m_roadIncidentPanelCollapsed ? 1.0f : 0.0f;
         m_notificationHistoryCollapsed = positions.notificationHistoryCollapsed;
         m_usersPanelCollapsed = positions.usersCollapsed;
         m_responderChatCollapsed = positions.responderChatCollapsed;
@@ -840,6 +894,13 @@ public:
         positions.privateChatY = m_privateChatOffsetY;
         positions.responderChatX = m_responderChatOffsetX;
         positions.responderChatY = m_responderChatOffsetY;
+        positions.fpsX = m_fpsCounterOffsetX;
+        positions.fpsY = m_fpsCounterOffsetY;
+        positions.commsX = m_commsIndicatorOffsetX;
+        positions.commsY = m_commsIndicatorOffsetY;
+        positions.roadIncidentsX = m_roadIncidentPanelOffsetX;
+        positions.roadIncidentsY = m_roadIncidentPanelOffsetY;
+        positions.roadIncidentsCollapsed = m_roadIncidentPanelCollapsed;
         positions.notificationHistoryCollapsed = m_notificationHistoryCollapsed;
         positions.usersCollapsed = m_usersPanelCollapsed;
         positions.responderChatCollapsed = m_responderChatCollapsed;
@@ -971,6 +1032,15 @@ public:
         EnsureOverlayAnimationTimer();
     }
 
+    void StartRoadIncidentPanelAnimation(float target)
+    {
+        m_roadIncidentPanelAnimationStart = m_roadIncidentPanelOpenProgress;
+        m_roadIncidentPanelAnimationTarget = ClampValue(target, 0.0f, 1.0f);
+        m_roadIncidentPanelAnimationStartMs = GetTickCount64();
+        m_roadIncidentPanelAnimating = true;
+        EnsureOverlayAnimationTimer();
+    }
+
     static bool AdvanceAnimatedValue(float& value, float start, float target, ULONGLONG startMs)
     {
         const ULONGLONG now = GetTickCount64();
@@ -1030,6 +1100,16 @@ public:
                 m_usersPanelAnimationTarget,
                 m_usersPanelAnimationStartMs);
             m_usersPanelAnimating = !done;
+            anyRunning = anyRunning || !done;
+        }
+
+        if (m_roadIncidentPanelAnimating) {
+            const bool done = AdvanceAnimatedValue(
+                m_roadIncidentPanelOpenProgress,
+                m_roadIncidentPanelAnimationStart,
+                m_roadIncidentPanelAnimationTarget,
+                m_roadIncidentPanelAnimationStartMs);
+            m_roadIncidentPanelAnimating = !done;
             anyRunning = anyRunning || !done;
         }
 
@@ -1478,6 +1558,9 @@ private:
             ClampPrivateChatPanelOffsets(BuildViewState());
             ClampCountdownPanelOffsets(BuildViewState());
             ClampResponderChatPanelOffsets(BuildViewState());
+            ClampFpsCounterOffsets(BuildViewState());
+            ClampCommsIndicatorOffsets(BuildViewState());
+            ClampRoadIncidentPanelOffsets(BuildViewState());
             return 0;
 
         case WM_PAINT:
@@ -1562,28 +1645,20 @@ private:
             m_leftButtonDown = true;
             if (HandleOverlayContextMenuPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
-            if (HitCommsIndicatorInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
-                return 0;
-            if (HandleCountdownPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
-                return 0;
-            if (HandlePrivateChatPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
-                return 0;
-            if (HandleUsersPanelPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
-                return 0;
-            if (HandleResponderChatPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
-                return 0;
-            if (HandleNotificationPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
-                return 0;
-            if (HitUsersPanelInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
-                HitCountdownInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
-                HitPrivateChatInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
-                HitResponderChatInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
-                HitNotificationInterface(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
-                SetCapture(m_hwnd);
-                m_notificationUiMouseDown = true;
-                return 0;
-            }
             EnsureDeviceResources();
+            {
+                const int x = GET_X_LPARAM(lParam);
+                const int y = GET_Y_LPARAM(lParam);
+                const OverlayPanelKind panel = TopOverlayPanelAt(x, y);
+                if (panel != OverlayPanelKind::None) {
+                    BringOverlayPanelToFront(panel);
+                    if (!HandleOverlayPanelPointerDown(panel, x, y)) {
+                        SetCapture(m_hwnd);
+                        m_notificationUiMouseDown = true;
+                    }
+                    return 0;
+                }
+            }
             if (m_rt && HandleNotePointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             if (HandlePolygonPointPointerDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
@@ -1625,16 +1700,26 @@ private:
             return 0;
 
         case WM_RBUTTONDOWN:
-            if (HandleCountdownRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
+            if (HitOverlayContextMenu(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
-            if (HandleMapControlsRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
-                return 0;
-            if (HandleUserContextRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
-                return 0;
-            if (HandleChatContextRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
-                return 0;
-            if (HandleNotificationHistoryRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
-                return 0;
+            {
+                const int x = GET_X_LPARAM(lParam);
+                const int y = GET_Y_LPARAM(lParam);
+                const OverlayPanelKind panel = TopOverlayPanelAt(x, y);
+                if (panel != OverlayPanelKind::None) {
+                    BringOverlayPanelToFront(panel);
+                    switch (panel) {
+                    case OverlayPanelKind::RoadIncidents: HandleRoadIncidentPanelRightClick(x, y); break;
+                    case OverlayPanelKind::Countdown: HandleCountdownRightClick(x, y); break;
+                    case OverlayPanelKind::MapControls: HandleMapControlsRightClick(x, y); break;
+                    case OverlayPanelKind::Users: HandleUserContextRightClick(x, y); break;
+                    case OverlayPanelKind::ResponderChat: HandleChatContextRightClick(x, y); break;
+                    case OverlayPanelKind::Notification: HandleNotificationHistoryRightClick(x, y); break;
+                    default: break;
+                    }
+                    return 0;
+                }
+            }
             if (HandleMapEventRightClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
                 return 0;
             HideOverlayContextMenus();
@@ -1667,6 +1752,10 @@ private:
                 if (HandleNoteEditorKeyDown(wParam))
                     return 0;
             }
+            else if (m_overlayInputFocus == OverlayInputFocus::RoadSearch) {
+                if (HandleRoadIncidentSearchKeyDown(wParam))
+                    return 0;
+            }
             break;
 
         case WM_CHAR:
@@ -1684,6 +1773,10 @@ private:
             }
             else if (m_overlayInputFocus == OverlayInputFocus::NoteEditor) {
                 if (HandleNoteEditorChar(wParam))
+                    return 0;
+            }
+            else if (m_overlayInputFocus == OverlayInputFocus::RoadSearch) {
+                if (HandleRoadIncidentSearchChar(wParam))
                     return 0;
             }
             break;
@@ -2155,6 +2248,19 @@ private:
         NormalizeCenter();
     }
 
+    static float AlertMarkerOuterRadius(bool selected)
+    {
+        return selected ? 15.0f : 11.0f;
+    }
+
+    static D2D1_POINT_2F AlertMarkerHeadCenter(
+        const D2D1_POINT_2F& location, bool selected)
+    {
+        return D2D1::Point2F(
+            location.x,
+            location.y - AlertMarkerOuterRadius(selected) - 7.0f);
+    }
+
     std::wstring HitTestAlert(int x, int y) const
     {
         std::wstring bestId;
@@ -2168,7 +2274,11 @@ private:
                 continue;
             }
 
-            D2D1_POINT_2F pt = GeoToScreen(view, m_alerts[i].latitude, m_alerts[i].longitude);
+            const D2D1_POINT_2F location =
+                GeoToScreen(view, m_alerts[i].latitude, m_alerts[i].longitude);
+            const bool selected = (m_alerts[i].id == m_selectedId);
+            const D2D1_POINT_2F pt =
+                AlertMarkerHeadCenter(location, selected);
             double dx = pt.x - x;
             double dy = pt.y - y;
             double d = std::sqrt(dx * dx + dy * dy);
@@ -3584,6 +3694,57 @@ private:
             return;
         }
 
+        if (m_draggingFpsCounter && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            const int dx = x - m_lastMouse.x;
+            const int dy = y - m_lastMouse.y;
+            if (dx != 0 || dy != 0) {
+                m_fpsCounterOffsetX += static_cast<float>(dx);
+                m_fpsCounterOffsetY += static_cast<float>(dy);
+                ClampFpsCounterOffsets(BuildViewState());
+                m_lastMouse = POINT{ x, y };
+                Invalidate();
+            }
+            return;
+        }
+
+        if (m_draggingCommsIndicator && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            const int dx = x - m_lastMouse.x;
+            const int dy = y - m_lastMouse.y;
+            if (dx != 0 || dy != 0) {
+                m_commsIndicatorOffsetX += static_cast<float>(dx);
+                m_commsIndicatorOffsetY += static_cast<float>(dy);
+                ClampCommsIndicatorOffsets(BuildViewState());
+                m_lastMouse = POINT{ x, y };
+                Invalidate();
+            }
+            return;
+        }
+
+        if (m_draggingRoadIncidentPanelScrollbar && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            SetRoadIncidentScrollFromThumbY(
+                static_cast<float>(y), m_roadIncidentScrollbarDragOffset, false);
+            return;
+        }
+
+        if (m_draggingRoadIncidentDetailsScrollbar && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            SetRoadIncidentScrollFromThumbY(
+                static_cast<float>(y), m_roadIncidentDetailsScrollbarDragOffset, true);
+            return;
+        }
+
+        if (m_draggingRoadIncidentPanel && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            const int dx = x - m_lastMouse.x;
+            const int dy = y - m_lastMouse.y;
+            if (dx != 0 || dy != 0) {
+                m_roadIncidentPanelOffsetX += static_cast<float>(dx);
+                m_roadIncidentPanelOffsetY += static_cast<float>(dy);
+                ClampRoadIncidentPanelOffsets(BuildViewState());
+                m_lastMouse = POINT{ x, y };
+                Invalidate();
+            }
+            return;
+        }
+
         if (m_draggingNotificationHistoryScrollbar && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
             SetNotificationHistoryScrollFromThumbY(static_cast<float>(y), m_notificationHistoryScrollbarDragOffset);
             return;
@@ -3731,6 +3892,42 @@ private:
             return;
         }
 
+        if (m_draggingFpsCounter || m_draggingCommsIndicator) {
+            m_draggingFpsCounter = false;
+            m_draggingCommsIndicator = false;
+            m_notificationUiMouseDown = false;
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            NotifyOverlayPositionsChanged();
+            Invalidate();
+            return;
+        }
+
+        if (m_draggingRoadIncidentPanel) {
+            m_draggingRoadIncidentPanel = false;
+            m_notificationUiMouseDown = false;
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            NotifyOverlayPositionsChanged();
+            Invalidate();
+            return;
+        }
+
+        if (m_draggingRoadIncidentPanelScrollbar || m_draggingRoadIncidentDetailsScrollbar) {
+            m_draggingRoadIncidentPanelScrollbar = false;
+            m_draggingRoadIncidentDetailsScrollbar = false;
+            m_roadIncidentScrollbarDragOffset = 0.0f;
+            m_roadIncidentDetailsScrollbarDragOffset = 0.0f;
+            m_notificationUiMouseDown = false;
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            Invalidate();
+            return;
+        }
+
         if (m_draggingNotificationHistoryScrollbar) {
             m_draggingNotificationHistoryScrollbar = false;
             m_notificationHistoryScrollbarDragOffset = 0.0f;
@@ -3813,18 +4010,28 @@ private:
             return;
         }
 
-        if (TryActivateNotificationHistoryItem(x, y))
-            return;
-
-        size_t userIndex = static_cast<size_t>(-1);
-        if (OnlineUserIndexAtPoint(x, y, userIndex)) {
-            const std::vector<UsersPanelEntry> entries = UsersPanelEntries();
-            if (userIndex < entries.size() && m_onUserAction)
-                m_onUserAction(entries[userIndex].user, L"private");
+        const OverlayPanelKind panel = TopOverlayPanelAt(x, y);
+        if (panel != OverlayPanelKind::None) {
+            BringOverlayPanelToFront(panel);
+            if (panel == OverlayPanelKind::Notification)
+                TryActivateNotificationHistoryItem(x, y);
+            else if (panel == OverlayPanelKind::RoadIncidents) {
+                const size_t roadIndex = RoadIncidentPanelIndexAtPoint(x, y);
+                if (roadIndex < m_roadIncidentPanelAlerts.size() && m_onSelect)
+                    m_onSelect(m_roadIncidentPanelAlerts[roadIndex].id);
+            }
+            else if (panel == OverlayPanelKind::Users) {
+                size_t userIndex = static_cast<size_t>(-1);
+                if (OnlineUserIndexAtPoint(x, y, userIndex)) {
+                    const std::vector<UsersPanelEntry> entries = UsersPanelEntries();
+                    if (userIndex < entries.size() && m_onUserAction)
+                        m_onUserAction(entries[userIndex].user, L"private");
+                }
+            }
             return;
         }
 
-        if (HitUsersPanelInterface(x, y) || HitPrivateChatInterface(x, y) || HitResponderChatInterface(x, y) || HitNotificationInterface(x, y) || HitNoteInterface(x, y))
+        if (HitNoteInterface(x, y))
             return;
 
         GeoPoint geo = ScreenToGeo(x, y);
@@ -3836,15 +4043,29 @@ private:
         POINT pt{ screenX, screenY };
         ScreenToClient(m_hwnd, &pt);
 
-        if (HitUsersPanelInterface(pt.x, pt.y))
+        const OverlayPanelKind panel = TopOverlayPanelAt(pt.x, pt.y);
+        if (panel != OverlayPanelKind::None) {
+            BringOverlayPanelToFront(panel);
+            if (panel == OverlayPanelKind::RoadIncidents) {
+                const RoadIncidentPanelLayout roadLayout = BuildRoadIncidentPanelLayout(BuildViewState());
+                if (roadLayout.hasPanel && PointInRect(pt.x, pt.y, roadLayout.listRect)) {
+                    m_roadIncidentPanelScroll = ClampValue(
+                        m_roadIncidentPanelScroll + (delta > 0 ? -94.0f : 94.0f),
+                        0.0f, MaxRoadIncidentPanelScroll(roadLayout));
+                    Invalidate();
+                }
+                else if (roadLayout.hasPanel && PointInRect(pt.x, pt.y, roadLayout.detailsRect)) {
+                    m_roadIncidentDetailsScroll = ClampValue(
+                        m_roadIncidentDetailsScroll + (delta > 0 ? -64.0f : 64.0f),
+                        0.0f, MaxRoadIncidentDetailsScroll(roadLayout));
+                    Invalidate();
+                }
+            }
+            else if (panel == OverlayPanelKind::Notification) {
+                TryScrollNotificationHistoryAt(pt.x, pt.y, delta);
+            }
             return;
-        if (HitPrivateChatInterface(pt.x, pt.y))
-            return;
-        if (HitResponderChatInterface(pt.x, pt.y))
-            return;
-
-        if (TryScrollNotificationHistoryAt(pt.x, pt.y, delta))
-            return;
+        }
 
         int newZoom = m_zoom + ((delta > 0) ? 1 : -1);
         newZoom = ClampValue(newZoom, kMinZoom, kMaxZoom);
@@ -5254,7 +5475,10 @@ private:
 
     bool IsOverlayHot(const D2D1_RECT_F& rect) const
     {
-        return PointInRect(m_hoverPoint.x, m_hoverPoint.y, rect);
+        if (!PointInRect(m_hoverPoint.x, m_hoverPoint.y, rect))
+            return false;
+        return m_drawingOverlayPanel == OverlayPanelKind::None ||
+            TopOverlayPanelAt(m_hoverPoint.x, m_hoverPoint.y) == m_drawingOverlayPanel;
     }
 
     bool IsOverlayPressed(const D2D1_RECT_F& rect) const
@@ -5276,13 +5500,78 @@ private:
     bool HitAnyOverlayInterface(int x, int y) const
     {
         return HitOverlayContextMenu(x, y) ||
+            HitFpsCounterInterface(x, y) ||
             HitCommsIndicatorInterface(x, y) ||
+            HitRoadIncidentPanelInterface(x, y) ||
             HitCountdownInterface(x, y) ||
             HitPrivateChatInterface(x, y) ||
             HitUsersPanelInterface(x, y) ||
             HitResponderChatInterface(x, y) ||
             HitNotificationInterface(x, y) ||
             HitNoteInterface(x, y);
+    }
+
+    bool HitOverlayPanel(OverlayPanelKind panel, int x, int y) const
+    {
+        switch (panel) {
+        case OverlayPanelKind::MapControls:
+            return m_showToolbarPanel &&
+                (PointInRect(x, y, BuildToolbarPanelRect()) ||
+                    (m_addNoteMode && PointInRect(x, y, BuildAddNotePromptRect())));
+        case OverlayPanelKind::Countdown: return HitCountdownInterface(x, y);
+        case OverlayPanelKind::RoadIncidents: return HitRoadIncidentPanelInterface(x, y);
+        case OverlayPanelKind::Notification: return HitNotificationInterface(x, y);
+        case OverlayPanelKind::Users: return HitUsersPanelInterface(x, y);
+        case OverlayPanelKind::PrivateChat: return HitPrivateChatInterface(x, y);
+        case OverlayPanelKind::ResponderChat: return HitResponderChatInterface(x, y);
+        case OverlayPanelKind::Comms: return HitCommsIndicatorInterface(x, y);
+        case OverlayPanelKind::Fps: return HitFpsCounterInterface(x, y);
+        case OverlayPanelKind::NoteEditor:
+            return m_noteEditorMode != NoteEditorMode::None &&
+                PointInRect(x, y, BuildNoteEditorRect(BuildViewState()));
+        }
+        return false;
+    }
+
+    OverlayPanelKind TopOverlayPanelAt(int x, int y) const
+    {
+        for (auto it = m_overlayPanelOrder.rbegin(); it != m_overlayPanelOrder.rend(); ++it) {
+            if (HitOverlayPanel(*it, x, y))
+                return *it;
+        }
+        return OverlayPanelKind::None;
+    }
+
+    void BringOverlayPanelToFront(OverlayPanelKind panel)
+    {
+        if (panel == OverlayPanelKind::None ||
+            (!m_overlayPanelOrder.empty() && m_overlayPanelOrder.back() == panel))
+            return;
+        const auto it = std::find(m_overlayPanelOrder.begin(), m_overlayPanelOrder.end(), panel);
+        if (it == m_overlayPanelOrder.end())
+            return;
+        m_overlayPanelOrder.erase(it);
+        m_overlayPanelOrder.push_back(panel);
+        Invalidate();
+    }
+
+    bool HandleOverlayPanelPointerDown(OverlayPanelKind panel, int x, int y)
+    {
+        switch (panel) {
+        case OverlayPanelKind::MapControls:
+        case OverlayPanelKind::NoteEditor:
+            return HandleNotePointerDown(x, y);
+        case OverlayPanelKind::Countdown: return HandleCountdownPointerDown(x, y);
+        case OverlayPanelKind::RoadIncidents: return HandleRoadIncidentPanelPointerDown(x, y);
+        case OverlayPanelKind::Notification: return HandleNotificationPointerDown(x, y);
+        case OverlayPanelKind::Users: return HandleUsersPanelPointerDown(x, y);
+        case OverlayPanelKind::PrivateChat: return HandlePrivateChatPointerDown(x, y);
+        case OverlayPanelKind::ResponderChat: return HandleResponderChatPointerDown(x, y);
+        case OverlayPanelKind::Comms: return HandleCommsIndicatorPointerDown(x, y);
+        case OverlayPanelKind::Fps: return HandleFpsCounterPointerDown(x, y);
+        case OverlayPanelKind::None: break;
+        }
+        return false;
     }
 
     bool HitOverlayContextMenu(int x, int y) const
@@ -5399,6 +5688,389 @@ private:
         ClearOverlayInputFocus();
         Invalidate();
         return true;
+    }
+
+    struct RoadIncidentPanelLayout
+    {
+        D2D1_RECT_F panelRect{};
+        D2D1_RECT_F toggleRect{};
+        D2D1_RECT_F closeRect{};
+        D2D1_RECT_F dragRect{};
+        D2D1_RECT_F searchRect{};
+        D2D1_RECT_F severityRect{};
+        D2D1_RECT_F listRect{};
+        D2D1_RECT_F detailsRect{};
+        D2D1_RECT_F scrollTrack{};
+        D2D1_RECT_F detailsScrollTrack{};
+        float progress = 1.0f;
+        bool hasPanel = false;
+    };
+
+    static bool IsScotlandIncident(const TrafficAlert& alert)
+    {
+        return alert.id.rfind(L"traffic-scotland:", 0) == 0 ||
+            ToLower(alert.region).find(L"scotland") != std::wstring::npos;
+    }
+
+    RoadIncidentPanelLayout BuildRoadIncidentPanelLayout(const ViewState& view) const
+    {
+        RoadIncidentPanelLayout layout;
+        if (!m_showRoadIncidentPanel)
+            return layout;
+
+        const float width = MinValue(430.0f, MaxValue(300.0f, static_cast<float>(view.width) - 2.0f * kOverlayUiMargin));
+        const float height = MinValue(760.0f, MaxValue(430.0f, static_cast<float>(view.height) - 2.0f * kOverlayUiMargin));
+        const float baseLeft = kOverlayUiMargin;
+        const float baseTop = kOverlayUiMargin + 120.0f;
+        float left = ClampValue(baseLeft + m_roadIncidentPanelOffsetX, kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, static_cast<float>(view.width) - kOverlayUiMargin - width));
+        float top = ClampValue(baseTop + m_roadIncidentPanelOffsetY, kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, static_cast<float>(view.height) - kOverlayUiMargin - height));
+        D2D1_RECT_F expanded = AvoidActiveNotification(D2D1::RectF(left, top, left + width, top + height));
+        left = expanded.left;
+        top = expanded.top;
+        layout.progress = ClampValue(m_roadIncidentPanelOpenProgress, 0.0f, 1.0f);
+        left -= (1.0f - layout.progress) * MaxValue(0.0f, width - 38.0f);
+        layout.panelRect = D2D1::RectF(left, top, left + width, top + height);
+        layout.toggleRect = D2D1::RectF(layout.panelRect.right - 34.0f, layout.panelRect.top + 10.0f,
+            layout.panelRect.right - 10.0f, layout.panelRect.top + 36.0f);
+        layout.closeRect = D2D1::RectF(layout.panelRect.right - 66.0f, layout.panelRect.top + 10.0f,
+            layout.panelRect.right - 42.0f, layout.panelRect.top + 36.0f);
+        layout.dragRect = D2D1::RectF(layout.panelRect.left + 12.0f, layout.panelRect.top,
+            layout.closeRect.left - 8.0f, layout.panelRect.top + 48.0f);
+        layout.searchRect = D2D1::RectF(layout.panelRect.left + 12.0f, layout.panelRect.top + 56.0f,
+            layout.panelRect.right - 144.0f, layout.panelRect.top + 90.0f);
+        layout.severityRect = D2D1::RectF(layout.searchRect.right + 8.0f, layout.searchRect.top,
+            layout.panelRect.right - 12.0f, layout.searchRect.bottom);
+        layout.detailsRect = D2D1::RectF(layout.panelRect.left + 12.0f, layout.panelRect.bottom - 194.0f,
+            layout.panelRect.right - 22.0f, layout.panelRect.bottom - 12.0f);
+        layout.listRect = D2D1::RectF(layout.panelRect.left + 12.0f, layout.searchRect.bottom + 10.0f,
+            layout.panelRect.right - 22.0f, layout.detailsRect.top - 10.0f);
+        layout.scrollTrack = D2D1::RectF(layout.listRect.right + 4.0f, layout.listRect.top,
+            layout.panelRect.right - 10.0f, layout.listRect.bottom);
+        layout.detailsScrollTrack = D2D1::RectF(layout.detailsRect.right + 4.0f, layout.detailsRect.top + 8.0f,
+            layout.panelRect.right - 10.0f, layout.detailsRect.bottom);
+        layout.hasPanel = true;
+        return layout;
+    }
+
+    float RoadIncidentPanelContentHeight() const
+    {
+        bool hasEngland = false;
+        bool hasScotland = false;
+        for (const TrafficAlert& alert : m_roadIncidentPanelAlerts) {
+            if (IsScotlandIncident(alert)) hasScotland = true; else hasEngland = true;
+        }
+        return static_cast<float>(m_roadIncidentPanelAlerts.size()) * 47.0f +
+            (hasEngland ? 25.0f : 0.0f) + (hasScotland ? 25.0f : 0.0f);
+    }
+
+    float MaxRoadIncidentPanelScroll(const RoadIncidentPanelLayout& layout) const
+    {
+        if (!layout.hasPanel)
+            return 0.0f;
+        return MaxValue(0.0f, RoadIncidentPanelContentHeight() - (layout.listRect.bottom - layout.listRect.top));
+    }
+
+    const TrafficAlert* SelectedRoadIncidentPanelAlert() const
+    {
+        for (const TrafficAlert& alert : m_roadIncidentPanelAlerts) {
+            if (alert.id == m_selectedId)
+                return &alert;
+        }
+        return nullptr;
+    }
+
+    float RoadIncidentDetailsContentHeight(const RoadIncidentPanelLayout& layout) const
+    {
+        const TrafficAlert* alert = SelectedRoadIncidentPanelAlert();
+        if (!alert)
+            return 0.0f;
+        return m_overlayUi.MeasureTextHeight(BuildAlertDetails(*alert), m_overlayUi.BodyFormat(),
+            MaxValue(40.0f, layout.detailsRect.right - layout.detailsRect.left - 8.0f)) + 18.0f;
+    }
+
+    float MaxRoadIncidentDetailsScroll(const RoadIncidentPanelLayout& layout) const
+    {
+        return MaxValue(0.0f, RoadIncidentDetailsContentHeight(layout) -
+            (layout.detailsRect.bottom - layout.detailsRect.top));
+    }
+
+    bool SetRoadIncidentScrollFromThumbY(float y, float dragOffset, bool details)
+    {
+        const RoadIncidentPanelLayout layout = BuildRoadIncidentPanelLayout(BuildViewState());
+        if (!layout.hasPanel || layout.progress <= 0.04f)
+            return false;
+        const D2D1_RECT_F track = details ? layout.detailsScrollTrack : layout.scrollTrack;
+        const float viewport = details
+            ? layout.detailsRect.bottom - layout.detailsRect.top
+            : layout.listRect.bottom - layout.listRect.top;
+        const float content = details
+            ? RoadIncidentDetailsContentHeight(layout)
+            : RoadIncidentPanelContentHeight();
+        float& scroll = details ? m_roadIncidentDetailsScroll : m_roadIncidentPanelScroll;
+        if (content <= viewport)
+            return false;
+        const D2D1_RECT_F thumb = ScrollbarThumbRect(track, content, viewport, scroll);
+        const float thumbHeight = thumb.bottom - thumb.top;
+        const float travel = MaxValue(1.0f, (track.bottom - track.top) - thumbHeight);
+        const float thumbTop = ClampValue(y - dragOffset, track.top, track.bottom - thumbHeight);
+        scroll = ClampValue(((thumbTop - track.top) / travel) * MaxValue(0.0f, content - viewport),
+            0.0f, MaxValue(0.0f, content - viewport));
+        Invalidate();
+        return true;
+    }
+
+    size_t RoadIncidentPanelIndexAtPoint(int x, int y) const
+    {
+        const RoadIncidentPanelLayout layout = BuildRoadIncidentPanelLayout(BuildViewState());
+        if (!layout.hasPanel || !PointInRect(x, y, layout.listRect))
+            return static_cast<size_t>(-1);
+        const float contentY = static_cast<float>(y) - layout.listRect.top + m_roadIncidentPanelScroll;
+        float cursor = 0.0f;
+        for (int group = 0; group < 2; ++group) {
+            bool hasGroup = false;
+            for (const TrafficAlert& alert : m_roadIncidentPanelAlerts) {
+                if (IsScotlandIncident(alert) == (group == 1)) { hasGroup = true; break; }
+            }
+            if (!hasGroup) continue;
+            cursor += 25.0f;
+            for (size_t i = 0; i < m_roadIncidentPanelAlerts.size(); ++i) {
+                if (IsScotlandIncident(m_roadIncidentPanelAlerts[i]) != (group == 1)) continue;
+                if (contentY >= cursor && contentY < cursor + 47.0f)
+                    return i;
+                cursor += 47.0f;
+            }
+        }
+        return static_cast<size_t>(-1);
+    }
+
+    void ClampRoadIncidentPanelOffsets(const ViewState& view)
+    {
+        const float width = MinValue(430.0f, MaxValue(300.0f, static_cast<float>(view.width) - 2.0f * kOverlayUiMargin));
+        const float height = MinValue(760.0f, MaxValue(430.0f, static_cast<float>(view.height) - 2.0f * kOverlayUiMargin));
+        const float baseLeft = kOverlayUiMargin;
+        const float baseTop = kOverlayUiMargin + 120.0f;
+        const float left = ClampValue(baseLeft + m_roadIncidentPanelOffsetX, kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, static_cast<float>(view.width) - kOverlayUiMargin - width));
+        const float top = ClampValue(baseTop + m_roadIncidentPanelOffsetY, kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, static_cast<float>(view.height) - kOverlayUiMargin - height));
+        m_roadIncidentPanelOffsetX = left - baseLeft;
+        m_roadIncidentPanelOffsetY = top - baseTop;
+    }
+
+    bool HitRoadIncidentPanelInterface(int x, int y) const
+    {
+        const RoadIncidentPanelLayout layout = BuildRoadIncidentPanelLayout(BuildViewState());
+        if (!layout.hasPanel)
+            return false;
+        if (PointInRect(x, y, layout.toggleRect))
+            return true;
+        return layout.progress > 0.04f && PointInRect(x, y, layout.panelRect);
+    }
+
+    void NotifyRoadIncidentFilterChanged()
+    {
+        m_roadIncidentPanelScroll = 0.0f;
+        if (m_onRoadIncidentFilter)
+            m_onRoadIncidentFilter(m_roadIncidentSearch, m_roadIncidentSeverityIndex);
+        Invalidate();
+    }
+
+    bool HandleRoadIncidentPanelPointerDown(int x, int y)
+    {
+        const RoadIncidentPanelLayout layout = BuildRoadIncidentPanelLayout(BuildViewState());
+        if (!layout.hasPanel)
+            return false;
+        if (PointInRect(x, y, layout.toggleRect)) {
+            ClearOverlayInputFocus();
+            m_roadIncidentPanelCollapsed = !m_roadIncidentPanelCollapsed;
+            StartRoadIncidentPanelAnimation(m_roadIncidentPanelCollapsed ? 0.0f : 1.0f);
+            NotifyOverlayPositionsChanged();
+            Invalidate();
+            return true;
+        }
+        if (layout.progress <= 0.04f || !PointInRect(x, y, layout.panelRect))
+            return false;
+        if (PointInRect(x, y, layout.closeRect)) {
+            if (m_onPanelClose) m_onPanelClose(L"road_incidents");
+            return true;
+        }
+        if (PointInRect(x, y, layout.dragRect)) {
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            m_draggingRoadIncidentPanel = true;
+            m_notificationUiMouseDown = true;
+            m_lastMouse = POINT{ x, y };
+            return true;
+        }
+        if (PointInRect(x, y, layout.searchRect)) {
+            SetOverlayInputFocus(OverlayInputFocus::RoadSearch);
+            Invalidate();
+            return true;
+        }
+        if (PointInRect(x, y, layout.severityRect)) {
+            ClearOverlayInputFocus();
+            m_roadIncidentSeverityIndex = (m_roadIncidentSeverityIndex + 1) % 5;
+            NotifyRoadIncidentFilterChanged();
+            return true;
+        }
+        const float listContent = RoadIncidentPanelContentHeight();
+        const float listViewport = layout.listRect.bottom - layout.listRect.top;
+        if (listContent > listViewport && PointInRect(x, y, layout.scrollTrack)) {
+            const D2D1_RECT_F thumb = ScrollbarThumbRect(
+                layout.scrollTrack, listContent, listViewport, m_roadIncidentPanelScroll);
+            m_draggingRoadIncidentPanelScrollbar = true;
+            m_roadIncidentScrollbarDragOffset = PointInRect(x, y, thumb)
+                ? static_cast<float>(y) - thumb.top
+                : (thumb.bottom - thumb.top) * 0.5f;
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            SetRoadIncidentScrollFromThumbY(static_cast<float>(y), m_roadIncidentScrollbarDragOffset, false);
+            return true;
+        }
+        const float detailsContent = RoadIncidentDetailsContentHeight(layout);
+        const float detailsViewport = layout.detailsRect.bottom - layout.detailsRect.top;
+        if (detailsContent > detailsViewport && PointInRect(x, y, layout.detailsScrollTrack)) {
+            const D2D1_RECT_F thumb = ScrollbarThumbRect(
+                layout.detailsScrollTrack, detailsContent, detailsViewport, m_roadIncidentDetailsScroll);
+            m_draggingRoadIncidentDetailsScrollbar = true;
+            m_roadIncidentDetailsScrollbarDragOffset = PointInRect(x, y, thumb)
+                ? static_cast<float>(y) - thumb.top
+                : (thumb.bottom - thumb.top) * 0.5f;
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            SetRoadIncidentScrollFromThumbY(static_cast<float>(y), m_roadIncidentDetailsScrollbarDragOffset, true);
+            return true;
+        }
+        const size_t index = RoadIncidentPanelIndexAtPoint(x, y);
+        if (index < m_roadIncidentPanelAlerts.size()) {
+            ClearOverlayInputFocus();
+            m_roadIncidentDetailsScroll = 0.0f;
+            if (m_onSelect) m_onSelect(m_roadIncidentPanelAlerts[index].id);
+            return true;
+        }
+        ClearOverlayInputFocus();
+        return true;
+    }
+
+    bool HandleRoadIncidentPanelRightClick(int x, int y)
+    {
+        const size_t index = RoadIncidentPanelIndexAtPoint(x, y);
+        if (index >= m_roadIncidentPanelAlerts.size())
+            return false;
+        const TrafficAlert& alert = m_roadIncidentPanelAlerts[index];
+        HideOverlayContextMenus();
+        m_mapEventContextMenuVisible = true;
+        m_mapEventContextSourceType = L"incident";
+        m_mapEventContextId = alert.id;
+        m_mapEventContextExcluded = alert.excluded;
+        m_mapEventContextMenuRect = BuildOverlayContextMenuRect(x, y, 188.0f, 48.0f);
+        ClearOverlayInputFocus();
+        Invalidate();
+        return true;
+    }
+
+    bool HandleRoadIncidentSearchKeyDown(WPARAM key)
+    {
+        if (key == VK_ESCAPE) { ClearOverlayInputFocus(); return true; }
+        if (key == VK_BACK) {
+            if (!m_roadIncidentSearch.empty()) {
+                m_roadIncidentSearch.pop_back();
+                NotifyRoadIncidentFilterChanged();
+            }
+            return true;
+        }
+        return false;
+    }
+
+    bool HandleRoadIncidentSearchChar(WPARAM ch)
+    {
+        if (ch < 0x20 || ch == 0x7f)
+            return true;
+        if (m_roadIncidentSearch.size() < 160) {
+            m_roadIncidentSearch.push_back(static_cast<wchar_t>(ch));
+            NotifyRoadIncidentFilterChanged();
+        }
+        return true;
+    }
+
+    void DrawRoadIncidentPanel(const ViewState& view)
+    {
+        const RoadIncidentPanelLayout layout = BuildRoadIncidentPanelLayout(view);
+        if (!layout.hasPanel || !m_rt || !m_overlayUi.EnsureResources(m_rt.Get(), g_dwriteFactory.Get()))
+            return;
+        const OverlayButton toggle = MakeOverlayButton(m_roadIncidentPanelCollapsed ? L">" : L"<", layout.toggleRect);
+        if (layout.progress <= 0.04f) {
+            m_overlayUi.DrawButton(toggle);
+            return;
+        }
+        m_roadIncidentDetailsScroll = ClampValue(
+            m_roadIncidentDetailsScroll, 0.0f, MaxRoadIncidentDetailsScroll(layout));
+        m_overlayUi.DrawGlassPanel(layout.panelRect, 12.0f);
+        m_overlayUi.DrawLabel(L"Road Incidents", m_overlayUi.TitleFormat(),
+            D2D1::RectF(layout.panelRect.left + 14.0f, layout.panelRect.top + 10.0f, layout.closeRect.left - 8.0f, layout.panelRect.top + 38.0f));
+        m_overlayUi.DrawButton(MakeOverlayButton(L"X", layout.closeRect));
+        m_overlayUi.DrawButton(toggle);
+        OverlayTextBox search;
+        search.text = m_roadIncidentSearch;
+        search.placeholder = L"Search incidents";
+        search.bounds = layout.searchRect;
+        search.focused = m_overlayInputFocus == OverlayInputFocus::RoadSearch;
+        m_overlayUi.DrawTextBox(search);
+        static const wchar_t* severityLabels[] = { L"All", L"Severe", L"Moderate", L"Minor", L"Unknown" };
+        m_overlayUi.DrawButton(MakeOverlayButton(severityLabels[m_roadIncidentSeverityIndex], layout.severityRect));
+
+        m_rt->PushAxisAlignedClip(layout.listRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        float y = layout.listRect.top - m_roadIncidentPanelScroll;
+        for (int group = 0; group < 2; ++group) {
+            bool hasGroup = false;
+            for (const TrafficAlert& alert : m_roadIncidentPanelAlerts) {
+                if (IsScotlandIncident(alert) == (group == 1)) { hasGroup = true; break; }
+            }
+            if (!hasGroup) continue;
+            m_overlayUi.DrawLabel(group == 0 ? L"England" : L"Scotland", m_overlayUi.ControlFormat(),
+                D2D1::RectF(layout.listRect.left + 4.0f, y + 3.0f, layout.listRect.right - 4.0f, y + 23.0f), m_overlayUi.MutedTextBrush());
+            y += 25.0f;
+            for (size_t i = 0; i < m_roadIncidentPanelAlerts.size(); ++i) {
+                const TrafficAlert& alert = m_roadIncidentPanelAlerts[i];
+                if (IsScotlandIncident(alert) != (group == 1)) continue;
+                const D2D1_RECT_F row = D2D1::RectF(layout.listRect.left, y, layout.listRect.right, y + 43.0f);
+                if (row.bottom >= layout.listRect.top && row.top <= layout.listRect.bottom) {
+                    OverlayButton background = MakeOverlayButton(L"", row);
+                    background.hot = background.hot || alert.id == m_selectedId;
+                    m_overlayUi.DrawButton(background);
+                    m_overlayUi.DrawLabel(BuildSeverityDisplay(alert.severity), m_overlayUi.SmallFormat(),
+                        D2D1::RectF(row.left + 7.0f, row.top + 5.0f, row.left + 78.0f, row.top + 22.0f), BrushForSeverity(alert.severity));
+                    ID2D1Brush* summaryBrush = alert.excluded ? m_exclusionBrush.Get() : m_overlayUi.TextBrush();
+                    m_overlayUi.DrawLabel(BuildAlertSummary(alert), m_overlayUi.BodyFormat(),
+                        D2D1::RectF(row.left + 82.0f, row.top + 3.0f, row.right - 7.0f, row.top + 23.0f), summaryBrush);
+                    m_overlayUi.DrawLabel(alert.updatedText, m_overlayUi.SmallFormat(),
+                        D2D1::RectF(row.left + 82.0f, row.top + 24.0f, row.right - 7.0f, row.bottom - 2.0f), m_overlayUi.MutedTextBrush());
+                }
+                y += 47.0f;
+            }
+        }
+        m_rt->PopAxisAlignedClip();
+        m_overlayUi.DrawScrollbar(layout.scrollTrack, RoadIncidentPanelContentHeight(),
+            layout.listRect.bottom - layout.listRect.top, m_roadIncidentPanelScroll);
+        m_overlayUi.DrawSeparator(layout.detailsRect.left, layout.detailsRect.right, layout.detailsRect.top);
+        const TrafficAlert* selectedAlert = SelectedRoadIncidentPanelAlert();
+        if (selectedAlert) {
+            const float detailsHeight = RoadIncidentDetailsContentHeight(layout);
+            m_rt->PushAxisAlignedClip(layout.detailsRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            m_overlayUi.DrawLabel(BuildAlertDetails(*selectedAlert), m_overlayUi.BodyFormat(),
+                D2D1::RectF(layout.detailsRect.left + 4.0f, layout.detailsRect.top + 8.0f - m_roadIncidentDetailsScroll,
+                    layout.detailsRect.right - 4.0f, layout.detailsRect.top + detailsHeight - m_roadIncidentDetailsScroll));
+            m_rt->PopAxisAlignedClip();
+            m_overlayUi.DrawScrollbar(layout.detailsScrollTrack, detailsHeight,
+                layout.detailsRect.bottom - layout.detailsRect.top, m_roadIncidentDetailsScroll);
+        }
+        else {
+            m_overlayUi.DrawLabel(m_roadIncidentPanelAlerts.empty() ? L"No incidents match the current filters." : L"Select an incident to view details.",
+                m_overlayUi.BodyFormat(), D2D1::RectF(layout.detailsRect.left + 4.0f, layout.detailsRect.top + 10.0f,
+                    layout.detailsRect.right - 4.0f, layout.detailsRect.bottom - 4.0f), m_overlayUi.MutedTextBrush());
+        }
     }
 
     struct ResponderChatLayout
@@ -7507,7 +8179,11 @@ private:
         if (!alert || !alert->hasLocation)
             return;
 
-        D2D1_POINT_2F marker = GeoToScreen(view, alert->latitude, alert->longitude);
+        const D2D1_POINT_2F location =
+            GeoToScreen(view, alert->latitude, alert->longitude);
+        const D2D1_POINT_2F marker = AlertMarkerHeadCenter(
+            location,
+            alert->id == m_selectedId);
         const bool hasLaneOverlay = HasLaneClosureOverlay(*alert);
         int total = 0;
         int closed = 0;
@@ -7620,16 +8296,22 @@ private:
                 continue;
             }
 
-            D2D1_POINT_2F p = GeoToScreen(view, m_alerts[i].latitude, m_alerts[i].longitude);
-            if (p.x < -20.0f || p.y < -20.0f || p.x > width + 20.0f || p.y > height + 20.0f)
+            const D2D1_POINT_2F location =
+                GeoToScreen(view, m_alerts[i].latitude, m_alerts[i].longitude);
+            if (location.x < -40.0f || location.y < -40.0f ||
+                location.x > width + 40.0f || location.y > height + 40.0f)
+            {
                 continue;
+            }
 
             ID2D1SolidColorBrush* sevBrush = BrushForSeverity(m_alerts[i].severity);
 
-            float outerR = selected ? 15.0f : 11.0f;
+            float outerR = AlertMarkerOuterRadius(selected);
             float innerR = selected ? 8.0f : 6.0f;
 
-            D2D1_POINT_2F tip = D2D1::Point2F(p.x, p.y + outerR + 7.0f);
+            const D2D1_POINT_2F p =
+                AlertMarkerHeadCenter(location, selected);
+            const D2D1_POINT_2F tip = location;
             D2D1_POINT_2F left = D2D1::Point2F(p.x - outerR * 0.58f, p.y + outerR * 0.35f);
             D2D1_POINT_2F right = D2D1::Point2F(p.x + outerR * 0.58f, p.y + outerR * 0.35f);
             ComPtr<ID2D1PathGeometry> pinGeom;
@@ -7651,13 +8333,22 @@ private:
             D2D1_ELLIPSE outer = D2D1::Ellipse(p, outerR, outerR);
             D2D1_ELLIPSE inner = D2D1::Ellipse(p, innerR, innerR);
 
-            if (selected)
-                m_rt->FillEllipse(D2D1::Ellipse(p, outerR + 5.0f, outerR + 5.0f), m_selectedBrush.Get());
             if (m_alerts[i].excluded)
                 m_rt->DrawEllipse(
                     D2D1::Ellipse(p, outerR + 3.0f, outerR + 3.0f),
                     m_exclusionBrush.Get(),
                     3.5f);
+            if (selected) {
+                const float selectedRadius = outerR + (m_alerts[i].excluded ? 9.0f : 5.0f);
+                m_rt->DrawEllipse(
+                    D2D1::Ellipse(p, selectedRadius, selectedRadius),
+                    m_selectedBrush.Get(),
+                    4.0f);
+                m_rt->DrawEllipse(
+                    D2D1::Ellipse(p, selectedRadius + 4.0f, selectedRadius + 4.0f),
+                    m_selectedBrush.Get(),
+                    1.25f);
+            }
 
             m_rt->FillEllipse(outer, sevBrush);
             m_rt->FillEllipse(inner, m_textBrush.Get());
@@ -8099,8 +8790,29 @@ private:
 
     D2D1_RECT_F BuildFpsCounterRect(const ViewState& view) const
     {
-        const D2D1_RECT_F rect = D2D1::RectF(18.0f, 18.0f, 76.0f, 46.0f);
+        const D2D1_RECT_F rect = D2D1::RectF(
+            18.0f + m_fpsCounterOffsetX,
+            18.0f + m_fpsCounterOffsetY,
+            76.0f + m_fpsCounterOffsetX,
+            46.0f + m_fpsCounterOffsetY);
         return ClampRectToView(AvoidActiveNotification(rect), view);
+    }
+
+    bool HitFpsCounterInterface(int x, int y) const
+    {
+        return m_showFpsCounter && PointInRect(x, y, BuildFpsCounterRect(BuildViewState()));
+    }
+
+    bool HandleFpsCounterPointerDown(int x, int y)
+    {
+        if (!HitFpsCounterInterface(x, y))
+            return false;
+        ClearOverlayInputFocus();
+        SetCapture(m_hwnd);
+        m_draggingFpsCounter = true;
+        m_notificationUiMouseDown = true;
+        m_lastMouse = POINT{ x, y };
+        return true;
     }
 
     void DrawFpsCounter()
@@ -8117,10 +8829,13 @@ private:
 
     D2D1_RECT_F BuildCommsIndicatorRect(const ViewState& view) const
     {
-        const D2D1_RECT_F fpsRect = BuildFpsCounterRect(view);
-        const float top = m_showFpsCounter ? fpsRect.bottom + 8.0f : fpsRect.top;
-        const D2D1_RECT_F rect = D2D1::RectF(fpsRect.left, top, fpsRect.left + 58.0f, top + 58.0f);
-        return ClampRectToView(rect, view);
+        const float baseTop = m_showFpsCounter ? 54.0f : 18.0f;
+        const D2D1_RECT_F rect = D2D1::RectF(
+            18.0f + m_commsIndicatorOffsetX,
+            baseTop + m_commsIndicatorOffsetY,
+            76.0f + m_commsIndicatorOffsetX,
+            baseTop + 58.0f + m_commsIndicatorOffsetY);
+        return ClampRectToView(AvoidActiveNotification(rect), view);
     }
 
     std::array<D2D1_RECT_F, 4> BuildCommsIndicatorCells(const ViewState& view) const
@@ -8141,6 +8856,39 @@ private:
     bool HitCommsIndicatorInterface(int x, int y) const
     {
         return m_showCommsIndicator && PointInRect(x, y, BuildCommsIndicatorRect(BuildViewState()));
+    }
+
+    bool HandleCommsIndicatorPointerDown(int x, int y)
+    {
+        if (!HitCommsIndicatorInterface(x, y))
+            return false;
+        ClearOverlayInputFocus();
+        SetCapture(m_hwnd);
+        m_draggingCommsIndicator = true;
+        m_notificationUiMouseDown = true;
+        m_lastMouse = POINT{ x, y };
+        return true;
+    }
+
+    void ClampFpsCounterOffsets(const ViewState& view)
+    {
+        const float left = ClampValue(18.0f + m_fpsCounterOffsetX, kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, static_cast<float>(view.width) - kOverlayUiMargin - 58.0f));
+        const float top = ClampValue(18.0f + m_fpsCounterOffsetY, kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, static_cast<float>(view.height) - kOverlayUiMargin - 28.0f));
+        m_fpsCounterOffsetX = left - 18.0f;
+        m_fpsCounterOffsetY = top - 18.0f;
+    }
+
+    void ClampCommsIndicatorOffsets(const ViewState& view)
+    {
+        const float baseTop = m_showFpsCounter ? 54.0f : 18.0f;
+        const float left = ClampValue(18.0f + m_commsIndicatorOffsetX, kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, static_cast<float>(view.width) - kOverlayUiMargin - 58.0f));
+        const float top = ClampValue(baseTop + m_commsIndicatorOffsetY, kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, static_cast<float>(view.height) - kOverlayUiMargin - 58.0f));
+        m_commsIndicatorOffsetX = left - 18.0f;
+        m_commsIndicatorOffsetY = top - baseTop;
     }
 
     void DrawCommsIndicator(const ViewState& view)
@@ -9160,6 +9908,11 @@ private:
             m_draggingUsersPanel ||
             m_draggingPrivateChatPanel ||
             m_draggingResponderChatPanel ||
+            m_draggingFpsCounter ||
+            m_draggingCommsIndicator ||
+            m_draggingRoadIncidentPanel ||
+            m_draggingRoadIncidentPanelScrollbar ||
+            m_draggingRoadIncidentDetailsScrollbar ||
             m_draggingNotificationHistoryScrollbar ||
             m_draggingNotificationHistoryContent;
     }
@@ -9376,6 +10129,31 @@ private:
             DrawSceneOverlaysInClip(strip, overlayView, boundaryView);
     }
 
+    void DrawOverlayPanel(OverlayPanelKind panel, const ViewState& view)
+    {
+        m_drawingOverlayPanel = panel;
+        switch (panel) {
+        case OverlayPanelKind::MapControls: DrawNoteToolbar(); break;
+        case OverlayPanelKind::Countdown: DrawCountdownPanel(view); break;
+        case OverlayPanelKind::RoadIncidents: DrawRoadIncidentPanel(view); break;
+        case OverlayPanelKind::Notification: DrawNotificationInterface(view); break;
+        case OverlayPanelKind::Users: DrawUsersPanel(view); break;
+        case OverlayPanelKind::PrivateChat: DrawPrivateChat(view); break;
+        case OverlayPanelKind::ResponderChat: DrawResponderChat(view); break;
+        case OverlayPanelKind::Comms: DrawCommsIndicator(view); break;
+        case OverlayPanelKind::Fps: DrawFpsCounter(); break;
+        case OverlayPanelKind::NoteEditor: DrawNoteEditor(view); break;
+        case OverlayPanelKind::None: break;
+        }
+        m_drawingOverlayPanel = OverlayPanelKind::None;
+    }
+
+    void DrawOverlayPanels(const ViewState& view)
+    {
+        for (OverlayPanelKind panel : m_overlayPanelOrder)
+            DrawOverlayPanel(panel, view);
+    }
+
     void OnPaint()
     {
         PAINTSTRUCT ps{};
@@ -9461,17 +10239,10 @@ private:
 
             stageStartMs = GetTickCount64();
             DrawMapChrome();
-            DrawCountdownPanel(view);
             DrawAlertOverlay(overlayView);
-            DrawNoteInterface(view);
-            DrawNotificationInterface(view);
-            DrawUsersPanel(view);
-            DrawPrivateChat(view);
-            DrawResponderChat(view);
-            DrawCommsIndicator(view);
-            DrawOverlayContextMenus();
             UpdateFpsSample();
-            DrawFpsCounter();
+            DrawOverlayPanels(view);
+            DrawOverlayContextMenus();
             TraceSlowPaintStage(L"DrawMapUi", GetTickCount64() - stageStartMs, interactive);
 
             stageStartMs = GetTickCount64();
@@ -10088,6 +10859,7 @@ private:
     MapDisplayModeCallback m_onMapDisplayMode;
     IrelandVisibilityCallback m_onIrelandVisibility;
     OverlayPositionsChangedCallback m_onOverlayPositionsChanged;
+    RoadIncidentFilterCallback m_onRoadIncidentFilter;
 
     int m_zoom = kDefaultZoom;
     double m_centerLat = kDefaultCenterLat;
@@ -10120,6 +10892,19 @@ private:
     double m_noteEditorLat = 0.0;
     double m_noteEditorLon = 0.0;
     OverlayInputFocus m_overlayInputFocus = OverlayInputFocus::None;
+    std::vector<OverlayPanelKind> m_overlayPanelOrder{
+        OverlayPanelKind::MapControls,
+        OverlayPanelKind::Countdown,
+        OverlayPanelKind::RoadIncidents,
+        OverlayPanelKind::Notification,
+        OverlayPanelKind::Users,
+        OverlayPanelKind::PrivateChat,
+        OverlayPanelKind::ResponderChat,
+        OverlayPanelKind::Comms,
+        OverlayPanelKind::Fps,
+        OverlayPanelKind::NoteEditor
+    };
+    OverlayPanelKind m_drawingOverlayPanel = OverlayPanelKind::None;
     AppNotification m_activeNotification;
     std::vector<AppNotification> m_notificationHistory;
     bool m_hasActiveNotification = false;
@@ -10155,6 +10940,13 @@ private:
     bool m_showToolbarPanel = true;
     bool m_showCountdownPanel = false;
     bool m_showCommsIndicator = true;
+    bool m_showRoadIncidentPanel = true;
+    bool m_roadIncidentPanelCollapsed = false;
+    float m_roadIncidentPanelOpenProgress = 1.0f;
+    float m_roadIncidentPanelAnimationStart = 1.0f;
+    float m_roadIncidentPanelAnimationTarget = 1.0f;
+    ULONGLONG m_roadIncidentPanelAnimationStartMs = 0;
+    bool m_roadIncidentPanelAnimating = false;
     bool m_avoidOverlaysForNotifications = true;
     bool m_countdownRunning = false;
     bool m_countdownStarted = false;
@@ -10226,6 +11018,24 @@ private:
     bool m_draggingToolbarPanel = false;
     float m_toolbarPanelOffsetX = 0.0f;
     float m_toolbarPanelOffsetY = 0.0f;
+    bool m_draggingFpsCounter = false;
+    float m_fpsCounterOffsetX = 0.0f;
+    float m_fpsCounterOffsetY = 0.0f;
+    bool m_draggingCommsIndicator = false;
+    float m_commsIndicatorOffsetX = 0.0f;
+    float m_commsIndicatorOffsetY = 0.0f;
+    bool m_draggingRoadIncidentPanel = false;
+    bool m_draggingRoadIncidentPanelScrollbar = false;
+    bool m_draggingRoadIncidentDetailsScrollbar = false;
+    float m_roadIncidentScrollbarDragOffset = 0.0f;
+    float m_roadIncidentDetailsScrollbarDragOffset = 0.0f;
+    float m_roadIncidentPanelOffsetX = 0.0f;
+    float m_roadIncidentPanelOffsetY = 0.0f;
+    float m_roadIncidentPanelScroll = 0.0f;
+    float m_roadIncidentDetailsScroll = 0.0f;
+    int m_roadIncidentSeverityIndex = 0;
+    std::wstring m_roadIncidentSearch;
+    std::vector<TrafficAlert> m_roadIncidentPanelAlerts;
     float m_notificationHistoryScroll = 0.0f;
     float m_notificationHistoryScrollbarDragOffset = 0.0f;
     D2D1_RECT_F m_lastActiveNotificationRect{};
@@ -10449,6 +11259,11 @@ void MapView::SetOverlayPositionsChangedCallback(OverlayPositionsChangedCallback
     m_impl->SetOverlayPositionsChangedCallback(std::move(cb));
 }
 
+void MapView::SetRoadIncidentFilterCallback(RoadIncidentFilterCallback cb)
+{
+    m_impl->SetRoadIncidentFilterCallback(std::move(cb));
+}
+
 void MapView::SetChatClearEnabled(bool enabled)
 {
     m_impl->SetChatClearEnabled(enabled);
@@ -10462,6 +11277,21 @@ void MapView::SetAlerts(const std::vector<TrafficAlert>& alerts)
 void MapView::SetIncidentOverlayVisible(bool visible)
 {
     m_impl->SetIncidentOverlayVisible(visible);
+}
+
+void MapView::SetRoadIncidentPanelAlerts(const std::vector<TrafficAlert>& alerts)
+{
+    m_impl->SetRoadIncidentPanelAlerts(alerts);
+}
+
+void MapView::SetRoadIncidentPanelFilter(const std::wstring& searchText, int severityIndex)
+{
+    m_impl->SetRoadIncidentPanelFilter(searchText, severityIndex);
+}
+
+void MapView::SetRoadIncidentPanelVisible(bool visible)
+{
+    m_impl->SetRoadIncidentPanelVisible(visible);
 }
 
 void MapView::SetNotes(const std::vector<MapNote>& notes)

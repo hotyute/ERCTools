@@ -107,6 +107,9 @@ constexpr int IDM_VIEW_COUNTDOWN_TIMER = 2055;
 constexpr int IDM_SETTINGS_GENERAL = 2056;
 constexpr int IDM_SETTINGS_SOUNDS = 2057;
 constexpr int IDM_VIEW_COMMS_INDICATOR = 2058;
+constexpr int IDM_VIEW_ROAD_INCIDENT_PANEL = 2061;
+constexpr int IDM_SETTINGS_DIAGNOSTICS = 2059;
+constexpr int IDM_SETTINGS_TEMPLATE = 2060;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -147,7 +150,9 @@ constexpr int IDC_INCIDENT_FILTERS_UNPLANNED_CHECK = 2209;
 constexpr int IDC_INCIDENT_FILTERS_PLANNED_CHECK = 2210;
 constexpr int IDC_INCIDENT_FILTERS_CLOSE_BTN = 2211;
 constexpr int IDC_INCIDENT_FILTERS_SIDE_PANEL_LIST_ONLY_CHECK = 2212;
-constexpr int IDC_INCIDENT_FILTERS_SHOW_UNRESOLVED_CHECK = 2213;
+constexpr int IDC_DIAGNOSTICS_SHOW_UNRESOLVED_CHECK = 2213;
+constexpr int IDC_DIAGNOSTICS_CLOSE_BTN = 2214;
+constexpr int IDC_DIAGNOSTICS_TAB = 2215;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_TITLE_LABEL = 2301;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_DESC_LABEL = 2302;
 constexpr int IDC_INCIDENT_NOTIFICATIONS_ROADS_LABEL = 2303;
@@ -234,6 +239,7 @@ constexpr int IDC_TEMPLATES_WIZARD_CLOSE = 2609;
 constexpr int IDC_TEMPLATES_WIZARD_COPY_LOCATION = 2610;
 constexpr int IDC_TEMPLATES_WIZARD_TITLE_PREVIEW = 2611;
 constexpr int IDC_TEMPLATES_WIZARD_COPY_TITLE = 2612;
+constexpr int IDC_TEMPLATES_WIZARD_TAB = 2613;
 constexpr int IDC_TEMPLATES_EDITOR_LIST = 2621;
 constexpr int IDC_TEMPLATES_EDITOR_NAME = 2622;
 constexpr int IDC_TEMPLATES_EDITOR_BODY = 2623;
@@ -243,6 +249,7 @@ constexpr int IDC_TEMPLATES_EDITOR_DELETE = 2626;
 constexpr int IDC_TEMPLATES_EDITOR_CLOSE = 2627;
 constexpr int IDC_TEMPLATES_EDITOR_TITLE = 2628;
 constexpr int IDC_TEMPLATES_EDITOR_WEATHER_TYPE = 2629;
+constexpr int IDC_TEMPLATES_EDITOR_TAB = 2630;
 constexpr int IDC_ACCOUNT_CREATOR_USERNAME = 2641;
 constexpr int IDC_ACCOUNT_CREATOR_DISPLAY_NAME = 2642;
 constexpr int IDC_ACCOUNT_CREATOR_PASSWORD = 2643;
@@ -251,7 +258,7 @@ constexpr int IDC_ACCOUNT_CREATOR_ACTIVE = 2645;
 constexpr int IDC_ACCOUNT_CREATOR_CREATE = 2646;
 constexpr int IDC_ACCOUNT_CREATOR_CLOSE = 2647;
 constexpr int IDC_ACCOUNT_CREATOR_STATUS = 2648;
-constexpr int IDC_ADMIN_LOG_TYPE_COMBO = 2661;
+constexpr int IDC_ADMIN_LOG_TAB = 2661;
 constexpr int IDC_ADMIN_LOG_LIST = 2662;
 constexpr int IDC_ADMIN_LOG_REFRESH_BTN = 2663;
 constexpr int IDC_ADMIN_LOG_CLOSE_BTN = 2664;
@@ -278,8 +285,18 @@ constexpr int IDC_TRAFFIC_SCOTLAND_STATUS = 2725;
 constexpr int IDC_INCIDENT_EXCLUSIONS_LIST = 2731;
 constexpr int IDC_INCIDENT_EXCLUSIONS_REMOVE = 2732;
 constexpr int IDC_INCIDENT_EXCLUSIONS_CLOSE = 2733;
+constexpr int IDC_TEMPLATE_SETTINGS_TAB = 2741;
+constexpr int IDC_TEMPLATE_SHORTHAND_LIST = 2742;
+constexpr int IDC_TEMPLATE_SHORTHAND_PHRASE_EDIT = 2743;
+constexpr int IDC_TEMPLATE_SHORTHAND_VALUE_EDIT = 2744;
+constexpr int IDC_TEMPLATE_SHORTHAND_ADD = 2745;
+constexpr int IDC_TEMPLATE_SHORTHAND_UPDATE = 2746;
+constexpr int IDC_TEMPLATE_SHORTHAND_REMOVE = 2747;
+constexpr int IDC_TEMPLATE_SETTINGS_CLOSE = 2748;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 constexpr const wchar_t* kSoundsClassName = L"ERCToolsSoundsWindow";
+constexpr const wchar_t* kDiagnosticsClassName = L"ERCToolsDiagnosticsWindow";
+constexpr const wchar_t* kTemplateSettingsClassName = L"ERCToolsTemplateSettingsWindow";
 constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
 constexpr const wchar_t* kIncidentNotificationsClassName = L"TrafficEnglandIncidentNotificationsWindow";
 constexpr const wchar_t* kIncidentsListClassName = L"TrafficEnglandIncidentsListWindow";
@@ -1015,6 +1032,109 @@ static void AutoSizeTextControls(HWND hwnd)
     EnumChildWindows(hwnd, AutoSizeTextChildEnumProc, reinterpret_cast<LPARAM>(hwnd));
 }
 
+struct AutoFlowControlInfo
+{
+    HWND hwnd = nullptr;
+    RECT rect{};
+};
+
+struct AutoFlowCollectState
+{
+    HWND parent = nullptr;
+    std::vector<AutoFlowControlInfo> controls;
+};
+
+static BOOL CALLBACK AutoFlowChildEnumProc(HWND child, LPARAM param)
+{
+    auto* state = reinterpret_cast<AutoFlowCollectState*>(param);
+    if (!state || GetParent(child) != state->parent)
+        return TRUE;
+    if ((GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE) == 0)
+        return TRUE;
+
+    RECT rect{};
+    if (!GetWindowRect(child, &rect))
+        return TRUE;
+    MapWindowPoints(HWND_DESKTOP, state->parent, reinterpret_cast<POINT*>(&rect), 2);
+    state->controls.push_back({ child, rect });
+    return TRUE;
+}
+
+static void AutoFlowWrappedLabels(HWND hwnd, int verticalGap = 8)
+{
+    if (!hwnd)
+        return;
+
+    AutoFlowCollectState state;
+    state.parent = hwnd;
+    EnumChildWindows(hwnd, AutoFlowChildEnumProc, reinterpret_cast<LPARAM>(&state));
+    if (state.controls.empty())
+        return;
+
+    std::vector<HWND> flowLabels;
+    for (const AutoFlowControlInfo& control : state.controls) {
+        if (IsClassName(control.hwnd, L"STATIC") && GetPropW(control.hwnd, kAutoLabelMaxWidthProp))
+            flowLabels.push_back(control.hwnd);
+    }
+    std::sort(flowLabels.begin(), flowLabels.end(), [hwnd](HWND a, HWND b) {
+        RECT aRect{};
+        RECT bRect{};
+        GetWindowRect(a, &aRect);
+        GetWindowRect(b, &bRect);
+        MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<POINT*>(&aRect), 2);
+        MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<POINT*>(&bRect), 2);
+        return aRect.top < bRect.top;
+        });
+
+    for (HWND label : flowLabels) {
+        RECT labelRect{};
+        if (!GetWindowRect(label, &labelRect))
+            continue;
+        MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<POINT*>(&labelRect), 2);
+
+        int nextRowTop = INT_MAX;
+        for (const AutoFlowControlInfo& control : state.controls) {
+            if (control.hwnd == label)
+                continue;
+
+            RECT rect{};
+            if (!GetWindowRect(control.hwnd, &rect))
+                continue;
+            MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<POINT*>(&rect), 2);
+            const bool overlapsHorizontally = rect.right > labelRect.left && rect.left < labelRect.right;
+            if (overlapsHorizontally && rect.top > labelRect.top)
+                nextRowTop = MinInt(nextRowTop, rect.top);
+        }
+
+        if (nextRowTop == INT_MAX)
+            continue;
+        const int requiredTop = labelRect.bottom + verticalGap;
+        if (nextRowTop >= requiredTop)
+            continue;
+
+        const int offset = requiredTop - nextRowTop;
+        for (const AutoFlowControlInfo& control : state.controls) {
+            if (control.hwnd == label)
+                continue;
+
+            RECT rect{};
+            if (!GetWindowRect(control.hwnd, &rect))
+                continue;
+            MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<POINT*>(&rect), 2);
+            if (rect.top < nextRowTop)
+                continue;
+            SetWindowPos(
+                control.hwnd,
+                nullptr,
+                rect.left,
+                rect.top + offset,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
 struct AutoLayoutButtonInfo
 {
     HWND hwnd = nullptr;
@@ -1126,6 +1246,7 @@ static void AutoFitWindowToChildren(HWND hwnd, int padding = 28)
         return;
 
     AutoSizeTextControls(hwnd);
+    AutoFlowWrappedLabels(hwnd);
     AutoLayoutButtonRows(hwnd);
 
     RECT childBounds{ 0, 0, 0, 0 };
@@ -2771,6 +2892,14 @@ private:
             m_mapOverlayPositions = positions;
             SaveSettings();
             });
+        m_map.SetRoadIncidentFilterCallback([this](const std::wstring& searchText, int severityIndex) {
+            m_syncingControls = true;
+            SetWindowTextSafe(m_searchEdit, searchText);
+            SendMessageW(m_severityCombo, CB_SETCURSEL, ClampValue(severityIndex, 0, 4), 0);
+            m_syncingControls = false;
+            const size_t visible = ApplyFilters(false);
+            SetStatusText(L"Showing " + std::to_wstring(visible) + L" alert(s).");
+            });
         m_map.SetChatClearEnabled(CanClearResponderChat());
         m_map.SetNotificationPolygons(m_incidentNotificationRegions);
         m_map.SetNotificationPolygonsVisible(m_showIncidentNotificationRegionPolygons);
@@ -2792,6 +2921,9 @@ private:
         m_map.SetCountdownPresets(m_countdownPresets);
         m_map.SetCountdownVisible(m_showCountdownTimer);
         m_map.SetCommsIndicatorVisible(m_showCommsIndicator);
+        m_map.SetRoadIncidentPanelVisible(m_isSidePanelVisible);
+        m_map.SetRoadIncidentPanelFilter(GetWindowTextString(m_searchEdit),
+            static_cast<int>(SendMessageW(m_severityCombo, CB_GETCURSEL, 0, 0)));
         m_map.SetOverlayPositions(m_mapOverlayPositions);
         m_map.SetNotificationAvoidanceEnabled(m_avoidOverlaysForNotifications);
         ApplySoundSettings();
@@ -2808,13 +2940,11 @@ private:
         SetTimer(m_hwnd, kEarthquakeRefreshTimerId, 10 * 60 * 1000, nullptr);
         SetTimer(m_hwnd, kWeatherSystemsRefreshTimerId, 10 * 60 * 1000, nullptr);
 
-        if (!ShouldUseServerToFetchData()) {
-            RefreshFeedAsync();
-            FetchEarthquakesAsync(true);
-            FetchWeatherSystemsAsync(true);
-            FetchWeatherWarningsAsync(true);
-            FetchFloodsAsync(true);
-        }
+        RefreshFeedAsync();
+        FetchEarthquakesAsync(true);
+        FetchWeatherSystemsAsync(true);
+        FetchWeatherWarningsAsync(true);
+        FetchFloodsAsync(true);
         if (IsOnlineMode()) {
             PollServerAsync();
             CheckForClientUpdateAsync();
@@ -2842,58 +2972,20 @@ private:
         const int topY = 12;
         const int topBarH = topY;
         int bodyTop = topBarH;
-        int leftW = m_isSidePanelVisible ? 440 : 0;
-        int detailsH = 185;
-
-        int leftX = pad;
-        int leftY = bodyTop + pad;
-        int leftInnerW = MaxInt(10, leftW - pad * 2);
-
-        const int panelShow = m_isSidePanelVisible ? SW_SHOW : SW_HIDE;
+        // The incident browser is rendered by MapView. These controls remain as
+        // hidden state holders for the existing filter/list selection pipeline.
         for (HWND h : { m_searchLabel, m_searchEdit, m_severityLabel, m_severityCombo, m_listView, m_detailsEdit })
-            ShowWindow(h, panelShow);
+            ShowWindow(h, SW_HIDE);
+        ShowWindow(m_panelTabBtn, SW_HIDE);
 
-        if (m_isSidePanelVisible) {
-            const int searchLabelW = AutoLabelWidth(m_searchLabel, leftInnerW);
-            const int searchLabelH = AutoLabelHeight(m_searchLabel, labelH, searchLabelW);
-            MoveLabelToText(m_searchLabel, leftX, leftY, leftInnerW);
-            MoveWindow(m_searchEdit, leftX, leftY + searchLabelH + 2, leftInnerW, controlH, TRUE);
-
-            const int severityY = leftY + searchLabelH + controlH + 12;
-            const int severityLabelW = AutoLabelWidth(m_severityLabel, leftInnerW);
-            const int severityLabelH = AutoLabelHeight(m_severityLabel, labelH, severityLabelW);
-            MoveLabelToText(m_severityLabel, leftX, severityY, leftInnerW);
-            MoveWindow(m_severityCombo, leftX, severityY + severityLabelH + 2, leftInnerW, 180, TRUE);
-
-            int listTop = severityY + severityLabelH + controlH + 18;
-            int bodyHeight = static_cast<int>(height) - bodyTop - statusH - pad * 2;
-            int listHeight = MaxInt(150, bodyHeight - (listTop - leftY) - detailsH - 20);
-
-            MoveWindow(m_listView, leftX, listTop, leftInnerW, listHeight, TRUE);
-            int detailsTop = listTop + listHeight + 10;
-            MoveWindow(m_detailsEdit, leftX, detailsTop, leftInnerW, detailsH, TRUE);
-        }
-
-        int mapX = (m_isSidePanelVisible ? leftW + pad : pad);
+        int mapX = pad;
         int mapY = bodyTop + pad;
         LONG mapW = MaxLong(100L, width - mapX - pad);
         LONG mapH = MaxLong(100L, height - mapY - statusH - pad);
 
         MoveWindow(m_map.Hwnd(), mapX, mapY, mapW, mapH, TRUE);
 
-        const int tabW = 24;
-        const int tabH = 72;
-        int tabX = m_isSidePanelVisible ? (leftW - tabW / 2) : 0;
-        int tabY = bodyTop + MaxInt(60, static_cast<int>((height - bodyTop - statusH) / 2 - tabH / 2));
-        MoveWindow(m_panelTabBtn, tabX, tabY, tabW, tabH, TRUE);
-
         SendMessageW(m_statusBar, WM_SIZE, 0, 0);
-
-        if (m_isSidePanelVisible) {
-            SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 0, 94);
-            SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 1, MaxInt(120, leftInnerW - 264));
-            SendMessageW(m_listView, LVM_SETCOLUMNWIDTH, 2, 160);
-        }
     }
 
     void OnCommand(int id, int code)
@@ -2902,20 +2994,25 @@ private:
         case IDC_PANEL_TAB_BTN:
             if (code == BN_CLICKED) {
                 m_isSidePanelVisible = !m_isSidePanelVisible;
-                SetWindowTextW(m_panelTabBtn, m_isSidePanelVisible ? L"\x25C0" : L"\x25B6");
-                Layout();
+                m_map.SetRoadIncidentPanelVisible(m_isSidePanelVisible);
+                UpdateViewMenu();
+                SaveSettings();
             }
             break;
 
         case IDC_SEARCH_EDIT:
-            if (code == EN_CHANGE) {
+            if (code == EN_CHANGE && !m_syncingControls) {
+                m_map.SetRoadIncidentPanelFilter(GetWindowTextString(m_searchEdit),
+                    static_cast<int>(SendMessageW(m_severityCombo, CB_GETCURSEL, 0, 0)));
                 size_t visible = ApplyFilters(false);
                 SetStatusText(L"Showing " + std::to_wstring(visible) + L" alert(s).");
             }
             break;
 
         case IDC_SEVERITY_COMBO:
-            if (code == CBN_SELCHANGE) {
+            if (code == CBN_SELCHANGE && !m_syncingControls) {
+                m_map.SetRoadIncidentPanelFilter(GetWindowTextString(m_searchEdit),
+                    static_cast<int>(SendMessageW(m_severityCombo, CB_GETCURSEL, 0, 0)));
                 size_t visible = ApplyFilters(false);
                 SetStatusText(L"Showing " + std::to_wstring(visible) + L" alert(s).");
             }
@@ -2927,6 +3024,14 @@ private:
 
         case IDM_SETTINGS_SOUNDS:
             ShowSoundsWindow();
+            break;
+
+        case IDM_SETTINGS_DIAGNOSTICS:
+            ShowDiagnosticsWindow();
+            break;
+
+        case IDM_SETTINGS_TEMPLATE:
+            ShowTemplateSettingsWindow();
             break;
 
         case IDM_FILE_CACHE_MANAGER:
@@ -3011,11 +3116,11 @@ private:
             break;
 
         case IDM_EARTHQUAKES_TEMPLATES_WIZARD:
-            ShowEarthquakeTemplatesWizardWindow();
+            ShowTemplatesWizardWindow();
             break;
 
         case IDM_EARTHQUAKES_EDIT_TEMPLATES:
-            ShowEarthquakeTemplatesEditorWindow();
+            ShowTemplatesEditorWindow();
             break;
 
         case IDM_SHOW_EARTHQUAKES:
@@ -3045,11 +3150,11 @@ private:
             break;
 
         case IDM_WEATHER_SYSTEMS_TEMPLATES_WIZARD:
-            ShowWeatherSystemsTemplatesWizardWindow();
+            ShowTemplatesWizardWindow();
             break;
 
         case IDM_WEATHER_SYSTEMS_EDIT_TEMPLATES:
-            ShowWeatherSystemsTemplatesEditorWindow();
+            ShowTemplatesEditorWindow();
             break;
 
         case IDM_SHOW_WEATHER_SYSTEMS:
@@ -3130,6 +3235,9 @@ private:
 
         case IDM_VIEW_COMMS_INDICATOR:
             ToggleCommsIndicator();
+            break;
+        case IDM_VIEW_ROAD_INCIDENT_PANEL:
+            ToggleRoadIncidentPanel();
             break;
 
         case IDM_VIEW_SOUND_CUES:
@@ -3540,6 +3648,7 @@ private:
             readBool("showMapControls", m_showMapControls);
             readBool("showCountdownTimer", m_showCountdownTimer);
             readBool("showCommsIndicator", m_showCommsIndicator);
+            readBool("showRoadIncidentPanel", m_isSidePanelVisible);
             {
                 auto positionsIt = settings->find("mapOverlayPositions");
                 if (positionsIt != settings->end() && positionsIt->is_object()) {
@@ -3566,6 +3675,13 @@ private:
                     readPosition("privateChatY", m_mapOverlayPositions.privateChatY);
                     readPosition("responderChatX", m_mapOverlayPositions.responderChatX);
                     readPosition("responderChatY", m_mapOverlayPositions.responderChatY);
+                    readPosition("fpsX", m_mapOverlayPositions.fpsX);
+                    readPosition("fpsY", m_mapOverlayPositions.fpsY);
+                    readPosition("commsX", m_mapOverlayPositions.commsX);
+                    readPosition("commsY", m_mapOverlayPositions.commsY);
+                    readPosition("roadIncidentsX", m_mapOverlayPositions.roadIncidentsX);
+                    readPosition("roadIncidentsY", m_mapOverlayPositions.roadIncidentsY);
+                    readCollapsed("roadIncidentsCollapsed", m_mapOverlayPositions.roadIncidentsCollapsed);
                     readCollapsed("notificationHistoryCollapsed", m_mapOverlayPositions.notificationHistoryCollapsed);
                     readCollapsed("usersCollapsed", m_mapOverlayPositions.usersCollapsed);
                     readCollapsed("responderChatCollapsed", m_mapOverlayPositions.responderChatCollapsed);
@@ -3633,6 +3749,18 @@ private:
             readBool("incidentFilterPlanned", m_incidentFilterPlanned);
             readBool("incidentSidePanelListOnly", m_incidentSidePanelListOnly);
             readBool("showUnresolvedIncidents", m_showUnresolvedIncidents);
+            auto shorthandIt = settings->find("templateShorthand");
+            if (shorthandIt != settings->end() && shorthandIt->is_array()) {
+                m_templateShorthand.clear();
+                for (const json& item : *shorthandIt) {
+                    if (!item.is_object())
+                        continue;
+                    const std::wstring phrase = Utf8ToWide(item.value("phrase", std::string{}));
+                    const std::wstring shorthand = Utf8ToWide(item.value("shorthand", std::string{}));
+                    if (!Trim(phrase).empty() && !Trim(shorthand).empty())
+                        m_templateShorthand.push_back({ Trim(phrase), Trim(shorthand) });
+                }
+            }
             readString("incidentNotifyRoads", m_incidentNotifyRoads);
             readString("incidentNotifyRoadExclusions", m_incidentNotifyRoadExclusions);
             readString("incidentNotifyLaneThresholdText", m_incidentNotifyLaneThresholdText);
@@ -4131,6 +4259,7 @@ private:
             settings["showMapControls"] = m_showMapControls;
             settings["showCountdownTimer"] = m_showCountdownTimer;
             settings["showCommsIndicator"] = m_showCommsIndicator;
+            settings["showRoadIncidentPanel"] = m_isSidePanelVisible;
             settings["mapOverlayPositions"] = {
                 { "mapControlsX", m_mapOverlayPositions.mapControlsX },
                 { "mapControlsY", m_mapOverlayPositions.mapControlsY },
@@ -4142,6 +4271,13 @@ private:
                 { "privateChatY", m_mapOverlayPositions.privateChatY },
                 { "responderChatX", m_mapOverlayPositions.responderChatX },
                 { "responderChatY", m_mapOverlayPositions.responderChatY },
+                { "fpsX", m_mapOverlayPositions.fpsX },
+                { "fpsY", m_mapOverlayPositions.fpsY },
+                { "commsX", m_mapOverlayPositions.commsX },
+                { "commsY", m_mapOverlayPositions.commsY },
+                { "roadIncidentsX", m_mapOverlayPositions.roadIncidentsX },
+                { "roadIncidentsY", m_mapOverlayPositions.roadIncidentsY },
+                { "roadIncidentsCollapsed", m_mapOverlayPositions.roadIncidentsCollapsed },
                 { "notificationHistoryCollapsed", m_mapOverlayPositions.notificationHistoryCollapsed },
                 { "usersCollapsed", m_mapOverlayPositions.usersCollapsed },
                 { "responderChatCollapsed", m_mapOverlayPositions.responderChatCollapsed }
@@ -4175,6 +4311,13 @@ private:
             settings["incidentFilterPlanned"] = m_incidentFilterPlanned;
             settings["incidentSidePanelListOnly"] = m_incidentSidePanelListOnly;
             settings["showUnresolvedIncidents"] = m_showUnresolvedIncidents;
+            settings["templateShorthand"] = json::array();
+            for (const auto& entry : m_templateShorthand) {
+                json item = json::object();
+                item["phrase"] = WideToUtf8(entry.first);
+                item["shorthand"] = WideToUtf8(entry.second);
+                settings["templateShorthand"].push_back(std::move(item));
+            }
             settings["incidentNotifyRoads"] = WideToUtf8(m_incidentNotifyRoads);
             settings["incidentNotifyRoadExclusions"] = WideToUtf8(m_incidentNotifyRoadExclusions);
             settings["incidentNotifyLaneThresholdText"] = WideToUtf8(m_incidentNotifyLaneThresholdText);
@@ -4411,6 +4554,8 @@ private:
         ApplyFloodsListFilter(false);
         RenderNotificationHistory();
         SyncSettingsControls();
+        SyncDiagnosticsControls();
+        RefreshTemplateShorthandList();
     }
 
     void SyncGlobalSettingsFromServerAsync()
@@ -6128,6 +6273,7 @@ private:
 
         m_programmaticSelection = false;
 
+        m_map.SetRoadIncidentPanelAlerts(m_filteredAlerts);
         ApplyIncidentMapVisibility();
 
         if (m_filteredAlerts.empty()) {
@@ -7232,6 +7378,12 @@ private:
             UpdateViewMenu();
             SaveSettings();
         }
+        else if (panel == L"road_incidents") {
+            m_isSidePanelVisible = false;
+            m_map.SetRoadIncidentPanelVisible(false);
+            UpdateViewMenu();
+            SaveSettings();
+        }
     }
 
     void DeleteResponderChatMessageAsync(const std::wstring& messageId)
@@ -8314,6 +8466,7 @@ private:
         HMENU earthquakesMenu = CreatePopupMenu();
         HMENU weatherMenu = CreatePopupMenu();
         HMENU viewMenu = CreatePopupMenu();
+        HMENU templatesMenu = CreatePopupMenu();
         HMENU aboutMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_CACHE_MANAGER, L"Data Caches...");
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_USERS, L"Users");
@@ -8327,6 +8480,7 @@ private:
         AppendMenuW(fileMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenuW(settingsMenu, MF_STRING, IDM_SETTINGS_GENERAL, L"General...");
         AppendMenuW(settingsMenu, MF_STRING, IDM_SETTINGS_SOUNDS, L"Sounds...");
+        AppendMenuW(settingsMenu, MF_STRING, IDM_SETTINGS_DIAGNOSTICS, L"Diagnostics...");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENTS_LIST, L"Incidents List...");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_FILTERS, L"Incident Filters...");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_NOTIFICATIONS, L"Incident Notifications...");
@@ -8347,14 +8501,8 @@ private:
         SetMenuItemInfoW(incidentOverlayMenu, IDM_INCIDENT_OVERLAY_NONE, FALSE, &roadRadioInfo);
         SetMenuItemInfoW(incidentOverlayMenu, IDM_INCIDENT_OVERLAY_SUMMARY, FALSE, &roadRadioInfo);
         SetMenuItemInfoW(incidentOverlayMenu, IDM_INCIDENT_OVERLAY_NOTIFIED_ONLY, FALSE, &roadRadioInfo);
-        AppendMenuW(roadsMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_TEMPLATES_WIZARD, L"Templates Wizard...");
-        AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_EDIT_TEMPLATES, L"Edit Templates...");
         AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKES_LIST, L"Earthquakes List...");
         AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKE_NOTIFICATIONS, L"Earthquake Notifications...");
-        AppendMenuW(earthquakesMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKES_TEMPLATES_WIZARD, L"Templates Wizard...");
-        AppendMenuW(earthquakesMenu, MF_STRING, IDM_EARTHQUAKES_EDIT_TEMPLATES, L"Edit Templates...");
         AppendMenuW(earthquakesMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(earthquakesMenu, m_showEarthquakes ? MF_CHECKED : MF_UNCHECKED, IDM_SHOW_EARTHQUAKES, L"Show Earthquakes");
         HMENU earthquakeOverlayMenu = CreatePopupMenu();
@@ -8375,9 +8523,6 @@ private:
         SetMenuItemInfoW(earthquakeOverlayMenu, IDM_EARTHQUAKE_OVERLAY_MAG_REGION, FALSE, &earthquakeOverlayInfo);
         AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEMS_LIST, L"Weather Systems List...");
         AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEM_NOTIFICATIONS, L"Weather System Notifications...");
-        AppendMenuW(weatherMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEMS_TEMPLATES_WIZARD, L"Templates Wizard...");
-        AppendMenuW(weatherMenu, MF_STRING, IDM_WEATHER_SYSTEMS_EDIT_TEMPLATES, L"Edit Templates...");
         AppendMenuW(weatherMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(weatherMenu, m_showWeatherSystems ? MF_CHECKED : MF_UNCHECKED, IDM_SHOW_WEATHER_SYSTEMS, L"Show Weather Systems");
         HMENU weatherOverlayMenu = CreatePopupMenu();
@@ -8431,6 +8576,7 @@ private:
         AppendMenuW(viewMenu, m_showMapControls ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_MAP_CONTROLS, L"Map Controls");
         AppendMenuW(viewMenu, m_showCountdownTimer ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_COUNTDOWN_TIMER, L"Countdown Timer");
         AppendMenuW(viewMenu, m_showCommsIndicator ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_COMMS_INDICATOR, L"Communications Indicator");
+        AppendMenuW(viewMenu, m_isSidePanelVisible ? MF_CHECKED : MF_UNCHECKED, IDM_VIEW_ROAD_INCIDENT_PANEL, L"Road Incidents Panel");
         MENUITEMINFOW historyInfo{};
         historyInfo.cbSize = sizeof(historyInfo);
         historyInfo.fMask = MIIM_FTYPE;
@@ -8443,11 +8589,17 @@ private:
         SetMenuItemInfoW(viewMenu, IDM_VIEW_MAP_CONTROLS, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_COUNTDOWN_TIMER, FALSE, &historyInfo);
         SetMenuItemInfoW(viewMenu, IDM_VIEW_COMMS_INDICATOR, FALSE, &historyInfo);
+        SetMenuItemInfoW(viewMenu, IDM_VIEW_ROAD_INCIDENT_PANEL, FALSE, &historyInfo);
+        AppendMenuW(templatesMenu, MF_STRING, IDM_ROADS_TEMPLATES_WIZARD, L"Templates Wizard...");
+        AppendMenuW(templatesMenu, MF_STRING, IDM_ROADS_EDIT_TEMPLATES, L"Edit Templates...");
+        AppendMenuW(templatesMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(templatesMenu, MF_STRING, IDM_SETTINGS_TEMPLATE, L"Template Settings...");
         AppendMenuW(aboutMenu, MF_STRING, IDM_ABOUT_APP, L"About ERC Tools...");
         AppendMenuW(aboutMenu, MF_STRING, IDM_ABOUT_LEGEND, L"Legend...");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(settingsMenu), L"Settings");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"View");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(templatesMenu), L"Templates");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(roadsMenu), L"Roads");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(earthquakesMenu), L"Earthquakes");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(weatherMenu), L"Weather");
@@ -8752,6 +8904,9 @@ private:
         case WM_COMMAND:
             OnAdminLogCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_NOTIFY:
+            OnAdminLogNotify(reinterpret_cast<NMHDR*>(lParam));
+            return 0;
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
         case WM_CTLCOLOREDIT:
@@ -8792,7 +8947,7 @@ private:
         }
 
         if (!m_adminLogWnd) {
-            RECT rc{ 0, 0, 820, 520 };
+            RECT rc{ 0, 0, 820, 570 };
             AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_TOOLWINDOW);
             m_adminLogWnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
@@ -8816,23 +8971,30 @@ private:
     void CreateAdminLogControls(HWND parent)
     {
         CreateAutoLabel(parent, 0, L"Administrator Log", 18, 18, m_headerFont);
-        CreateAutoLabel(parent, 0, L"Log type", 18, 64);
-        m_adminLogTypeCombo = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
-            L"COMBOBOX",
+        m_adminLogTab = CreateWindowExW(
+            0,
+            WC_TABCONTROLW,
             L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-            18, 90, 240, 120,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED | TCS_FIXEDWIDTH,
+            18, 62, 772, 34,
             parent,
-            ControlId(IDC_ADMIN_LOG_TYPE_COMBO),
+            ControlId(IDC_ADMIN_LOG_TAB),
             m_hInst,
             nullptr);
+        TCITEMW tabItem{};
+        tabItem.mask = TCIF_TEXT;
+        tabItem.pszText = const_cast<LPWSTR>(L"User Login Times");
+        SendMessageW(m_adminLogTab, TCM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tabItem));
+        tabItem.pszText = const_cast<LPWSTR>(L"Exclusions");
+        SendMessageW(m_adminLogTab, TCM_INSERTITEMW, 1, reinterpret_cast<LPARAM>(&tabItem));
+        SendMessageW(m_adminLogTab, TCM_SETITEMSIZE, 0, MAKELPARAM(180, 30));
+        SendMessageW(m_adminLogTab, TCM_SETCURSEL, 0, 0);
         HWND refreshBtn = CreateWindowExW(
             0,
             L"BUTTON",
             L"Refresh",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON,
-            458, 88, 102, 32,
+            458, 500, 102, 32,
             parent,
             ControlId(IDC_ADMIN_LOG_REFRESH_BTN),
             m_hInst,
@@ -8842,7 +9004,7 @@ private:
             L"BUTTON",
             L"Clear selected log",
             WS_CHILD | (CurrentPositionRank() >= 4 ? WS_VISIBLE : 0) | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON,
-            570, 88, 132, 32,
+            570, 500, 132, 32,
             parent,
             ControlId(IDC_ADMIN_LOG_CLEAR_BTN),
             m_hInst,
@@ -8852,7 +9014,7 @@ private:
             L"BUTTON",
             L"Close",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON,
-            712, 88, 78, 32,
+            712, 500, 78, 32,
             parent,
             ControlId(IDC_ADMIN_LOG_CLOSE_BTN),
             m_hInst,
@@ -8862,20 +9024,16 @@ private:
             WC_LISTVIEWW,
             L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            18, 138, 772, 340,
+            36, 104, 736, 356,
             parent,
             ControlId(IDC_ADMIN_LOG_LIST),
             m_hInst,
             nullptr);
 
-        for (HWND h : { m_adminLogTypeCombo, refreshBtn, clearBtn, closeBtn, m_adminLogListView }) {
+        for (HWND h : { m_adminLogTab, refreshBtn, clearBtn, closeBtn, m_adminLogListView }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
-
-        SendMessageW(m_adminLogTypeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"User Login Times"));
-        SendMessageW(m_adminLogTypeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Exclusions"));
-        SendMessageW(m_adminLogTypeCombo, CB_SETCURSEL, 0, 0);
 
         SendMessageW(m_adminLogListView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_INFOTIP);
         ListView_SetBkColor(m_adminLogListView, kUiSurface);
@@ -8914,11 +9072,26 @@ private:
             ClearSelectedAdminLogAsync();
             return;
         }
-        if ((id == IDC_ADMIN_LOG_REFRESH_BTN && code == BN_CLICKED) ||
-            (id == IDC_ADMIN_LOG_TYPE_COMBO && code == CBN_SELCHANGE))
-        {
+        if (id == IDC_ADMIN_LOG_REFRESH_BTN && code == BN_CLICKED)
             FetchAdminLogAsync();
-        }
+    }
+
+    void OnAdminLogNotify(NMHDR* header)
+    {
+        if (!header || header->idFrom != IDC_ADMIN_LOG_TAB || header->code != TCN_SELCHANGE)
+            return;
+        RenderAdminLogEntries();
+        SetStatusText(CurrentAdminLogTypeIndex() == 1
+            ? L"Showing exclusion history."
+            : L"Showing user login times.");
+    }
+
+    int CurrentAdminLogTypeIndex() const
+    {
+        if (!m_adminLogTab)
+            return 0;
+        const int selected = TabCtrl_GetCurSel(m_adminLogTab);
+        return selected < 0 ? 0 : selected;
     }
 
     void ClearSelectedAdminLogAsync()
@@ -8926,9 +9099,7 @@ private:
         if (CurrentPositionRank() < 4 || !IsOnlineMode())
             return;
 
-        const int selectedType = m_adminLogTypeCombo
-            ? static_cast<int>(SendMessageW(m_adminLogTypeCombo, CB_GETCURSEL, 0, 0))
-            : 0;
+        const int selectedType = CurrentAdminLogTypeIndex();
         const std::wstring label = selectedType == 1 ? L"Exclusions" : L"User Login Times";
         if (MessageBoxW(
             m_adminLogWnd,
@@ -9026,9 +9197,7 @@ private:
             return;
 
         SendMessageW(m_adminLogListView, LVM_DELETEALLITEMS, 0, 0);
-        const int selectedType = m_adminLogTypeCombo
-            ? static_cast<int>(SendMessageW(m_adminLogTypeCombo, CB_GETCURSEL, 0, 0))
-            : 0;
+        const int selectedType = CurrentAdminLogTypeIndex();
         int row = 0;
         for (const AdminLogEntry& entry : m_adminLogEntries) {
             const std::wstring eventType = ToLower(entry.event);
@@ -9436,10 +9605,9 @@ private:
         m_incidentUnplannedCheck = CreateWindowExW(0, L"BUTTON", L"Unplanned incidents", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY, 180, 24, parent, ControlId(IDC_INCIDENT_FILTERS_UNPLANNED_CHECK), m_hInst, nullptr);
         m_incidentPlannedCheck = CreateWindowExW(0, L"BUTTON", L"Planned roadworks", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 236, typeY, 170, 24, parent, ControlId(IDC_INCIDENT_FILTERS_PLANNED_CHECK), m_hInst, nullptr);
         m_incidentSidePanelListOnlyCheck = CreateWindowExW(0, L"BUTTON", L"Side panel: only Incidents List", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY + 38, 270, 24, parent, ControlId(IDC_INCIDENT_FILTERS_SIDE_PANEL_LIST_ONLY_CHECK), m_hInst, nullptr);
-        m_incidentShowUnresolvedCheck = CreateWindowExW(0, L"BUTTON", L"Show unresolved incidents", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, typeY + 70, 270, 24, parent, ControlId(IDC_INCIDENT_FILTERS_SHOW_UNRESOLVED_CHECK), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 336, typeY + 108, 102, 32, parent, ControlId(IDC_INCIDENT_FILTERS_CLOSE_BTN), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 336, typeY + 76, 102, 32, parent, ControlId(IDC_INCIDENT_FILTERS_CLOSE_BTN), m_hInst, nullptr);
 
-        for (HWND h : { m_incidentSevereCheck, m_incidentModerateCheck, m_incidentMinorCheck, m_incidentUnknownCheck, m_incidentUnplannedCheck, m_incidentPlannedCheck, m_incidentSidePanelListOnlyCheck, m_incidentShowUnresolvedCheck, close }) {
+        for (HWND h : { m_incidentSevereCheck, m_incidentModerateCheck, m_incidentMinorCheck, m_incidentUnknownCheck, m_incidentUnplannedCheck, m_incidentPlannedCheck, m_incidentSidePanelListOnlyCheck, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -9451,7 +9619,6 @@ private:
         SizeControlToText(m_incidentUnplannedCheck, 34, 6, 180, 0, 24);
         SizeControlToText(m_incidentPlannedCheck, 34, 6, 170, 0, 24);
         SizeControlToText(m_incidentSidePanelListOnlyCheck, 34, 6, 270, 0, 24);
-        SizeControlToText(m_incidentShowUnresolvedCheck, 34, 6, 270, 0, 24);
         SyncIncidentFilterControls();
         AutoFitWindowToChildren(parent);
     }
@@ -9473,8 +9640,6 @@ private:
             SendMessageW(m_incidentPlannedCheck, BM_SETCHECK, m_incidentFilterPlanned ? BST_CHECKED : BST_UNCHECKED, 0);
         if (m_incidentSidePanelListOnlyCheck)
             SendMessageW(m_incidentSidePanelListOnlyCheck, BM_SETCHECK, m_incidentSidePanelListOnly ? BST_CHECKED : BST_UNCHECKED, 0);
-        if (m_incidentShowUnresolvedCheck)
-            SendMessageW(m_incidentShowUnresolvedCheck, BM_SETCHECK, m_showUnresolvedIncidents ? BST_CHECKED : BST_UNCHECKED, 0);
         m_syncingControls = false;
     }
 
@@ -9503,10 +9668,6 @@ private:
                 m_incidentFilterPlanned = SendMessageW(m_incidentPlannedCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
             else if (id == IDC_INCIDENT_FILTERS_SIDE_PANEL_LIST_ONLY_CHECK) {
                 m_incidentSidePanelListOnly = SendMessageW(m_incidentSidePanelListOnlyCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                ApplyFilters(false);
-            }
-            else if (id == IDC_INCIDENT_FILTERS_SHOW_UNRESOLVED_CHECK) {
-                m_showUnresolvedIncidents = SendMessageW(m_incidentShowUnresolvedCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
                 ApplyFilters(false);
             }
 
@@ -11465,13 +11626,14 @@ private:
         return L"";
     }
 
-    static std::wstring ShortTrafficTitle(const std::wstring& title)
+    std::wstring ShortTrafficTitle(const std::wstring& title) const
     {
         std::wstring key = ToLower(CompactTemplateWhitespace(title));
-        if (key.find(L"road traffic collision") != std::wstring::npos)
-            return L"RTC";
-        if (key.find(L"road traffic incident") != std::wstring::npos)
-            return L"RTI";
+        for (const auto& entry : m_templateShorthand) {
+            const std::wstring phrase = ToLower(CompactTemplateWhitespace(entry.first));
+            if (!phrase.empty() && key.find(phrase) != std::wstring::npos)
+                return entry.second;
+        }
         return title;
     }
 
@@ -11966,6 +12128,22 @@ private:
     {
         if (!nmh)
             return 0;
+        if (nmh->hwndFrom == m_templateWizardTab && nmh->code == TCN_SELCHANGE) {
+            const TemplateContext previous = m_templateWizardContext;
+            const int selected = TabCtrl_GetCurSel(m_templateWizardTab);
+            const TemplateContext context = TemplateContextFromTabIndex(selected);
+            if (!PrepareTemplateWizardForContext(context)) {
+                PrepareTemplateWizardForContext(previous, false);
+                TabCtrl_SetCurSel(m_templateWizardTab, TemplateContextTabIndex(previous));
+                return 0;
+            }
+            PopulateTemplatesWizardList();
+            SetWindowTextSafe(m_templateWizardVariablesEdit, FormatTemplateVariablesForEdit());
+            SetProtectedTemplateText(m_templateWizardTitlePreviewEdit, {});
+            SetProtectedTemplateText(m_templateWizardPreviewEdit, {});
+            RenderTemplatesWizardStep();
+            return 0;
+        }
         if ((nmh->hwndFrom == m_templateWizardTitlePreviewEdit ||
             nmh->hwndFrom == m_templateWizardPreviewEdit) &&
             nmh->code == EN_PROTECTED)
@@ -12046,20 +12224,93 @@ private:
         return TemplateContext::WeatherSystems;
     }
 
-    bool PrepareWeatherTemplateWizardForContext(TemplateContext context)
+    static int TemplateContextTabIndex(TemplateContext context)
+    {
+        switch (context) {
+        case TemplateContext::Earthquakes: return 1;
+        case TemplateContext::WeatherSystems: return 2;
+        case TemplateContext::WeatherWarnings: return 3;
+        case TemplateContext::Floods: return 4;
+        default: return 0;
+        }
+    }
+
+    static TemplateContext TemplateContextFromTabIndex(int index)
+    {
+        switch (index) {
+        case 1: return TemplateContext::Earthquakes;
+        case 2: return TemplateContext::WeatherSystems;
+        case 3: return TemplateContext::WeatherWarnings;
+        case 4: return TemplateContext::Floods;
+        default: return TemplateContext::Roads;
+        }
+    }
+
+    static const wchar_t* TemplateContextName(TemplateContext context)
+    {
+        switch (context) {
+        case TemplateContext::Earthquakes: return L"Earthquakes";
+        case TemplateContext::WeatherSystems: return L"Weather Systems";
+        case TemplateContext::WeatherWarnings: return L"Weather Warnings";
+        case TemplateContext::Floods: return L"Floods";
+        default: return L"Roads";
+        }
+    }
+
+    TemplateContext PreferredTemplateContext() const
+    {
+        auto hasSelection = [](HWND listView) {
+            return listView && IsWindowVisible(listView) &&
+                SendMessageW(listView, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED) >= 0;
+        };
+        if (hasSelection(m_earthquakeListView))
+            return TemplateContext::Earthquakes;
+        if (hasSelection(m_weatherSystemsListView))
+            return TemplateContext::WeatherSystems;
+        if (hasSelection(m_weatherWarningsListView))
+            return TemplateContext::WeatherWarnings;
+        if (hasSelection(m_floodsListView))
+            return TemplateContext::Floods;
+        return TemplateContext::Roads;
+    }
+
+    bool PrepareTemplateWizardForContext(TemplateContext context, bool showMessage = true)
     {
         m_templateWizardContext = context;
+        m_templateWizardWeatherChooser = false;
         EnsureDefaultTemplatesForContext(context);
         if (TemplatesForContext(context).empty()) {
-            MessageBoxW(m_hwnd, L"No templates are configured. Open Weather > Edit Templates to add one.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+            if (showMessage)
+                MessageBoxW(m_hwnd, L"No templates are configured. Open Templates > Edit Templates to add one.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
             return false;
         }
 
         ClearTemplateWizardSourceIds();
-        if (context == TemplateContext::WeatherSystems) {
+        if (context == TemplateContext::Roads) {
+            const TrafficAlert* alert = FindSelectedAlert();
+            if (!alert) {
+                if (showMessage)
+                    MessageBoxW(m_hwnd, L"Select an incident first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+                return false;
+            }
+            m_templateWizardAlertId = alert->id;
+            m_templateWizardVariables = BuildTemplateVariables(*alert);
+        }
+        else if (context == TemplateContext::Earthquakes) {
+            const EarthquakeEvent* event = FindSelectedEarthquake();
+            if (!event) {
+                if (showMessage)
+                    MessageBoxW(m_hwnd, L"Select an earthquake in the Earthquakes List first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+                return false;
+            }
+            m_templateWizardEarthquakeId = EarthquakeStableKey(*event);
+            m_templateWizardVariables = BuildEarthquakeTemplateVariables(*event);
+        }
+        else if (context == TemplateContext::WeatherSystems) {
             const WeatherSystemEvent* system = FindSelectedWeatherSystem();
             if (!system) {
-                MessageBoxW(m_hwnd, L"Select a weather system in the Weather Systems List first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+                if (showMessage)
+                    MessageBoxW(m_hwnd, L"Select a weather system in the Weather Systems List first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
                 return false;
             }
             m_templateWizardWeatherSystemId = WeatherSystemStableKey(*system);
@@ -12068,7 +12319,8 @@ private:
         else if (context == TemplateContext::WeatherWarnings) {
             const WeatherWarningEvent* warning = FindSelectedWeatherWarning();
             if (!warning) {
-                MessageBoxW(m_hwnd, L"Select a weather warning in the Weather Warnings list first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+                if (showMessage)
+                    MessageBoxW(m_hwnd, L"Select a weather warning in the Weather Warnings list first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
                 return false;
             }
             m_templateWizardWeatherWarningId = WeatherWarningStableKey(*warning);
@@ -12077,7 +12329,8 @@ private:
         else if (context == TemplateContext::Floods) {
             const FloodEvent* flood = FindSelectedFlood();
             if (!flood) {
-                MessageBoxW(m_hwnd, L"Select a flood in the Floods list first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+                if (showMessage)
+                    MessageBoxW(m_hwnd, L"Select a flood in the Floods list first, then continue the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
                 return false;
             }
             m_templateWizardFloodId = FloodStableKey(*flood);
@@ -12087,78 +12340,47 @@ private:
             return false;
         }
 
+        m_templateWizardStep = 0;
         m_templateWizardTemplateIndex = 0;
+        m_templateWizardTitleEditableRanges.clear();
+        m_templateWizardBodyEditableRanges.clear();
         return true;
     }
 
     void ShowTemplatesWizardWindow()
     {
-        m_templateWizardContext = TemplateContext::Roads;
-        m_templateWizardWeatherChooser = false;
-        EnsureDefaultTemplatesForContext(m_templateWizardContext);
-        const auto& templates = TemplatesForContext(m_templateWizardContext);
-        if (templates.empty()) {
-            MessageBoxW(m_hwnd, L"No templates are configured. Open Roads > Edit Templates to add one.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
+        TemplateContext context = PreferredTemplateContext();
+        bool prepared = PrepareTemplateWizardForContext(context, false);
+        if (!prepared) {
+            constexpr TemplateContext contexts[] = {
+                TemplateContext::Roads,
+                TemplateContext::Earthquakes,
+                TemplateContext::WeatherSystems,
+                TemplateContext::WeatherWarnings,
+                TemplateContext::Floods
+            };
+            for (TemplateContext candidate : contexts) {
+                if (candidate != context && PrepareTemplateWizardForContext(candidate, false)) {
+                    prepared = true;
+                    break;
+                }
+            }
+        }
+        if (!prepared) {
+            MessageBoxW(m_hwnd, L"Select an incident or event first, then open the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
             return;
         }
-
-        const TrafficAlert* alert = FindSelectedAlert();
-        if (!alert) {
-            MessageBoxW(m_hwnd, L"Select an incident first, then open the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
-            return;
-        }
-
-        m_templateWizardAlertId = alert->id;
-        m_templateWizardEarthquakeId.clear();
-        m_templateWizardWeatherSystemId.clear();
-        m_templateWizardWeatherWarningId.clear();
-        m_templateWizardFloodId.clear();
-        m_templateWizardStep = 0;
-        m_templateWizardTemplateIndex = 0;
-        m_templateWizardVariables = BuildTemplateVariables(*alert);
-
-        ShowTemplatesWizardWindowShell(L"Road Templates Wizard");
+        ShowTemplatesWizardWindowShell(L"Templates Wizard");
     }
 
     void ShowEarthquakeTemplatesWizardWindow()
     {
-        m_templateWizardContext = TemplateContext::Earthquakes;
-        m_templateWizardWeatherChooser = false;
-        EnsureDefaultTemplatesForContext(m_templateWizardContext);
-        const auto& templates = TemplatesForContext(m_templateWizardContext);
-        if (templates.empty()) {
-            MessageBoxW(m_hwnd, L"No templates are configured. Open Earthquakes > Edit Templates to add one.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
-            return;
-        }
-
-        const EarthquakeEvent* event = FindSelectedEarthquake();
-        if (!event) {
-            MessageBoxW(m_hwnd, L"Select an earthquake in the Earthquakes List first, then open the Templates Wizard.", L"Templates Wizard", MB_OK | MB_ICONINFORMATION);
-            return;
-        }
-
-        m_templateWizardAlertId.clear();
-        m_templateWizardEarthquakeId = EarthquakeStableKey(*event);
-        m_templateWizardWeatherSystemId.clear();
-        m_templateWizardWeatherWarningId.clear();
-        m_templateWizardFloodId.clear();
-        m_templateWizardStep = 0;
-        m_templateWizardTemplateIndex = 0;
-        m_templateWizardVariables = BuildEarthquakeTemplateVariables(*event);
-
-        ShowTemplatesWizardWindowShell(L"Earthquake Templates Wizard");
+        ShowTemplatesWizardWindow();
     }
 
     void ShowWeatherSystemsTemplatesWizardWindow()
     {
-        m_templateWizardContext = TemplateContext::WeatherSystems;
-        m_templateWizardWeatherChooser = true;
-        ClearTemplateWizardSourceIds();
-        m_templateWizardStep = 0;
-        m_templateWizardTemplateIndex = 0;
-        m_templateWizardVariables.clear();
-
-        ShowTemplatesWizardWindowShell(L"Weather Templates Wizard");
+        ShowTemplatesWizardWindow();
     }
 
     void ShowTemplatesWizardWindowShell(const wchar_t* title)
@@ -12184,8 +12406,8 @@ private:
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                820,
-                560,
+                880,
+                590,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -12195,6 +12417,8 @@ private:
             SetWindowTextSafe(m_templatesWizardWnd, title);
         }
 
+        if (m_templateWizardTab)
+            TabCtrl_SetCurSel(m_templateWizardTab, TemplateContextTabIndex(m_templateWizardContext));
         PopulateTemplatesWizardList();
         SetWindowTextSafe(m_templateWizardVariablesEdit, FormatTemplateVariablesForEdit());
         m_templateWizardTitleEditableRanges.clear();
@@ -12210,21 +12434,40 @@ private:
     {
         const wchar_t* previewClass = EnsureRichEditLoaded() ? MSFTEDIT_CLASS : L"EDIT";
         CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_TITLE, L"Templates Wizard", 18, 18, m_headerFont);
-        m_templateWizardDesc = CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_DESC, L"", 18, 54, nullptr, 684);
-        m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
-        m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 92, 684, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
-        m_templateWizardTitlePreviewLabel = CreateAutoLabel(parent, 0, L"Title", 18, 92);
-        m_templateWizardTitlePreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, previewClass, L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NOHIDESEL, 18, 118, 684, 26, parent, ControlId(IDC_TEMPLATES_WIZARD_TITLE_PREVIEW), m_hInst, nullptr);
-        m_templateWizardBodyPreviewLabel = CreateAutoLabel(parent, 0, L"Template", 18, 158);
-        m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, previewClass, L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL | WS_VSCROLL, 18, 184, 684, 208, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
-        m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 122, 432, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
-        m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 232, 432, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
-        m_templateWizardCopyTitleBtn = CreateWindowExW(0, L"BUTTON", L"Copy Title", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 342, 432, 104, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_TITLE), m_hInst, nullptr);
-        m_templateWizardCopyBtn = CreateWindowExW(0, L"BUTTON", L"Copy Template", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 454, 432, 124, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY), m_hInst, nullptr);
-        m_templateWizardCopyLocationBtn = CreateWindowExW(0, L"BUTTON", L"Copy Coords", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 586, 432, 118, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_LOCATION), m_hInst, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 712, 432, 68, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_CLOSE), m_hInst, nullptr);
+        m_templateWizardTab = CreateWindowExW(
+            0,
+            WC_TABCONTROLW,
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED | TCS_FIXEDWIDTH,
+            18, 76, 760, 48,
+            parent,
+            ControlId(IDC_TEMPLATES_WIZARD_TAB),
+            m_hInst,
+            nullptr);
+        constexpr const wchar_t* tabNames[] = { L"Roads", L"Earthquakes", L"Weather Systems", L"Weather Warnings", L"Floods" };
+        TCITEMW tabItem{};
+        tabItem.mask = TCIF_TEXT;
+        for (int i = 0; i < static_cast<int>(_countof(tabNames)); ++i) {
+            tabItem.pszText = const_cast<LPWSTR>(tabNames[i]);
+            TabCtrl_InsertItem(m_templateWizardTab, i, &tabItem);
+        }
+        TabCtrl_SetItemSize(m_templateWizardTab, 144, 38);
+        TabCtrl_SetCurSel(m_templateWizardTab, TemplateContextTabIndex(m_templateWizardContext));
+        m_templateWizardDesc = CreateAutoLabel(parent, IDC_TEMPLATES_WIZARD_DESC, L"", 18, 138, nullptr, 760);
+        m_templateWizardList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 154, 760, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_LIST), m_hInst, nullptr);
+        m_templateWizardVariablesEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY, 18, 154, 760, 300, parent, ControlId(IDC_TEMPLATES_WIZARD_VARIABLES), m_hInst, nullptr);
+        m_templateWizardTitlePreviewLabel = CreateAutoLabel(parent, 0, L"Title", 18, 154);
+        m_templateWizardTitlePreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, previewClass, L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NOHIDESEL, 18, 180, 760, 26, parent, ControlId(IDC_TEMPLATES_WIZARD_TITLE_PREVIEW), m_hInst, nullptr);
+        m_templateWizardBodyPreviewLabel = CreateAutoLabel(parent, 0, L"Template", 18, 220);
+        m_templateWizardPreviewEdit = CreateWindowExW(WS_EX_CLIENTEDGE, previewClass, L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL | WS_VSCROLL, 18, 246, 760, 208, parent, ControlId(IDC_TEMPLATES_WIZARD_PREVIEW), m_hInst, nullptr);
+        m_templateWizardPrevBtn = CreateWindowExW(0, L"BUTTON", L"Previous", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 54, 494, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_PREV), m_hInst, nullptr);
+        m_templateWizardNextBtn = CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 166, 494, 102, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_NEXT), m_hInst, nullptr);
+        m_templateWizardCopyTitleBtn = CreateWindowExW(0, L"BUTTON", L"Copy Title", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 278, 494, 104, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_TITLE), m_hInst, nullptr);
+        m_templateWizardCopyBtn = CreateWindowExW(0, L"BUTTON", L"Copy Template", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 392, 494, 124, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY), m_hInst, nullptr);
+        m_templateWizardCopyLocationBtn = CreateWindowExW(0, L"BUTTON", L"Copy Coords", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 526, 494, 118, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_COPY_LOCATION), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 654, 494, 88, 32, parent, ControlId(IDC_TEMPLATES_WIZARD_CLOSE), m_hInst, nullptr);
 
-        for (HWND h : { m_templateWizardDesc, m_templateWizardList, m_templateWizardVariablesEdit, m_templateWizardTitlePreviewLabel, m_templateWizardTitlePreviewEdit, m_templateWizardBodyPreviewLabel, m_templateWizardPreviewEdit, m_templateWizardPrevBtn, m_templateWizardNextBtn, m_templateWizardCopyTitleBtn, m_templateWizardCopyBtn, m_templateWizardCopyLocationBtn, close }) {
+        for (HWND h : { m_templateWizardTab, m_templateWizardDesc, m_templateWizardList, m_templateWizardVariablesEdit, m_templateWizardTitlePreviewLabel, m_templateWizardTitlePreviewEdit, m_templateWizardBodyPreviewLabel, m_templateWizardPreviewEdit, m_templateWizardPrevBtn, m_templateWizardNextBtn, m_templateWizardCopyTitleBtn, m_templateWizardCopyBtn, m_templateWizardCopyLocationBtn, close }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -12365,10 +12608,21 @@ private:
         }
 
         constexpr int left = 18;
-        constexpr int contentW = 684;
-        MoveLabelToText(m_templateWizardDesc, left, 54, contentW);
-        const int descH = AutoLabelHeight(m_templateWizardDesc, 22, contentW);
-        const int contentTop = 54 + descH + 14;
+        constexpr int contentW = 760;
+        constexpr int titleY = 18;
+        constexpr int minTitleH = 42;
+        constexpr int tabH = 48;
+        HWND titleLabel = GetDlgItem(m_templatesWizardWnd, IDC_TEMPLATES_WIZARD_TITLE);
+        if (titleLabel)
+            MoveLabelToText(titleLabel, left, titleY, contentW);
+        const int titleH = titleLabel ? AutoLabelHeight(titleLabel, minTitleH, contentW) : minTitleH;
+        const int tabY = titleY + titleH + 16;
+        const int descY = tabY + tabH + 20;
+        MoveWindow(m_templateWizardTab, left, tabY, contentW, tabH, TRUE);
+        RedrawWindow(m_templateWizardTab, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+        MoveLabelToText(m_templateWizardDesc, left, descY, contentW);
+        const int descH = AutoLabelHeight(m_templateWizardDesc, 24, contentW);
+        const int contentTop = descY + descH + 20;
         int contentBottom = contentTop;
 
         MoveWindow(m_templateWizardList, left, contentTop, contentW, 300, TRUE);
@@ -12389,14 +12643,17 @@ private:
         }
 
         const int buttonY = contentBottom + 40;
-        MoveWindow(m_templateWizardPrevBtn, 122, buttonY, 102, 32, TRUE);
-        MoveWindow(m_templateWizardNextBtn, 232, buttonY, 102, 32, TRUE);
-        MoveWindow(m_templateWizardCopyTitleBtn, 342, buttonY, 104, 32, TRUE);
-        MoveWindow(m_templateWizardCopyBtn, 454, buttonY, 124, 32, TRUE);
-        MoveWindow(m_templateWizardCopyLocationBtn, 586, buttonY, 118, 32, TRUE);
+        const int reviewButtonStart = left + (contentW - 688) / 2;
+        const int stepButtonStart = left + (contentW - 326) / 2;
+        const int buttonStart = reviewStep ? reviewButtonStart : stepButtonStart;
+        MoveWindow(m_templateWizardPrevBtn, buttonStart, buttonY, 102, 32, TRUE);
+        MoveWindow(m_templateWizardNextBtn, buttonStart + 112, buttonY, 102, 32, TRUE);
+        MoveWindow(m_templateWizardCopyTitleBtn, buttonStart + 224, buttonY, 104, 32, TRUE);
+        MoveWindow(m_templateWizardCopyBtn, buttonStart + 338, buttonY, 124, 32, TRUE);
+        MoveWindow(m_templateWizardCopyLocationBtn, buttonStart + 472, buttonY, 118, 32, TRUE);
         HWND closeBtn = GetDlgItem(m_templatesWizardWnd, IDC_TEMPLATES_WIZARD_CLOSE);
         if (closeBtn)
-            MoveWindow(closeBtn, reviewStep ? 712 : 342, buttonY, reviewStep ? 68 : 102, 32, TRUE);
+            MoveWindow(closeBtn, reviewStep ? buttonStart + 600 : buttonStart + 224, buttonY, reviewStep ? 88 : 102, 32, TRUE);
 
         ShowWindow(m_templateWizardList, (weatherKindStep || chooseStep) ? SW_SHOW : SW_HIDE);
         ShowWindow(m_templateWizardVariablesEdit, variableStep ? SW_SHOW : SW_HIDE);
@@ -12442,7 +12699,7 @@ private:
                 int selected = static_cast<int>(SendMessageW(m_templateWizardList, LB_GETCURSEL, 0, 0));
                 if (selected < 0)
                     selected = 0;
-                if (!PrepareWeatherTemplateWizardForContext(WeatherTemplateContextFromIndex(selected)))
+                if (!PrepareTemplateWizardForContext(WeatherTemplateContextFromIndex(selected)))
                     return;
                 m_templateWizardStep = TemplateWizardTemplateChoiceStepIndex();
                 PopulateTemplatesWizardList();
@@ -12521,6 +12778,9 @@ private:
         case WM_COMMAND:
             OnTemplatesEditorCommand(LOWORD(wParam), HIWORD(wParam));
             return 0;
+        case WM_NOTIFY:
+            OnTemplatesEditorNotify(reinterpret_cast<NMHDR*>(lParam));
+            return 0;
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
         case WM_CTLCOLOREDIT:
@@ -12537,28 +12797,28 @@ private:
 
     void ShowTemplatesEditorWindow()
     {
-        m_templateEditorContext = TemplateContext::Roads;
+        m_templateEditorContext = PreferredTemplateContext();
         m_templateEditorWeatherMode = false;
-        EnsureDefaultTemplatesForContext(m_templateEditorContext);
-        ShowTemplatesEditorWindowShell(L"Edit Road Templates");
+        constexpr TemplateContext contexts[] = {
+            TemplateContext::Roads,
+            TemplateContext::Earthquakes,
+            TemplateContext::WeatherSystems,
+            TemplateContext::WeatherWarnings,
+            TemplateContext::Floods
+        };
+        for (TemplateContext context : contexts)
+            EnsureDefaultTemplatesForContext(context);
+        ShowTemplatesEditorWindowShell(L"Edit Templates");
     }
 
     void ShowEarthquakeTemplatesEditorWindow()
     {
-        m_templateEditorContext = TemplateContext::Earthquakes;
-        m_templateEditorWeatherMode = false;
-        EnsureDefaultTemplatesForContext(m_templateEditorContext);
-        ShowTemplatesEditorWindowShell(L"Edit Earthquake Templates");
+        ShowTemplatesEditorWindow();
     }
 
     void ShowWeatherSystemsTemplatesEditorWindow()
     {
-        m_templateEditorContext = TemplateContext::WeatherSystems;
-        m_templateEditorWeatherMode = true;
-        EnsureDefaultWeatherSystemReportTemplates();
-        EnsureDefaultWeatherWarningReportTemplates();
-        EnsureDefaultFloodReportTemplates();
-        ShowTemplatesEditorWindowShell(L"Edit Weather Templates");
+        ShowTemplatesEditorWindow();
     }
 
     void ShowTemplatesEditorWindowShell(const wchar_t* title)
@@ -12584,8 +12844,8 @@ private:
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                760,
-                560,
+                840,
+                580,
                 m_hwnd,
                 nullptr,
                 m_hInst,
@@ -12595,7 +12855,8 @@ private:
             SetWindowTextSafe(m_templatesEditorWnd, title);
         }
 
-        SyncTemplateEditorWeatherControls();
+        if (m_templateEditorTab)
+            TabCtrl_SetCurSel(m_templateEditorTab, TemplateContextTabIndex(m_templateEditorContext));
         SyncTemplatesEditorList();
         ShowWindow(m_templatesEditorWnd, SW_SHOW);
         SetForegroundWindow(m_templatesEditorWnd);
@@ -12604,24 +12865,39 @@ private:
     void CreateTemplatesEditorControls(HWND parent)
     {
         CreateAutoLabel(parent, 0, L"Edit Templates", 18, 18, m_headerFont);
-        m_templateEditorWeatherTypeLabel = CreateAutoLabel(parent, 0, L"Weather type", 422, 24);
-        m_templateEditorWeatherTypeCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 526, 20, 176, 120, parent, ControlId(IDC_TEMPLATES_EDITOR_WEATHER_TYPE), m_hInst, nullptr);
-        SendMessageW(m_templateEditorWeatherTypeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Weather Systems"));
-        SendMessageW(m_templateEditorWeatherTypeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Weather Warnings"));
-        SendMessageW(m_templateEditorWeatherTypeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Floods"));
-        m_templateEditorList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 64, 214, 340, parent, ControlId(IDC_TEMPLATES_EDITOR_LIST), m_hInst, nullptr);
-        CreateAutoLabel(parent, 0, L"Name", 252, 64);
-        m_templateEditorNameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 252, 90, 450, 26, parent, ControlId(IDC_TEMPLATES_EDITOR_NAME), m_hInst, nullptr);
-        CreateAutoLabel(parent, 0, L"Title", 252, 124);
-        m_templateEditorTitleEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 252, 150, 450, 26, parent, ControlId(IDC_TEMPLATES_EDITOR_TITLE), m_hInst, nullptr);
-        CreateAutoLabel(parent, 0, L"Template", 252, 192);
-        m_templateEditorBodyEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 252, 218, 450, 186, parent, ControlId(IDC_TEMPLATES_EDITOR_BODY), m_hInst, nullptr);
-        HWND newBtn = CreateWindowExW(0, L"BUTTON", L"New", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_NEW), m_hInst, nullptr);
-        HWND saveBtn = CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 252, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_SAVE), m_hInst, nullptr);
-        HWND deleteBtn = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 348, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_DELETE), m_hInst, nullptr);
-        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 614, 424, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_CLOSE), m_hInst, nullptr);
+        m_templateEditorTab = CreateWindowExW(
+            0,
+            WC_TABCONTROLW,
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED | TCS_FIXEDWIDTH,
+            18, 76, 760, 48,
+            parent,
+            ControlId(IDC_TEMPLATES_EDITOR_TAB),
+            m_hInst,
+            nullptr);
+        constexpr const wchar_t* tabNames[] = { L"Roads", L"Earthquakes", L"Weather Systems", L"Weather Warnings", L"Floods" };
+        TCITEMW tabItem{};
+        tabItem.mask = TCIF_TEXT;
+        for (int i = 0; i < static_cast<int>(_countof(tabNames)); ++i) {
+            tabItem.pszText = const_cast<LPWSTR>(tabNames[i]);
+            TabCtrl_InsertItem(m_templateEditorTab, i, &tabItem);
+        }
+        TabCtrl_SetItemSize(m_templateEditorTab, 144, 38);
+        TabCtrl_SetCurSel(m_templateEditorTab, TemplateContextTabIndex(m_templateEditorContext));
 
-        for (HWND h : { m_templateEditorWeatherTypeLabel, m_templateEditorWeatherTypeCombo, m_templateEditorList, m_templateEditorNameEdit, m_templateEditorTitleEdit, m_templateEditorBodyEdit, newBtn, saveBtn, deleteBtn, closeBtn }) {
+        m_templateEditorList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 18, 146, 230, 356, parent, ControlId(IDC_TEMPLATES_EDITOR_LIST), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Name", 270, 146);
+        m_templateEditorNameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 270, 172, 508, 26, parent, ControlId(IDC_TEMPLATES_EDITOR_NAME), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Title", 270, 212);
+        m_templateEditorTitleEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 270, 238, 508, 26, parent, ControlId(IDC_TEMPLATES_EDITOR_TITLE), m_hInst, nullptr);
+        CreateAutoLabel(parent, 0, L"Template", 270, 278);
+        m_templateEditorBodyEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, 270, 304, 508, 198, parent, ControlId(IDC_TEMPLATES_EDITOR_BODY), m_hInst, nullptr);
+        HWND newBtn = CreateWindowExW(0, L"BUTTON", L"New", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 18, 530, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_NEW), m_hInst, nullptr);
+        HWND saveBtn = CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 270, 530, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_SAVE), m_hInst, nullptr);
+        HWND deleteBtn = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 368, 530, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_DELETE), m_hInst, nullptr);
+        HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_PUSHBUTTON, 690, 530, 88, 32, parent, ControlId(IDC_TEMPLATES_EDITOR_CLOSE), m_hInst, nullptr);
+
+        for (HWND h : { m_templateEditorTab, m_templateEditorList, m_templateEditorNameEdit, m_templateEditorTitleEdit, m_templateEditorBodyEdit, newBtn, saveBtn, deleteBtn, closeBtn }) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
             ApplyExplorerTheme(h);
         }
@@ -12629,9 +12905,18 @@ private:
         EnableNativeSpellCheck(m_templateEditorTitleEdit);
         EnableNativeSpellCheck(m_templateEditorBodyEdit);
 
-        SyncTemplateEditorWeatherControls();
         SyncTemplatesEditorList();
         AutoFitWindowToChildren(parent);
+    }
+
+    void OnTemplatesEditorNotify(NMHDR* header)
+    {
+        if (!header || header->hwndFrom != m_templateEditorTab || header->code != TCN_SELCHANGE)
+            return;
+        m_templateEditorContext = TemplateContextFromTabIndex(TabCtrl_GetCurSel(m_templateEditorTab));
+        EnsureDefaultTemplatesForContext(m_templateEditorContext);
+        SyncTemplatesEditorList();
+        SetStatusText(std::wstring(L"Editing ") + TemplateContextName(m_templateEditorContext) + L" templates.");
     }
 
     void SyncTemplateEditorWeatherControls()
@@ -13654,6 +13939,7 @@ private:
         CheckMenuItem(menu, IDM_VIEW_MAP_CONTROLS, MF_BYCOMMAND | (m_showMapControls ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(menu, IDM_VIEW_COUNTDOWN_TIMER, MF_BYCOMMAND | (m_showCountdownTimer ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(menu, IDM_VIEW_COMMS_INDICATOR, MF_BYCOMMAND | (m_showCommsIndicator ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(menu, IDM_VIEW_ROAD_INCIDENT_PANEL, MF_BYCOMMAND | (m_isSidePanelVisible ? MF_CHECKED : MF_UNCHECKED));
     }
 
     void ToggleNotificationHistory()
@@ -13710,6 +13996,16 @@ private:
         m_showCommsIndicator = !m_showCommsIndicator;
         UpdateViewMenu();
         m_map.SetCommsIndicatorVisible(m_showCommsIndicator);
+        SaveSettings();
+    }
+
+    void ToggleRoadIncidentPanel()
+    {
+        m_isSidePanelVisible = !m_isSidePanelVisible;
+        UpdateViewMenu();
+        m_map.SetRoadIncidentPanelVisible(m_isSidePanelVisible);
+        if (m_isSidePanelVisible)
+            m_map.SetRoadIncidentPanelAlerts(m_filteredAlerts);
         SaveSettings();
     }
 
@@ -15913,7 +16209,61 @@ private:
 
     LRESULT OnDrawItem(DRAWITEMSTRUCT* dis)
     {
-        if (!dis || dis->CtlType != ODT_BUTTON)
+        if (!dis)
+            return FALSE;
+
+        if (dis->CtlType == ODT_TAB) {
+            wchar_t text[128]{};
+            TCITEMW item{};
+            item.mask = TCIF_TEXT;
+            item.pszText = text;
+            item.cchTextMax = _countof(text);
+            SendMessageW(dis->hwndItem, TCM_GETITEMW, dis->itemID, reinterpret_cast<LPARAM>(&item));
+
+            const bool selected = TabCtrl_GetCurSel(dis->hwndItem) == static_cast<int>(dis->itemID);
+            HBRUSH background = CreateSolidBrush(kUiBackground);
+            FillRect(dis->hDC, &dis->rcItem, background);
+            DeleteObject(background);
+
+            RECT tabRect = dis->rcItem;
+            InflateRect(&tabRect, -4, -1);
+            tabRect.top += 1;
+            tabRect.bottom -= 2;
+
+            const COLORREF fillColor = selected ? RGB(229, 243, 255) : RGB(247, 249, 252);
+            const COLORREF borderColor = selected ? RGB(0, 120, 212) : RGB(198, 209, 222);
+            HPEN pen = CreatePen(PS_SOLID, selected ? 2 : 1, borderColor);
+            HBRUSH fill = CreateSolidBrush(fillColor);
+            HGDIOBJ oldPen = SelectObject(dis->hDC, pen);
+            HGDIOBJ oldBrush = SelectObject(dis->hDC, fill);
+            RoundRect(dis->hDC, tabRect.left, tabRect.top, tabRect.right, tabRect.bottom, 12, 12);
+            SelectObject(dis->hDC, oldBrush);
+            SelectObject(dis->hDC, oldPen);
+            DeleteObject(fill);
+            DeleteObject(pen);
+
+            if (selected) {
+                RECT accent = tabRect;
+                accent.left += 12;
+                accent.right -= 12;
+                accent.top = accent.bottom - 3;
+                accent.bottom -= 1;
+                HBRUSH accentBrush = CreateSolidBrush(RGB(0, 120, 212));
+                FillRect(dis->hDC, &accent, accentBrush);
+                DeleteObject(accentBrush);
+            }
+
+            RECT textRect = tabRect;
+            InflateRect(&textRect, -14, -1);
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, selected ? RGB(0, 74, 137) : RGB(74, 86, 99));
+            HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(dis->hDC, selected && m_boldFont ? m_boldFont : m_font));
+            DrawTextW(dis->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            SelectObject(dis->hDC, oldFont);
+            return TRUE;
+        }
+
+        if (dis->CtlType != ODT_BUTTON)
             return FALSE;
 
         bool pressed = (dis->itemState & ODS_SELECTED) != 0;
@@ -15986,6 +16336,28 @@ private:
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
         }
         return self ? self->HandleSoundsMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    static LRESULT CALLBACK DiagnosticsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleDiagnosticsMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    static LRESULT CALLBACK TemplateSettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleTemplateSettingsMessage(hwnd, msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
     LRESULT HandleSettingsMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -16091,6 +16463,446 @@ private:
         SyncSoundsControls();
         ShowWindow(m_soundsWnd, SW_SHOW);
         SetForegroundWindow(m_soundsWnd);
+    }
+
+    LRESULT HandleDiagnosticsMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateDiagnosticsControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnDiagnosticsCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowDiagnosticsWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = DiagnosticsWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kDiagnosticsClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_diagnosticsWnd || !IsWindow(m_diagnosticsWnd)) {
+            m_diagnosticsWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kDiagnosticsClassName,
+                L"Diagnostics",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                520,
+                310,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+        SyncDiagnosticsControls();
+        ShowWindow(m_diagnosticsWnd, SW_SHOW);
+        SetForegroundWindow(m_diagnosticsWnd);
+    }
+
+    void CreateDiagnosticsControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Diagnostics", 18, 18, m_headerFont);
+        CreateAutoLabel(
+            parent,
+            0,
+            L"Expose additional source records and troubleshooting detail without changing the normal operational view.",
+            18,
+            56,
+            nullptr,
+            450);
+        m_diagnosticsTab = CreateWindowExW(
+            0,
+            WC_TABCONTROLW,
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED | TCS_FIXEDWIDTH,
+            18,
+            100,
+            454,
+            34,
+            parent,
+            ControlId(IDC_DIAGNOSTICS_TAB),
+            m_hInst,
+            nullptr);
+        TCITEMW tabItem{};
+        tabItem.mask = TCIF_TEXT;
+        tabItem.pszText = const_cast<LPWSTR>(L"Roads");
+        SendMessageW(m_diagnosticsTab, TCM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tabItem));
+        SendMessageW(m_diagnosticsTab, TCM_SETITEMSIZE, 0, MAKELPARAM(120, 30));
+        m_diagnosticsShowUnresolvedCheck = CreateWindowExW(
+            0,
+            L"BUTTON",
+            L"Show unresolved incidents",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            36,
+            142,
+            280,
+            26,
+            parent,
+            ControlId(IDC_DIAGNOSTICS_SHOW_UNRESOLVED_CHECK),
+            m_hInst,
+            nullptr);
+        CreateAutoLabel(
+            parent,
+            0,
+            L"Includes eligible NTIS records whose road was inferred from the Network Model.",
+            64,
+            174,
+            nullptr,
+            410);
+        HWND close = CreateWindowExW(
+            0,
+            L"BUTTON",
+            L"Close",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON,
+            370,
+            246,
+            102,
+            32,
+            parent,
+            ControlId(IDC_DIAGNOSTICS_CLOSE_BTN),
+            m_hInst,
+            nullptr);
+        for (HWND control : { m_diagnosticsTab, m_diagnosticsShowUnresolvedCheck, close }) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(control);
+        }
+        SizeControlToText(m_diagnosticsShowUnresolvedCheck, 34, 6, 280, 0, 26);
+        SyncDiagnosticsControls();
+        AutoFitWindowToChildren(parent);
+    }
+
+    void SyncDiagnosticsControls()
+    {
+        if (!m_diagnosticsShowUnresolvedCheck)
+            return;
+        m_syncingControls = true;
+        SendMessageW(
+            m_diagnosticsShowUnresolvedCheck,
+            BM_SETCHECK,
+            m_showUnresolvedIncidents ? BST_CHECKED : BST_UNCHECKED,
+            0);
+        m_syncingControls = false;
+    }
+
+    void OnDiagnosticsCommand(int id, int code)
+    {
+        if (m_syncingControls)
+            return;
+        if (id == IDC_DIAGNOSTICS_SHOW_UNRESOLVED_CHECK && code == BN_CLICKED) {
+            m_showUnresolvedIncidents =
+                SendMessageW(m_diagnosticsShowUnresolvedCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            ApplyFilters(false);
+            SaveSettings();
+            SetStatusText(m_showUnresolvedIncidents
+                ? L"Unresolved Network Model incidents are visible."
+                : L"Unresolved Network Model incidents are hidden.");
+        }
+        else if (id == IDC_DIAGNOSTICS_CLOSE_BTN && code == BN_CLICKED) {
+            ShowWindow(m_diagnosticsWnd, SW_HIDE);
+        }
+    }
+
+    LRESULT HandleTemplateSettingsMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateTemplateSettingsControls(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnTemplateSettingsCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_NOTIFY:
+            OnTemplateSettingsNotify(reinterpret_cast<NMHDR*>(lParam));
+            return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowTemplateSettingsWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = TemplateSettingsWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kTemplateSettingsClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_templateSettingsWnd || !IsWindow(m_templateSettingsWnd)) {
+            m_templateSettingsWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kTemplateSettingsClassName,
+                L"Template Settings",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                720,
+                590,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+        RefreshTemplateShorthandList();
+        ShowWindow(m_templateSettingsWnd, SW_SHOW);
+        SetForegroundWindow(m_templateSettingsWnd);
+    }
+
+    void CreateTemplateSettingsControls(HWND parent)
+    {
+        CreateAutoLabel(parent, 0, L"Template Settings", 18, 18, m_headerFont);
+        CreateAutoLabel(parent, 0, L"Manage wording substitutions used by generated template titles.", 18, 56, nullptr, 650);
+
+        m_templateSettingsTab = CreateWindowExW(
+            0,
+            WC_TABCONTROLW,
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED | TCS_FIXEDWIDTH,
+            18,
+            108,
+            660,
+            40,
+            parent,
+            ControlId(IDC_TEMPLATE_SETTINGS_TAB),
+            m_hInst,
+            nullptr);
+        TCITEMW tabItem{};
+        tabItem.mask = TCIF_TEXT;
+        tabItem.pszText = const_cast<LPWSTR>(L"Shorthand");
+        SendMessageW(m_templateSettingsTab, TCM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&tabItem));
+        SendMessageW(m_templateSettingsTab, TCM_SETITEMSIZE, 0, MAKELPARAM(160, 32));
+
+        m_templateShorthandList = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            WC_LISTVIEWW,
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+            36,
+            160,
+            624,
+            220,
+            parent,
+            ControlId(IDC_TEMPLATE_SHORTHAND_LIST),
+            m_hInst,
+            nullptr);
+        ListView_SetExtendedListViewStyle(m_templateShorthandList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+        LVCOLUMNW column{};
+        column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        column.pszText = const_cast<LPWSTR>(L"Full wording");
+        column.cx = 410;
+        SendMessageW(m_templateShorthandList, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
+        column.pszText = const_cast<LPWSTR>(L"Shorthand");
+        column.cx = 190;
+        column.iSubItem = 1;
+        SendMessageW(m_templateShorthandList, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&column));
+
+        CreateAutoLabel(parent, 0, L"Full wording", 36, 398);
+        CreateAutoLabel(parent, 0, L"Shorthand", 402, 398);
+        m_templateShorthandPhraseEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"EDIT",
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            36,
+            424,
+            350,
+            28,
+            parent,
+            ControlId(IDC_TEMPLATE_SHORTHAND_PHRASE_EDIT),
+            m_hInst,
+            nullptr);
+        m_templateShorthandValueEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"EDIT",
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            402,
+            424,
+            258,
+            28,
+            parent,
+            ControlId(IDC_TEMPLATE_SHORTHAND_VALUE_EDIT),
+            m_hInst,
+            nullptr);
+
+        HWND add = CreateWindowExW(0, L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 36, 474, 102, 32, parent, ControlId(IDC_TEMPLATE_SHORTHAND_ADD), m_hInst, nullptr);
+        HWND update = CreateWindowExW(0, L"BUTTON", L"Update", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 148, 474, 102, 32, parent, ControlId(IDC_TEMPLATE_SHORTHAND_UPDATE), m_hInst, nullptr);
+        HWND remove = CreateWindowExW(0, L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 260, 474, 102, 32, parent, ControlId(IDC_TEMPLATE_SHORTHAND_REMOVE), m_hInst, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON, 558, 532, 102, 32, parent, ControlId(IDC_TEMPLATE_SETTINGS_CLOSE), m_hInst, nullptr);
+
+        for (HWND control : {
+            m_templateSettingsTab,
+            m_templateShorthandList,
+            m_templateShorthandPhraseEdit,
+            m_templateShorthandValueEdit,
+            add,
+            update,
+            remove,
+            close
+            }) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(control);
+        }
+        SendMessageW(m_templateShorthandPhraseEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Road traffic collision"));
+        SendMessageW(m_templateShorthandValueEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"RTC"));
+        RefreshTemplateShorthandList();
+        AutoFitWindowToChildren(parent);
+    }
+
+    int SelectedTemplateShorthandIndex() const
+    {
+        if (!m_templateShorthandList)
+            return -1;
+        return ListView_GetNextItem(m_templateShorthandList, -1, LVNI_SELECTED);
+    }
+
+    void RefreshTemplateShorthandList(int selectedIndex = -1)
+    {
+        if (!m_templateShorthandList)
+            return;
+        if (selectedIndex < 0)
+            selectedIndex = SelectedTemplateShorthandIndex();
+        ListView_DeleteAllItems(m_templateShorthandList);
+        for (size_t i = 0; i < m_templateShorthand.size(); ++i) {
+            LVITEMW item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = static_cast<int>(i);
+            item.pszText = const_cast<LPWSTR>(m_templateShorthand[i].first.c_str());
+            const int row = ListView_InsertItem(m_templateShorthandList, &item);
+            if (row >= 0)
+                ListView_SetItemText(m_templateShorthandList, row, 1, const_cast<LPWSTR>(m_templateShorthand[i].second.c_str()));
+        }
+        if (!m_templateShorthand.empty()) {
+            selectedIndex = ClampValue(selectedIndex, 0, static_cast<int>(m_templateShorthand.size() - 1));
+            ListView_SetItemState(m_templateShorthandList, selectedIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_EnsureVisible(m_templateShorthandList, selectedIndex, FALSE);
+        }
+        SyncTemplateShorthandEditor();
+    }
+
+    void SyncTemplateShorthandEditor()
+    {
+        const int selected = SelectedTemplateShorthandIndex();
+        if (selected >= 0 && static_cast<size_t>(selected) < m_templateShorthand.size()) {
+            SetWindowTextSafe(m_templateShorthandPhraseEdit, m_templateShorthand[static_cast<size_t>(selected)].first);
+            SetWindowTextSafe(m_templateShorthandValueEdit, m_templateShorthand[static_cast<size_t>(selected)].second);
+        }
+        else {
+            SetWindowTextSafe(m_templateShorthandPhraseEdit, L"");
+            SetWindowTextSafe(m_templateShorthandValueEdit, L"");
+        }
+    }
+
+    bool TemplateShorthandPhraseExists(const std::wstring& phrase, int exceptIndex = -1) const
+    {
+        const std::wstring normalized = ToLower(CompactTemplateWhitespace(phrase));
+        for (size_t i = 0; i < m_templateShorthand.size(); ++i) {
+            if (static_cast<int>(i) != exceptIndex &&
+                ToLower(CompactTemplateWhitespace(m_templateShorthand[i].first)) == normalized)
+                return true;
+        }
+        return false;
+    }
+
+    void OnTemplateSettingsNotify(NMHDR* header)
+    {
+        if (!header || header->idFrom != IDC_TEMPLATE_SHORTHAND_LIST)
+            return;
+        if (header->code == LVN_ITEMCHANGED || header->code == NM_CLICK)
+            SyncTemplateShorthandEditor();
+    }
+
+    void OnTemplateSettingsCommand(int id, int code)
+    {
+        if (id == IDC_TEMPLATE_SETTINGS_CLOSE && code == BN_CLICKED) {
+            ShowWindow(m_templateSettingsWnd, SW_HIDE);
+            return;
+        }
+        if (code != BN_CLICKED)
+            return;
+
+        const std::wstring phrase = Trim(GetWindowTextString(m_templateShorthandPhraseEdit));
+        const std::wstring shorthand = Trim(GetWindowTextString(m_templateShorthandValueEdit));
+        if (id == IDC_TEMPLATE_SHORTHAND_ADD) {
+            if (phrase.empty() || shorthand.empty()) {
+                SetStatusText(L"Enter both the full wording and its shorthand.");
+                return;
+            }
+            if (TemplateShorthandPhraseExists(phrase)) {
+                SetStatusText(L"That shorthand wording already exists; select it and use Update.");
+                return;
+            }
+            m_templateShorthand.push_back({ phrase, shorthand });
+            SaveSettings();
+            RefreshTemplateShorthandList(static_cast<int>(m_templateShorthand.size() - 1));
+            SetStatusText(L"Template shorthand added.");
+        }
+        else if (id == IDC_TEMPLATE_SHORTHAND_UPDATE) {
+            const int selected = SelectedTemplateShorthandIndex();
+            if (selected < 0 || static_cast<size_t>(selected) >= m_templateShorthand.size()) {
+                SetStatusText(L"Select a shorthand entry to update.");
+                return;
+            }
+            if (phrase.empty() || shorthand.empty()) {
+                SetStatusText(L"Enter both the full wording and its shorthand.");
+                return;
+            }
+            if (TemplateShorthandPhraseExists(phrase, selected)) {
+                SetStatusText(L"Another shorthand entry already uses that wording.");
+                return;
+            }
+            m_templateShorthand[static_cast<size_t>(selected)] = { phrase, shorthand };
+            SaveSettings();
+            RefreshTemplateShorthandList(selected);
+            SetStatusText(L"Template shorthand updated.");
+        }
+        else if (id == IDC_TEMPLATE_SHORTHAND_REMOVE) {
+            const int selected = SelectedTemplateShorthandIndex();
+            if (selected < 0 || static_cast<size_t>(selected) >= m_templateShorthand.size()) {
+                SetStatusText(L"Select a shorthand entry to remove.");
+                return;
+            }
+            m_templateShorthand.erase(m_templateShorthand.begin() + selected);
+            SaveSettings();
+            RefreshTemplateShorthandList(MinValue(selected, static_cast<int>(m_templateShorthand.size()) - 1));
+            SetStatusText(L"Template shorthand removed.");
+        }
     }
 
     void CreateSoundsControls(HWND parent)
@@ -16437,6 +17249,8 @@ private:
     HWND m_detailsEdit = nullptr;
     HWND m_settingsWnd = nullptr;
     HWND m_soundsWnd = nullptr;
+    HWND m_diagnosticsWnd = nullptr;
+    HWND m_templateSettingsWnd = nullptr;
     HWND m_cacheManagerWnd = nullptr;
     HWND m_incidentFiltersWnd = nullptr;
     HWND m_incidentNotificationsWnd = nullptr;
@@ -16447,7 +17261,7 @@ private:
     HWND m_templatesEditorWnd = nullptr;
     HWND m_accountCreatorWnd = nullptr;
     HWND m_adminLogWnd = nullptr;
-    HWND m_adminLogTypeCombo = nullptr;
+    HWND m_adminLogTab = nullptr;
     HWND m_adminLogListView = nullptr;
     HWND m_legendWnd = nullptr;
     HWND m_roadDepictionsWnd = nullptr;
@@ -16472,6 +17286,12 @@ private:
     HWND m_soundsTimerStartCheck = nullptr;
     HWND m_soundsTimerWarningCheck = nullptr;
     HWND m_soundsTimerCompleteCheck = nullptr;
+    HWND m_diagnosticsTab = nullptr;
+    HWND m_diagnosticsShowUnresolvedCheck = nullptr;
+    HWND m_templateSettingsTab = nullptr;
+    HWND m_templateShorthandList = nullptr;
+    HWND m_templateShorthandPhraseEdit = nullptr;
+    HWND m_templateShorthandValueEdit = nullptr;
     HWND m_cacheProgressBar = nullptr;
     HWND m_cacheStatusLabel = nullptr;
     HWND m_incidentSevereCheck = nullptr;
@@ -16481,7 +17301,6 @@ private:
     HWND m_incidentUnplannedCheck = nullptr;
     HWND m_incidentPlannedCheck = nullptr;
     HWND m_incidentSidePanelListOnlyCheck = nullptr;
-    HWND m_incidentShowUnresolvedCheck = nullptr;
     HWND m_incidentNotifyRoadsEdit = nullptr;
     HWND m_incidentNotifyRoadExclusionsEdit = nullptr;
     HWND m_incidentNotifyLaneThresholdEdit = nullptr;
@@ -16533,6 +17352,7 @@ private:
     HWND m_floodsListWnd = nullptr;
     HWND m_floodsListView = nullptr;
     HWND m_floodsListPeriodCombo = nullptr;
+    HWND m_templateWizardTab = nullptr;
     HWND m_templateWizardDesc = nullptr;
     HWND m_templateWizardList = nullptr;
     HWND m_templateWizardVariablesEdit = nullptr;
@@ -16545,6 +17365,7 @@ private:
     HWND m_templateWizardCopyTitleBtn = nullptr;
     HWND m_templateWizardCopyBtn = nullptr;
     HWND m_templateWizardCopyLocationBtn = nullptr;
+    HWND m_templateEditorTab = nullptr;
     HWND m_templateEditorWeatherTypeLabel = nullptr;
     HWND m_templateEditorWeatherTypeCombo = nullptr;
     HWND m_templateEditorList = nullptr;
@@ -16580,6 +17401,10 @@ private:
     std::vector<ReportTemplate> m_weatherSystemReportTemplates;
     std::vector<ReportTemplate> m_weatherWarningReportTemplates;
     std::vector<ReportTemplate> m_floodReportTemplates;
+    std::vector<std::pair<std::wstring, std::wstring>> m_templateShorthand{
+        { L"Road traffic collision", L"RTC" },
+        { L"Road traffic incident", L"RTI" }
+    };
     std::vector<std::pair<std::wstring, std::wstring>> m_templateWizardVariables;
     std::vector<TemplateEditableRange> m_templateWizardTitleEditableRanges;
     std::vector<TemplateEditableRange> m_templateWizardBodyEditableRanges;
