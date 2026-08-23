@@ -13,12 +13,18 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from collections import deque
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import ceil, cos, hypot, pi
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import urlopen
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python 3.8 compatibility
+    ZoneInfo = None
 
 
 BIND_HOST = os.environ.get("NTIS_BIND_HOST", "127.0.0.1")
@@ -31,8 +37,12 @@ FEEDS = {
 }
 SNAPSHOT_PATH = DATA_DIR / "current" / "events.json"
 FULL_REFRESH_IDLE_SECONDS = 10.0
+CURRENT_VALIDITY_SWEEP_SECONDS = 30.0
 TRAFFIC_ENGLAND_SCHEMA_VERSION = "2026-07-08-public-reasons-v5"
 TRAFFIC_ENGLAND_REBUILD_BATCH_SIZE = 500
+EVENT_SNAPSHOT_MAX_AGE_SECONDS = int(
+    os.environ.get("NTIS_EVENT_SNAPSHOT_MAX_AGE_SECONDS", "600")
+)
 DEFAULT_FUSED_CONGESTION_MAX_AGE_SECONDS = int(
     os.environ.get("NTIS_FUSED_CONGESTION_MAX_AGE_SECONDS", "600")
 )
@@ -49,6 +59,24 @@ ROAD_PATTERN = re.compile(
     r"(?<![A-Z0-9])(?:A\d+(?:\s*\(M\)|[A-Z])?|M\d+[A-Z]?|B\d+[A-Z]?)(?![A-Z0-9])",
     re.IGNORECASE,
 )
+PUBLIC_CLEARANCE_PATTERN = re.compile(
+    r"\bbetween\s+([01]?\d|2[0-3]):([0-5]\d)\s+and\s+"
+    r"([01]?\d|2[0-3]):([0-5]\d)\s+on\s+"
+    r"(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+MONTH_NUMBERS = {
+    month.lower(): index
+    for index, month in enumerate((
+        "", "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ))
+    if month
+}
+try:
+    UK_TIMEZONE = ZoneInfo("Europe/London") if ZoneInfo is not None else None
+except Exception:  # pragma: no cover - used only on systems without tzdata
+    UK_TIMEZONE = None
 
 
 def local_name(tag):
@@ -95,6 +123,57 @@ def parse_iso_time(value):
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _last_sunday(year, month):
+    if month == 12:
+        first_of_next_month = datetime(year + 1, 1, 1)
+    else:
+        first_of_next_month = datetime(year, month + 1, 1)
+    last_day = first_of_next_month - timedelta(days=1)
+    return last_day - timedelta(days=(last_day.weekday() + 1) % 7)
+
+
+def _uk_local_to_utc(value):
+    if UK_TIMEZONE is not None:
+        return value.replace(tzinfo=UK_TIMEZONE).astimezone(timezone.utc)
+
+    # UK daylight saving runs from the last Sunday in March to the last
+    # Sunday in October. This fallback keeps the receiver usable on minimal
+    # Python installations which do not ship the IANA timezone database.
+    bst_start = _last_sunday(value.year, 3).replace(hour=2)
+    bst_end = _last_sunday(value.year, 10).replace(hour=2)
+    offset = timedelta(hours=1) if bst_start <= value < bst_end else timedelta()
+    return (value - offset).replace(tzinfo=timezone.utc)
+
+
+def public_clearance_end_time(values):
+    """Extract the upper end of NTIS' public expected-clear time band."""
+    if isinstance(values, str):
+        values = (values,)
+    for value in values or ():
+        match = PUBLIC_CLEARANCE_PATTERN.search(str(value))
+        if not match:
+            continue
+        start_hour, start_minute, end_hour, end_minute, day, month, year = (
+            match.groups()
+        )
+        month_number = MONTH_NUMBERS.get(month.lower())
+        if not month_number:
+            continue
+        try:
+            local_start = datetime(
+                int(year), month_number, int(day), int(start_hour), int(start_minute)
+            )
+            local_end = datetime(
+                int(year), month_number, int(day), int(end_hour), int(end_minute)
+            )
+        except ValueError:
+            continue
+        if local_end < local_start:
+            local_end += timedelta(days=1)
+        return _uk_local_to_utc(local_end).isoformat()
+    return ""
 
 
 def integer_value(value, default=0):
@@ -176,13 +255,15 @@ def refresh_traffic_england_flags(alert):
     alert["trafficEnglandUnplanned"] = (
         eligible and confirmed and event_type in {"CONGESTION", "INCIDENT"}
     )
-    # The public Alerts page only exposed records already carrying a public
-    # road identity. Network-resolved regional records remain available via
-    # the explicit "Show unresolved incidents" client option.
+    # The former public API returned records with a public road identity and
+    # display coordinates. Its event query did not depend on our auxiliary
+    # ArcGIS Network Model lookup, so a lookup failure must not hide an
+    # otherwise public NTIS record.
     alert["trafficEnglandVisible"] = (
         eligible
         and bool(alert.get("sourceRoad", ""))
-        and bool(alert.get("networkResolved", False))
+        and alert.get("latitude") is not None
+        and alert.get("longitude") is not None
     )
     return alert
 
@@ -345,16 +426,24 @@ def cached_alert_is_current(alert, now=None):
         "validityStatus",
         "overallStartTime",
         "overallEndTime",
+        "publicEndTime",
         "cancelled",
         "ended",
     )
     if not any(key in alert for key in validity_keys):
         return True
 
+    end_time = alert.get("overallEndTime", "")
+    event_type = alert.get("trafficEnglandEventType", "")
+    if not end_time and event_type in {"INCIDENT", "CONGESTION"}:
+        end_time = alert.get("publicEndTime", "") or public_clearance_end_time(
+            alert.get("description", "")
+        )
+
     return validity_is_current(
         alert.get("validityStatus", ""),
         alert.get("overallStartTime", ""),
-        alert.get("overallEndTime", ""),
+        end_time,
         bool(alert.get("cancelled", False)),
         bool(alert.get("ended", False)),
         now,
@@ -452,15 +541,21 @@ def normalise_record(
     if not record_id:
         return None
 
+    record_type = xml_attribute(record, "type") or "RoadIncident"
+    comments = general_public_comments(record)
+    te_event_type = traffic_england_event_type(record_type)
     validity_status = descendant_text(record, "validityStatus")
     overall_start_time = descendant_text(record, "overallStartTime")
     overall_end_time = descendant_text(record, "overallEndTime")
+    public_end_time = ""
+    if not overall_end_time and te_event_type in {"INCIDENT", "CONGESTION"}:
+        public_end_time = public_clearance_end_time(comments)
     cancelled = descendant_text(record, "cancel").lower() == "true"
     ended = descendant_text(record, "end").lower() == "true"
     current = validity_is_current(
         validity_status,
         overall_start_time,
-        overall_end_time,
+        overall_end_time or public_end_time,
         cancelled,
         ended,
         parse_iso_time(publication_time) or utc_now(),
@@ -473,8 +568,6 @@ def normalise_record(
             "current": False,
         }
 
-    record_type = xml_attribute(record, "type") or "RoadIncident"
-    comments = general_public_comments(record)
     location, reason = select_location_and_reason(comments, record_type, record)
     source_road = extract_road_name(location)
     road = source_road
@@ -502,7 +595,6 @@ def normalise_record(
         lanes_closed = max(0, lanes_total - operational)
 
     planned = record_type in {"MaintenanceWorks", "PublicEvent"}
-    te_event_type = traffic_england_event_type(record_type)
     delay_seconds = float_value(descendant_text(record, "delayTimeValue"))
     source_name = event_source_name(record)
     source_situation_time = descendant_text(record, "sourceSituationCreationTime")
@@ -536,6 +628,7 @@ def normalise_record(
         "validityStatus": validity_status,
         "overallStartTime": overall_start_time,
         "overallEndTime": overall_end_time,
+        "publicEndTime": public_end_time,
         "cancelled": cancelled,
         "ended": ended,
         "hasPublicPresentation": bool(comments),
@@ -600,10 +693,80 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 
+@contextmanager
+def open_database(timeout=30):
+    """Open a transactional SQLite connection and always close its handles."""
+    db = sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=timeout)
+    try:
+        with db:
+            yield db
+    finally:
+        db.close()
+
+
+def snapshot_is_stale(document, now=None):
+    updated_at = parse_iso_time(str(
+        document.get("sourceUpdatedAt") or document.get("updatedAt", "")
+    ))
+    if updated_at is None:
+        return True
+    age_seconds = ((now or utc_now()) - updated_at).total_seconds()
+    return age_seconds > EVENT_SNAPSHOT_MAX_AGE_SECONDS
+
+
+def public_snapshot(document, unplanned_only=False, now=None):
+    """Return only records the former TrafficEngland public query exposed."""
+    result = dict(document)
+    source_alerts = document.get("alerts", [])
+    if not isinstance(source_alerts, list):
+        source_alerts = []
+
+    # Event Data is change-driven, so a quiet source is not evidence that the
+    # consolidated lifecycle cache is invalid. NTIS repairs delivery gaps with
+    # a full refresh; retaining the cache mirrors the former TrafficEngland
+    # server-side current/completed query while still exposing quietness to
+    # health monitoring.
+    source_quiet = snapshot_is_stale(document, now)
+    result["sourceStale"] = False
+    result["sourceQuiet"] = source_quiet
+    result["sourceUpdatedAt"] = str(
+        document.get("sourceUpdatedAt") or document.get("updatedAt", "")
+    )
+
+    alerts = [
+        alert for alert in source_alerts
+        if isinstance(alert, dict)
+        and bool(alert.get("trafficEnglandVisible", False))
+        and (not unplanned_only or bool(alert.get("trafficEnglandUnplanned", False)))
+    ]
+    result["alerts"] = alerts
+    result["trafficEnglandPublicCount"] = len(alerts)
+    if unplanned_only:
+        result["trafficEnglandUnplannedPublicCount"] = len(alerts)
+    return result
+
+
+def write_json_document(path, document):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix="." + path.stem + "-", suffix=path.suffix, dir=path.parent
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output:
+            json.dump(document, output, ensure_ascii=False, separators=(",", ":"))
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
 def initialise_database():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     rebuild_required = False
-    with sqlite3.connect(DATA_DIR / "messages.sqlite3") as db:
+    with open_database() as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute(
             """
@@ -692,6 +855,15 @@ def initialise_database():
             "SELECT COUNT(*) FROM messages WHERE feed = 'event'"
         ).fetchone()[0]
 
+        last_received = metadata_get(db, "last_event_received_at")
+        if not last_received:
+            row = db.execute(
+                "SELECT MAX(received_at) FROM messages WHERE feed = 'event'"
+            ).fetchone()
+            if row and row[0]:
+                last_received = row[0]
+                metadata_set(db, "last_event_received_at", last_received)
+
         if schema_version != TRAFFIC_ENGLAND_SCHEMA_VERSION and event_message_count:
             rebuild_required = True
             if not rebuild_pending:
@@ -722,6 +894,23 @@ def initialise_database():
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 ("traffic_england_schema_version", TRAFFIC_ENGLAND_SCHEMA_VERSION),
             )
+
+        if SNAPSHOT_PATH.exists():
+            try:
+                document = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+                if last_received:
+                    document["sourceUpdatedAt"] = last_received
+                # Versions deployed before the source-gap recovery fix latched
+                # this flag after ten quiet minutes and could then remain empty
+                # forever. Freshness is now derived solely from the last source
+                # publication, so remove the obsolete persisted latch.
+                document.pop("fullRefreshRequired", None)
+                write_json_document(SNAPSHOT_PATH, document)
+            except (OSError, ValueError, TypeError):
+                pass
+        db.execute(
+            "DELETE FROM processor_metadata WHERE key = 'full_refresh_required'"
+        )
 
     if rebuild_required:
         try:
@@ -818,7 +1007,7 @@ class NetworkModelResolver:
                     (key,),
                 ).fetchone()
             else:
-                with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=5) as cache_db:
+                with open_database(timeout=5) as cache_db:
                     row = cache_db.execute(
                         """
                         SELECT road, description, distance_metres, resolved_at
@@ -847,7 +1036,7 @@ class NetworkModelResolver:
 
     def invalidate(self):
         try:
-            with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
+            with open_database(timeout=30) as db:
                 db.execute("UPDATE network_resolution SET resolved_at = ''")
         except sqlite3.Error:
             logging.exception("Could not invalidate the Network Model resolution cache")
@@ -932,7 +1121,7 @@ class NetworkModelResolver:
 
     def _store(self, key, latitude, longitude, source_road, result):
         road, description, distance = result
-        with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
+        with open_database(timeout=30) as db:
             db.execute(
                 """
                 INSERT INTO network_resolution(
@@ -994,7 +1183,7 @@ class NtisEventProcessor:
     def __init__(self, network_resolver):
         self._network_resolver = network_resolver
         self._settings_lock = threading.Lock()
-        with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
+        with open_database(timeout=30) as db:
             stored_age = integer_value(
                 metadata_get(
                     db,
@@ -1007,6 +1196,7 @@ class NtisEventProcessor:
             MIN_FUSED_CONGESTION_MAX_AGE_SECONDS,
             min(MAX_FUSED_CONGESTION_MAX_AGE_SECONDS, stored_age),
         )
+        self._last_validity_sweep = 0.0
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._network_refresh_requested = threading.Event()
@@ -1035,7 +1225,7 @@ class NtisEventProcessor:
         )
         with self._settings_lock:
             self._fused_congestion_max_age_seconds = value
-        with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
+        with open_database(timeout=30) as db:
             metadata_set(db, "fused_congestion_max_age_seconds", value)
             db.commit()
         self.notify()
@@ -1098,6 +1288,7 @@ class NtisEventProcessor:
             "source": "National Highways NTIS Event Data",
             "generation": generation,
             "updatedAt": utc_now().isoformat(),
+            "sourceUpdatedAt": metadata_get(db, "last_event_received_at"),
             "refreshInProgress": False,
             "trafficEnglandPublicCount": public_count,
             "trafficEnglandUnplannedPublicCount": unplanned_public_count,
@@ -1105,20 +1296,7 @@ class NtisEventProcessor:
             "currentRecordCount": len(alerts),
             "alerts": alerts,
         }
-        SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=".events-", suffix=".json", dir=SNAPSHOT_PATH.parent
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output:
-                json.dump(document, output, ensure_ascii=False, separators=(",", ":"))
-                output.write("\n")
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary_name, SNAPSHOT_PATH)
-        finally:
-            if os.path.exists(temporary_name):
-                os.unlink(temporary_name)
+        write_json_document(SNAPSHOT_PATH, document)
         logging.info(
             "Published NTIS event snapshot generation %d with %d Traffic England-compatible public incident(s), %d resolved extra(s), and %d current raw record(s)",
             generation,
@@ -1218,6 +1396,15 @@ class NtisEventProcessor:
         if not force and time.time() - last_received < FULL_REFRESH_IDLE_SECONDS:
             return False
         refresh_generation = integer_value(metadata_get(db, "refresh_generation"))
+        refresh_publication_time = metadata_get(db, "refresh_publication_time")
+        preserved = 0
+        if parse_iso_time(refresh_publication_time) is not None:
+            preserved = db.execute(
+                "UPDATE event_state SET refresh_generation = ? "
+                "WHERE refresh_generation <> ? "
+                "AND julianday(version_time) > julianday(?)",
+                (refresh_generation, refresh_generation, refresh_publication_time),
+            ).rowcount
         removed = db.execute(
             "DELETE FROM event_state WHERE refresh_generation <> ?",
             (refresh_generation,),
@@ -1225,11 +1412,32 @@ class NtisEventProcessor:
         metadata_set(db, "refresh_in_progress", "0")
         metadata_set(db, "last_feed_type", "")
         logging.info(
-            "Finalised NTIS full refresh generation %d; removed %d stale record(s)",
+            "Finalised NTIS full refresh generation %d; removed %d stale record(s) and preserved %d newer concurrent update(s)",
             refresh_generation,
             removed,
+            preserved,
         )
         return True
+
+    def _expire_invalid_records(self, db):
+        expired = []
+        snapshot_now = utc_now()
+        for record_id, alert_json in db.execute(
+                "SELECT record_id, alert_json FROM event_state"):
+            try:
+                alert = json.loads(alert_json)
+            except (TypeError, ValueError):
+                continue
+            if not cached_alert_is_current(alert, snapshot_now):
+                expired.append((record_id,))
+        if expired:
+            db.executemany(
+                "DELETE FROM event_state WHERE record_id = ?", expired
+            )
+            logging.info(
+                "Expired %d NTIS lifecycle/clearance record(s).", len(expired)
+            )
+        return len(expired)
 
     def _expire_ephemeral_records(self, db):
         cutoff = datetime.fromtimestamp(
@@ -1255,6 +1463,18 @@ class NtisEventProcessor:
         received_epoch = received.timestamp() if received else time.time()
         refresh_generation = integer_value(metadata_get(db, "refresh_generation"))
 
+        previous_received = parse_iso_time(metadata_get(db, "last_event_received_at"))
+        if (
+            previous_received is not None
+            and received is not None
+            and (received - previous_received).total_seconds() > EVENT_SNAPSHOT_MAX_AGE_SECONDS
+        ):
+            logging.warning(
+                "NTIS event feed resumed after a %.0f-second gap; source freshness recovered with this publication",
+                (received - previous_received).total_seconds(),
+            )
+        metadata_set(db, "last_event_received_at", received_at)
+
         if is_full_refresh:
             new_refresh = (
                 "full refresh" not in last_feed_type.lower()
@@ -1266,6 +1486,11 @@ class NtisEventProcessor:
                 refresh_generation += 1
                 metadata_set(db, "refresh_generation", refresh_generation)
                 metadata_set(db, "refresh_in_progress", "1")
+                metadata_set(
+                    db,
+                    "refresh_publication_time",
+                    publication_time or received_at,
+                )
                 logging.info(
                     "Started NTIS full refresh generation %d", refresh_generation
                 )
@@ -1348,7 +1573,7 @@ class NtisEventProcessor:
     def _process_pending(self):
         any_changed = False
         finalised = False
-        with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
+        with open_database(timeout=30) as db:
             db.execute("PRAGMA journal_mode=WAL")
             rebuild_pending = (
                 metadata_get(db, "traffic_england_rebuild_pending", "0") == "1"
@@ -1385,6 +1610,11 @@ class NtisEventProcessor:
                 finalised = self._finalise_refresh_if_idle(db)
             expired = self._expire_ephemeral_records(db)
             any_changed = any_changed or expired > 0
+            sweep_now = time.monotonic()
+            if sweep_now - self._last_validity_sweep >= CURRENT_VALIDITY_SWEEP_SECONDS:
+                expired = self._expire_invalid_records(db)
+                any_changed = any_changed or expired > 0
+                self._last_validity_sweep = sweep_now
             if self._network_refresh_requested.is_set():
                 self._network_refresh_requested.clear()
                 if not rebuild_pending:
@@ -1454,9 +1684,26 @@ class ReceiverHandler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/health":
             snapshot_exists = SNAPSHOT_PATH.exists()
+            events_fresh = False
+            source_updated_at = ""
+            if snapshot_exists:
+                try:
+                    health_document = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+                    events_fresh = not snapshot_is_stale(health_document)
+                    source_updated_at = str(
+                        health_document.get("sourceUpdatedAt")
+                        or health_document.get("updatedAt", "")
+                    )
+                except (OSError, ValueError, TypeError):
+                    pass
             self.send_text(
                 200,
-                json.dumps({"status": "ok", "eventsReady": snapshot_exists}) + "\n",
+                json.dumps({
+                    "status": "ok" if events_fresh else "degraded",
+                    "eventsReady": snapshot_exists,
+                    "eventsFresh": events_fresh,
+                    "sourceUpdatedAt": source_updated_at,
+                }) + "\n",
                 "application/json",
             )
             return
@@ -1482,20 +1729,10 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             try:
                 document = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
                 options = parse_qs(parsed.query)
-                if options.get("unplannedOnly", ["0"])[0].lower() in {
+                unplanned_only = options.get("unplannedOnly", ["0"])[0].lower() in {
                     "1", "true", "yes",
-                }:
-                    document["alerts"] = [
-                        alert for alert in document.get("alerts", [])
-                        if alert.get("trafficEnglandUnplanned", False)
-                    ]
-                    document["trafficEnglandPublicCount"] = document.get(
-                        "trafficEnglandUnplannedPublicCount",
-                        sum(
-                            1 for alert in document["alerts"]
-                            if alert.get("trafficEnglandVisible", False)
-                        ),
-                    )
+                }
+                document = public_snapshot(document, unplanned_only)
                 self.send_text(
                     200,
                     json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n",
@@ -1596,7 +1833,7 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             }
 
             duplicate = False
-            with sqlite3.connect(DATA_DIR / "messages.sqlite3", timeout=30) as db:
+            with open_database(timeout=30) as db:
                 try:
                     os.replace(temporary_name, payload_path)
                     temporary_name = ""

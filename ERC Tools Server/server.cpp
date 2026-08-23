@@ -916,6 +916,17 @@ public:
             return false;
         }
 
+        const std::wstring sessionPod = TrimWide(user.pod);
+        if (!sessionPod.empty()) {
+            const std::wstring deleteSupersededSql = std::wstring(
+                L"DELETE FROM user_sessions WHERE session_pod = ? "
+                L"AND COALESCE(last_seen_at, created_at) < "
+                L"DATE_SUB(CURRENT_TIMESTAMP, INTERVAL ") +
+                OnlineTimeoutSecondsText() + L" SECOND)";
+            if (!db.Execute(deleteSupersededSql, { sessionPod }, errorOut))
+                return false;
+        }
+
         bool ok = db.Execute(
             L"INSERT INTO user_sessions (token_hash, user_id, session_display_name, session_position, session_pod, expires_at, created_at, last_seen_at) "
             L"VALUES (?, ?, ?, ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? MINUTE), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -971,7 +982,16 @@ public:
 
         const auto& row = rows.front();
         userOut = UserRecord{ row[0], row[1], row[2], row[3], row[4] };
-        db.Execute(L"UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?", { Utf8ToWide(tokenHash) }, errorOut);
+        if (!db.Execute(
+                L"UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP, "
+                L"expires_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? MINUTE) "
+                L"WHERE token_hash = ?",
+                { std::to_wstring(m_config.sessionMinutes), Utf8ToWide(tokenHash) },
+                errorOut))
+        {
+            errorOut = L"Database session renewal failed: " + errorOut;
+            return false;
+        }
         errorOut.clear();
         return true;
     }
@@ -1961,12 +1981,10 @@ private:
 
     bool PurgeStaleSessions(OdbcConnection& db, std::wstring& errorOut)
     {
-        const std::wstring sql =
-            std::wstring(L"DELETE FROM user_sessions "
-                L"WHERE expires_at <= CURRENT_TIMESTAMP "
-                L"OR COALESCE(last_seen_at, created_at) < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL ") +
-            OnlineTimeoutSecondsText() + L" SECOND)";
-        return db.Execute(sql, {}, errorOut);
+        return db.Execute(
+            L"DELETE FROM user_sessions WHERE expires_at <= CURRENT_TIMESTAMP",
+            {},
+            errorOut);
     }
 
     ServerConfig m_config;

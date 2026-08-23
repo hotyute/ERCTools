@@ -183,6 +183,23 @@ static bool IsRoadDepictionHiddenFast(const std::unordered_set<std::wstring>& no
     return normalizedHiddenRoadLabels.find(ToLower(Trim(route.label))) != normalizedHiddenRoadLabels.end();
 }
 
+static HRESULT CreateRoundedRoadStrokeStyle(ID2D1Factory* factory, ID2D1StrokeStyle** styleOut)
+{
+    if (!factory || !styleOut)
+        return E_INVALIDARG;
+
+    *styleOut = nullptr;
+    const D2D1_STROKE_STYLE_PROPERTIES properties = D2D1::StrokeStyleProperties(
+        D2D1_CAP_STYLE_ROUND,
+        D2D1_CAP_STYLE_ROUND,
+        D2D1_CAP_STYLE_ROUND,
+        D2D1_LINE_JOIN_ROUND,
+        10.0f,
+        D2D1_DASH_STYLE_SOLID,
+        0.0f);
+    return factory->CreateStrokeStyle(&properties, nullptr, 0, styleOut);
+}
+
 // Tile/cache tuning.
 constexpr int kMaxConcurrentTileDownloads = 6;
 constexpr size_t kMaxTileCacheEntries = 768;
@@ -858,6 +875,8 @@ public:
         m_commsIndicatorOffsetY = positions.commsY;
         m_roadIncidentPanelOffsetX = positions.roadIncidentsX;
         m_roadIncidentPanelOffsetY = positions.roadIncidentsY;
+        m_notificationHistoryOffsetX = positions.notificationHistoryX;
+        m_notificationHistoryOffsetY = positions.notificationHistoryY;
         m_roadIncidentPanelCollapsed = positions.roadIncidentsCollapsed;
         m_roadIncidentPanelOpenProgress = m_showRoadIncidentPanel && !m_roadIncidentPanelCollapsed ? 1.0f : 0.0f;
         m_notificationHistoryCollapsed = positions.notificationHistoryCollapsed;
@@ -900,6 +919,8 @@ public:
         positions.commsY = m_commsIndicatorOffsetY;
         positions.roadIncidentsX = m_roadIncidentPanelOffsetX;
         positions.roadIncidentsY = m_roadIncidentPanelOffsetY;
+        positions.notificationHistoryX = m_notificationHistoryOffsetX;
+        positions.notificationHistoryY = m_notificationHistoryOffsetY;
         positions.roadIncidentsCollapsed = m_roadIncidentPanelCollapsed;
         positions.notificationHistoryCollapsed = m_notificationHistoryCollapsed;
         positions.usersCollapsed = m_usersPanelCollapsed;
@@ -3745,6 +3766,19 @@ private:
             return;
         }
 
+        if (m_draggingNotificationHistoryPanel && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
+            const int dx = x - m_lastMouse.x;
+            const int dy = y - m_lastMouse.y;
+            if (dx != 0 || dy != 0) {
+                m_notificationHistoryOffsetX += static_cast<float>(dx);
+                m_notificationHistoryOffsetY += static_cast<float>(dy);
+                ClampNotificationHistoryPanelOffsets(BuildViewState());
+                m_lastMouse = POINT{ x, y };
+                Invalidate();
+            }
+            return;
+        }
+
         if (m_draggingNotificationHistoryScrollbar && (buttons & MK_LBUTTON) && GetCapture() == m_hwnd) {
             SetNotificationHistoryScrollFromThumbY(static_cast<float>(y), m_notificationHistoryScrollbarDragOffset);
             return;
@@ -3924,6 +3958,17 @@ private:
             m_dragging = false;
             m_interactivePan = false;
             KillTimer(m_hwnd, kInteractionIdleTimer);
+            Invalidate();
+            return;
+        }
+
+        if (m_draggingNotificationHistoryPanel) {
+            m_draggingNotificationHistoryPanel = false;
+            m_notificationUiMouseDown = false;
+            m_dragging = false;
+            m_interactivePan = false;
+            KillTimer(m_hwnd, kInteractionIdleTimer);
+            NotifyOverlayPositionsChanged();
             Invalidate();
             return;
         }
@@ -4159,6 +4204,15 @@ private:
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.05f, 0.42f, 0.84f, 0.94f), &m_floodBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.97f, 0.84f, 0.88f), &m_roadBrush);
         m_rt->CreateSolidColorBrush(D2D1::ColorF(0.11f, 0.19f, 0.24f, 0.70f), &m_roadCasingBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.02f, 0.27f, 0.66f, 0.98f), &m_motorwayRoadLabelBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.02f, 0.38f, 0.21f, 0.98f), &m_primaryRoadLabelBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.16f, 0.21f, 0.25f, 0.98f), &m_otherRoadLabelBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.62f, 0.69f, 0.72f), &m_areaLabelBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.72f, 0.78f, 0.84f, 0.10f), &m_areaLabelGlowBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.06f, 0.10f, 0.15f, 0.64f), &m_areaLabelBackgroundBrush);
+        m_rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.98f, 1.0f, 0.82f), &m_areaLabelTextBrush);
+        if (!m_roadStrokeStyle)
+            CreateRoundedRoadStrokeStyle(g_d2dFactory.Get(), m_roadStrokeStyle.GetAddressOf());
         if (!m_forecastErrorStrokeStyle) {
             D2D1_STROKE_STYLE_PROPERTIES strokeProps = D2D1::StrokeStyleProperties(
                 D2D1_CAP_STYLE_FLAT,
@@ -4184,6 +4238,40 @@ private:
             if (m_noteTextFormat) {
                 m_noteTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
                 m_noteTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            }
+        }
+
+        if (g_dwriteFactory && !m_roadLabelTextFormat) {
+            g_dwriteFactory->CreateTextFormat(
+                L"Segoe UI",
+                nullptr,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                12.0f,
+                L"en-gb",
+                &m_roadLabelTextFormat);
+            if (m_roadLabelTextFormat) {
+                m_roadLabelTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                m_roadLabelTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                m_roadLabelTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            }
+        }
+
+        if (g_dwriteFactory && !m_areaLabelTextFormat) {
+            g_dwriteFactory->CreateTextFormat(
+                L"Segoe UI",
+                nullptr,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                13.0f,
+                L"en-gb",
+                &m_areaLabelTextFormat);
+            if (m_areaLabelTextFormat) {
+                m_areaLabelTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                m_areaLabelTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                m_areaLabelTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             }
         }
     }
@@ -4223,9 +4311,19 @@ private:
         m_floodBrush.Reset();
         m_roadBrush.Reset();
         m_roadCasingBrush.Reset();
+        m_motorwayRoadLabelBrush.Reset();
+        m_primaryRoadLabelBrush.Reset();
+        m_otherRoadLabelBrush.Reset();
+        m_areaLabelBrush.Reset();
+        m_areaLabelGlowBrush.Reset();
+        m_areaLabelBackgroundBrush.Reset();
+        m_areaLabelTextBrush.Reset();
+        m_roadStrokeStyle.Reset();
         m_forecastErrorStrokeStyle.Reset();
         m_laneBitmaps.clear();
         m_noteTextFormat.Reset();
+        m_roadLabelTextFormat.Reset();
+        m_areaLabelTextFormat.Reset();
         m_overlayUi.DiscardDeviceResources();
         InvalidateSceneCache();
     }
@@ -5457,6 +5555,9 @@ private:
     {
         D2D1_RECT_F bannerRect{};
         D2D1_RECT_F historyRect{};
+        D2D1_RECT_F historyCollapsedRect{};
+        D2D1_RECT_F historyDragRect{};
+        D2D1_RECT_F historyCollapsedDragRect{};
         D2D1_RECT_F historyToggleRect{};
         bool hasHistory = false;
         float historyProgress = 0.0f;
@@ -5693,6 +5794,8 @@ private:
     struct RoadIncidentPanelLayout
     {
         D2D1_RECT_F panelRect{};
+        D2D1_RECT_F collapsedRect{};
+        D2D1_RECT_F collapsedDragRect{};
         D2D1_RECT_F toggleRect{};
         D2D1_RECT_F closeRect{};
         D2D1_RECT_F dragRect{};
@@ -5720,20 +5823,32 @@ private:
 
         const float width = MinValue(430.0f, MaxValue(300.0f, static_cast<float>(view.width) - 2.0f * kOverlayUiMargin));
         const float height = MinValue(760.0f, MaxValue(430.0f, static_cast<float>(view.height) - 2.0f * kOverlayUiMargin));
+        constexpr float collapsedWidth = 172.0f;
         const float baseLeft = kOverlayUiMargin;
         const float baseTop = kOverlayUiMargin + 120.0f;
+        const float clampWidth = m_roadIncidentPanelCollapsed ? collapsedWidth : width;
         float left = ClampValue(baseLeft + m_roadIncidentPanelOffsetX, kOverlayUiMargin,
-            MaxValue(kOverlayUiMargin, static_cast<float>(view.width) - kOverlayUiMargin - width));
+            MaxValue(kOverlayUiMargin, static_cast<float>(view.width) - kOverlayUiMargin - clampWidth));
         float top = ClampValue(baseTop + m_roadIncidentPanelOffsetY, kOverlayUiMargin,
             MaxValue(kOverlayUiMargin, static_cast<float>(view.height) - kOverlayUiMargin - height));
         D2D1_RECT_F expanded = AvoidActiveNotification(D2D1::RectF(left, top, left + width, top + height));
         left = expanded.left;
         top = expanded.top;
         layout.progress = ClampValue(m_roadIncidentPanelOpenProgress, 0.0f, 1.0f);
-        left -= (1.0f - layout.progress) * MaxValue(0.0f, width - 38.0f);
+        left -= (1.0f - layout.progress) * MaxValue(0.0f, width - collapsedWidth);
         layout.panelRect = D2D1::RectF(left, top, left + width, top + height);
         layout.toggleRect = D2D1::RectF(layout.panelRect.right - 34.0f, layout.panelRect.top + 10.0f,
             layout.panelRect.right - 10.0f, layout.panelRect.top + 36.0f);
+        layout.collapsedRect = D2D1::RectF(
+            layout.panelRect.right - collapsedWidth,
+            layout.panelRect.top,
+            layout.panelRect.right,
+            layout.panelRect.top + 46.0f);
+        layout.collapsedDragRect = D2D1::RectF(
+            layout.collapsedRect.left + 10.0f,
+            layout.collapsedRect.top,
+            layout.toggleRect.left - 6.0f,
+            layout.collapsedRect.bottom);
         layout.closeRect = D2D1::RectF(layout.panelRect.right - 66.0f, layout.panelRect.top + 10.0f,
             layout.panelRect.right - 42.0f, layout.panelRect.top + 36.0f);
         layout.dragRect = D2D1::RectF(layout.panelRect.left + 12.0f, layout.panelRect.top,
@@ -5849,10 +5964,12 @@ private:
     {
         const float width = MinValue(430.0f, MaxValue(300.0f, static_cast<float>(view.width) - 2.0f * kOverlayUiMargin));
         const float height = MinValue(760.0f, MaxValue(430.0f, static_cast<float>(view.height) - 2.0f * kOverlayUiMargin));
+        constexpr float collapsedWidth = 172.0f;
         const float baseLeft = kOverlayUiMargin;
         const float baseTop = kOverlayUiMargin + 120.0f;
+        const float clampWidth = m_roadIncidentPanelCollapsed ? collapsedWidth : width;
         const float left = ClampValue(baseLeft + m_roadIncidentPanelOffsetX, kOverlayUiMargin,
-            MaxValue(kOverlayUiMargin, static_cast<float>(view.width) - kOverlayUiMargin - width));
+            MaxValue(kOverlayUiMargin, static_cast<float>(view.width) - kOverlayUiMargin - clampWidth));
         const float top = ClampValue(baseTop + m_roadIncidentPanelOffsetY, kOverlayUiMargin,
             MaxValue(kOverlayUiMargin, static_cast<float>(view.height) - kOverlayUiMargin - height));
         m_roadIncidentPanelOffsetX = left - baseLeft;
@@ -5866,6 +5983,8 @@ private:
             return false;
         if (PointInRect(x, y, layout.toggleRect))
             return true;
+        if (layout.progress <= 0.04f)
+            return PointInRect(x, y, layout.collapsedRect);
         return layout.progress > 0.04f && PointInRect(x, y, layout.panelRect);
     }
 
@@ -5885,9 +6004,18 @@ private:
         if (PointInRect(x, y, layout.toggleRect)) {
             ClearOverlayInputFocus();
             m_roadIncidentPanelCollapsed = !m_roadIncidentPanelCollapsed;
+            ClampRoadIncidentPanelOffsets(BuildViewState());
             StartRoadIncidentPanelAnimation(m_roadIncidentPanelCollapsed ? 0.0f : 1.0f);
             NotifyOverlayPositionsChanged();
             Invalidate();
+            return true;
+        }
+        if (layout.progress <= 0.04f && PointInRect(x, y, layout.collapsedDragRect)) {
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            m_draggingRoadIncidentPanel = true;
+            m_notificationUiMouseDown = true;
+            m_lastMouse = POINT{ x, y };
             return true;
         }
         if (layout.progress <= 0.04f || !PointInRect(x, y, layout.panelRect))
@@ -6002,6 +6130,13 @@ private:
             return;
         const OverlayButton toggle = MakeOverlayButton(m_roadIncidentPanelCollapsed ? L">" : L"<", layout.toggleRect);
         if (layout.progress <= 0.04f) {
+            m_overlayUi.DrawGlassPanel(layout.collapsedRect, 10.0f);
+            m_overlayUi.DrawLabel(L"Road Incidents", m_overlayUi.TitleFormat(),
+                D2D1::RectF(
+                    layout.collapsedRect.left + 12.0f,
+                    layout.collapsedRect.top + 11.0f,
+                    layout.toggleRect.left - 6.0f,
+                    layout.collapsedRect.bottom - 7.0f));
             m_overlayUi.DrawButton(toggle);
             return;
         }
@@ -6076,6 +6211,8 @@ private:
     struct ResponderChatLayout
     {
         D2D1_RECT_F panelRect{};
+        D2D1_RECT_F collapsedRect{};
+        D2D1_RECT_F collapsedDragRect{};
         D2D1_RECT_F toggleRect{};
         D2D1_RECT_F contentRect{};
         D2D1_RECT_F inputRect{};
@@ -6088,6 +6225,9 @@ private:
     struct UsersPanelLayout
     {
         D2D1_RECT_F panelRect{};
+        D2D1_RECT_F collapsedRect{};
+        D2D1_RECT_F collapsedToggleRect{};
+        D2D1_RECT_F collapsedDragRect{};
         D2D1_RECT_F toggleRect{};
         D2D1_RECT_F closeRect{};
         D2D1_RECT_F dragRect{};
@@ -6124,7 +6264,9 @@ private:
             MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - clippedPanelW));
         const float openTop = ClampValue(
             height - kOverlayUiMargin - panelH + m_responderChatOffsetY,
-            kOverlayUiMargin,
+            m_responderChatCollapsed
+                ? kOverlayUiMargin - (panelH - tabH)
+                : kOverlayUiMargin,
             MaxValue(kOverlayUiMargin, height - kOverlayUiMargin - panelH));
         const float left = openLeft;
         const float bottom = openTop + panelH + offset;
@@ -6134,6 +6276,16 @@ private:
             layout.panelRect.top + 8.0f,
             layout.panelRect.left + 38.0f,
             layout.panelRect.top + 35.0f);
+        layout.collapsedRect = D2D1::RectF(
+            layout.panelRect.left,
+            layout.panelRect.top,
+            layout.panelRect.right,
+            layout.panelRect.top + tabH);
+        layout.collapsedDragRect = D2D1::RectF(
+            layout.toggleRect.right + 6.0f,
+            layout.collapsedRect.top,
+            layout.collapsedRect.right - 12.0f,
+            layout.collapsedRect.bottom);
         layout.sendRect = D2D1::RectF(
             layout.panelRect.right - kOverlayUiPadding - 78.0f,
             layout.panelRect.bottom - kOverlayUiPadding - 32.0f,
@@ -6164,6 +6316,8 @@ private:
         const float dx = avoided.left - layout.panelRect.left;
         const float dy = avoided.top - layout.panelRect.top;
         layout.panelRect = avoided;
+        OffsetOverlayRect(layout.collapsedRect, dx, dy);
+        OffsetOverlayRect(layout.collapsedDragRect, dx, dy);
         OffsetOverlayRect(layout.toggleRect, dx, dy);
         OffsetOverlayRect(layout.contentRect, dx, dy);
         OffsetOverlayRect(layout.inputRect, dx, dy);
@@ -6185,14 +6339,15 @@ private:
         const float panelH = ClampValue(height * 0.36f, 220.0f, 360.0f);
         const float clippedPanelW = MinValue(panelW, MaxValue(190.0f, width - kOverlayUiMargin * 2.0f));
         const float clippedPanelH = MinValue(panelH, MaxValue(170.0f, height - kOverlayUiMargin * 2.0f - 120.0f));
-        const float tabW = 32.0f;
+        const float tabW = 126.0f;
 
         layout.progress = ClampValue(m_usersPanelOpenProgress, 0.0f, 1.0f);
         const float offset = (1.0f - layout.progress) * MaxValue(0.0f, clippedPanelW - tabW);
         const float openLeft = ClampValue(
             kOverlayUiMargin + m_usersPanelOffsetX,
             kOverlayUiMargin,
-            MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - clippedPanelW));
+            MaxValue(kOverlayUiMargin, width - kOverlayUiMargin -
+                (m_usersPanelCollapsed ? tabW : clippedPanelW)));
         const float openTop = ClampValue(
             kOverlayUiMargin + 64.0f + m_usersPanelOffsetY,
             kOverlayUiMargin,
@@ -6210,6 +6365,21 @@ private:
             layout.panelRect.top + 10.0f,
             layout.closeRect.left - kOverlayTogglePadding,
             layout.panelRect.top + 10.0f + kOverlayToggleSize);
+        layout.collapsedRect = D2D1::RectF(
+            layout.panelRect.right - tabW,
+            layout.panelRect.top,
+            layout.panelRect.right,
+            layout.panelRect.top + 46.0f);
+        layout.collapsedToggleRect = D2D1::RectF(
+            layout.collapsedRect.right - 34.0f,
+            layout.collapsedRect.top + 10.0f,
+            layout.collapsedRect.right - 10.0f,
+            layout.collapsedRect.top + 36.0f);
+        layout.collapsedDragRect = D2D1::RectF(
+            layout.collapsedRect.left + 10.0f,
+            layout.collapsedRect.top,
+            layout.collapsedToggleRect.left - 6.0f,
+            layout.collapsedRect.bottom);
         layout.dragRect = D2D1::RectF(
             layout.panelRect.left + kOverlayUiPadding,
             layout.panelRect.top,
@@ -6228,6 +6398,9 @@ private:
         layout.panelRect = avoided;
         OffsetOverlayRect(layout.closeRect, dx, dy);
         OffsetOverlayRect(layout.toggleRect, dx, dy);
+        OffsetOverlayRect(layout.collapsedRect, dx, dy);
+        OffsetOverlayRect(layout.collapsedToggleRect, dx, dy);
+        OffsetOverlayRect(layout.collapsedDragRect, dx, dy);
         OffsetOverlayRect(layout.dragRect, dx, dy);
         OffsetOverlayRect(layout.contentRect, dx, dy);
         return layout;
@@ -6277,10 +6450,11 @@ private:
         const float clippedPanelW = MinValue(panelW, MaxValue(190.0f, width - kOverlayUiMargin * 2.0f));
         const float clippedPanelH = MinValue(panelH, MaxValue(170.0f, height - kOverlayUiMargin * 2.0f - 120.0f));
         const float baseTop = kOverlayUiMargin + 64.0f;
+        const float clampWidth = m_usersPanelCollapsed ? 126.0f : clippedPanelW;
         const float openLeft = ClampValue(
             kOverlayUiMargin + m_usersPanelOffsetX,
             kOverlayUiMargin,
-            MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - clippedPanelW));
+            MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - clampWidth));
         const float openTop = ClampValue(
             baseTop + m_usersPanelOffsetY,
             kOverlayUiMargin,
@@ -6313,6 +6487,7 @@ private:
         const float panelW = ClampValue(width * 0.42f, 420.0f, 680.0f);
         const float clippedPanelW = MinValue(panelW, MaxValue(220.0f, width - kOverlayUiMargin * 2.0f));
         const float panelH = ClampValue(height * 0.27f, 168.0f, 238.0f);
+        const float tabH = 38.0f;
         const float baseLeft = kOverlayUiMargin;
         const float baseTop = height - kOverlayUiMargin - panelH;
         const float left = ClampValue(
@@ -6321,10 +6496,41 @@ private:
             MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - clippedPanelW));
         const float top = ClampValue(
             baseTop + m_responderChatOffsetY,
-            kOverlayUiMargin,
+            m_responderChatCollapsed
+                ? kOverlayUiMargin - (panelH - tabH)
+                : kOverlayUiMargin,
             MaxValue(kOverlayUiMargin, height - kOverlayUiMargin - panelH));
         m_responderChatOffsetX = left - baseLeft;
         m_responderChatOffsetY = top - baseTop;
+    }
+
+    void ClampNotificationHistoryPanelOffsets(const ViewState& view)
+    {
+        const float width = static_cast<float>(view.width);
+        const float height = static_cast<float>(view.height);
+        const float usableW = MaxValue(1.0f, width - kOverlayUiMargin * 2.0f);
+        const float usableH = MaxValue(1.0f, height - kOverlayUiMargin * 2.0f);
+        float panelW = ClampValue(width * 0.32f, 280.0f, 420.0f);
+        panelW = MinValue(panelW, MaxValue(180.0f, usableW));
+        const float panelH = MinValue(usableH, MaxValue(320.0f, height * 0.78f));
+        const float tabW = MinValue(panelW, 206.0f);
+        const float baseLeft = width - kOverlayUiMargin - panelW;
+        const float baseTop = kOverlayUiMargin;
+        const float left = ClampValue(
+            baseLeft + m_notificationHistoryOffsetX,
+            m_notificationHistoryCollapsed
+                ? kOverlayUiMargin - (panelW - tabW)
+                : kOverlayUiMargin,
+            MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - panelW));
+        const float top = ClampValue(
+            baseTop + m_notificationHistoryOffsetY,
+            kOverlayUiMargin,
+            MaxValue(
+                kOverlayUiMargin,
+                height - kOverlayUiMargin -
+                    (m_notificationHistoryCollapsed ? 48.0f : panelH)));
+        m_notificationHistoryOffsetX = left - baseLeft;
+        m_notificationHistoryOffsetY = top - baseTop;
     }
 
     void ClampToolbarPanelOffsets(const ViewState& view)
@@ -6491,8 +6697,13 @@ private:
         const UsersPanelLayout layout = BuildUsersPanelLayout(BuildViewState());
         if (!layout.hasPanel)
             return false;
-        if (PointInRect(x, y, layout.toggleRect))
+        const D2D1_RECT_F toggleRect = layout.progress <= 0.04f
+            ? layout.collapsedToggleRect
+            : layout.toggleRect;
+        if (PointInRect(x, y, toggleRect))
             return true;
+        if (layout.progress <= 0.04f)
+            return PointInRect(x, y, layout.collapsedRect);
         return layout.progress > 0.04f && PointInRect(x, y, layout.panelRect);
     }
 
@@ -6502,12 +6713,25 @@ private:
         if (!layout.hasPanel)
             return false;
 
-        if (PointInRect(x, y, layout.toggleRect)) {
+        const D2D1_RECT_F toggleRect = layout.progress <= 0.04f
+            ? layout.collapsedToggleRect
+            : layout.toggleRect;
+        if (PointInRect(x, y, toggleRect)) {
             ClearOverlayInputFocus();
             m_usersPanelCollapsed = !m_usersPanelCollapsed;
+            ClampUsersPanelOffsets(BuildViewState());
             StartUsersPanelAnimation(m_usersPanelCollapsed ? 0.0f : 1.0f);
             NotifyOverlayPositionsChanged();
             Invalidate();
+            return true;
+        }
+
+        if (layout.progress <= 0.04f && PointInRect(x, y, layout.collapsedDragRect)) {
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            m_draggingUsersPanel = true;
+            m_notificationUiMouseDown = true;
+            m_lastMouse = POINT{ x, y };
             return true;
         }
 
@@ -6606,8 +6830,18 @@ private:
         if (!layout.hasPanel)
             return;
 
-        const OverlayButton toggleButton = MakeOverlayButton(m_usersPanelCollapsed ? L">" : L"<", layout.toggleRect);
+        const D2D1_RECT_F toggleRect = layout.progress <= 0.04f
+            ? layout.collapsedToggleRect
+            : layout.toggleRect;
+        const OverlayButton toggleButton = MakeOverlayButton(m_usersPanelCollapsed ? L">" : L"<", toggleRect);
         if (layout.progress <= 0.04f) {
+            m_overlayUi.DrawGlassPanel(layout.collapsedRect, 10.0f);
+            m_overlayUi.DrawLabel(L"Users", m_overlayUi.TitleFormat(),
+                D2D1::RectF(
+                    layout.collapsedRect.left + 12.0f,
+                    layout.collapsedRect.top + 11.0f,
+                    layout.collapsedToggleRect.left - 6.0f,
+                    layout.collapsedRect.bottom - 7.0f));
             m_overlayUi.DrawButton(toggleButton);
             return;
         }
@@ -7127,6 +7361,8 @@ private:
         const ResponderChatLayout layout = BuildResponderChatLayout(BuildViewState());
         if (PointInRect(x, y, layout.toggleRect))
             return true;
+        if (layout.progress <= 0.04f)
+            return PointInRect(x, y, layout.collapsedRect);
         return layout.progress > 0.04f && PointInRect(x, y, layout.panelRect);
     }
 
@@ -7149,9 +7385,19 @@ private:
             m_responderChatCollapsed = !m_responderChatCollapsed;
             if (m_responderChatCollapsed)
                 ClearOverlayInputFocus();
+            ClampResponderChatPanelOffsets(BuildViewState());
             StartResponderChatAnimation(m_responderChatCollapsed ? 0.0f : 1.0f);
             NotifyOverlayPositionsChanged();
             Invalidate();
+            return true;
+        }
+
+        if (layout.progress <= 0.04f && PointInRect(x, y, layout.collapsedDragRect)) {
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            m_draggingResponderChatPanel = true;
+            m_notificationUiMouseDown = true;
+            m_lastMouse = POINT{ x, y };
             return true;
         }
 
@@ -7237,6 +7483,13 @@ private:
         const ResponderChatLayout layout = BuildResponderChatLayout(view);
         const OverlayButton toggleButton = MakeOverlayButton(m_responderChatCollapsed ? L"^" : L"v", layout.toggleRect);
         if (layout.progress <= 0.04f) {
+            m_overlayUi.DrawGlassPanel(layout.collapsedRect, 10.0f);
+            m_overlayUi.DrawLabel(L"Responders Chat", m_overlayUi.TitleFormat(),
+                D2D1::RectF(
+                    layout.toggleRect.right + 8.0f,
+                    layout.collapsedRect.top + 8.0f,
+                    layout.collapsedRect.right - 12.0f,
+                    layout.collapsedRect.bottom - 5.0f));
             m_overlayUi.DrawButton(toggleButton);
             return;
         }
@@ -7314,19 +7567,51 @@ private:
         if (m_showNotificationHistory) {
             historyW = ClampValue(width * 0.32f, 280.0f, 420.0f);
             historyW = MinValue(historyW, MaxValue(180.0f, usableW));
-            const float tabW = 34.0f;
+            const float historyH = MinValue(
+                usableH,
+                MaxValue(320.0f, height * 0.78f));
+            const float tabW = MinValue(historyW, 206.0f);
             layout.historyProgress = ClampValue(m_notificationHistoryOpenProgress, 0.0f, 1.0f);
             const float offset = (1.0f - layout.historyProgress) * MaxValue(0.0f, historyW - tabW);
-            layout.historyRect = D2D1::RectF(
-                width - kOverlayUiMargin - historyW + offset,
+            const float baseLeft = width - kOverlayUiMargin - historyW;
+            const float openLeft = ClampValue(
+                baseLeft + m_notificationHistoryOffsetX,
+                m_notificationHistoryCollapsed
+                    ? kOverlayUiMargin - (historyW - tabW)
+                    : kOverlayUiMargin,
+                MaxValue(kOverlayUiMargin, width - kOverlayUiMargin - historyW));
+            const float openTop = ClampValue(
+                kOverlayUiMargin + m_notificationHistoryOffsetY,
                 kOverlayUiMargin,
-                width - kOverlayUiMargin + offset,
-                kOverlayUiMargin + MaxValue(120.0f, usableH));
+                MaxValue(
+                    kOverlayUiMargin,
+                    height - kOverlayUiMargin -
+                        (m_notificationHistoryCollapsed ? 48.0f : historyH)));
+            layout.historyRect = D2D1::RectF(
+                openLeft + offset,
+                openTop,
+                openLeft + historyW + offset,
+                openTop + historyH);
             layout.historyToggleRect = D2D1::RectF(
                 layout.historyRect.left + kOverlayTogglePadding,
                 layout.historyRect.top + 12.0f,
                 layout.historyRect.left + kOverlayTogglePadding + kOverlayToggleSize,
                 layout.historyRect.top + 12.0f + kOverlayToggleSize);
+            layout.historyCollapsedRect = D2D1::RectF(
+                layout.historyRect.left,
+                layout.historyRect.top,
+                layout.historyRect.left + tabW,
+                layout.historyRect.top + 48.0f);
+            layout.historyCollapsedDragRect = D2D1::RectF(
+                layout.historyToggleRect.right + 6.0f,
+                layout.historyCollapsedRect.top,
+                layout.historyCollapsedRect.right - 10.0f,
+                layout.historyCollapsedRect.bottom);
+            layout.historyDragRect = D2D1::RectF(
+                layout.historyToggleRect.right + 6.0f,
+                layout.historyRect.top,
+                NotificationHistoryClearRect(layout.historyRect).left - 8.0f,
+                layout.historyRect.top + 48.0f);
             const ResponderChatLayout chatLayout = BuildResponderChatLayout(view);
             if (chatLayout.progress > 0.04f && RectsOverlap(layout.historyRect, chatLayout.panelRect)) {
                 const float clippedBottom = chatLayout.panelRect.top - kOverlayUiGap;
@@ -7544,6 +7829,11 @@ private:
         const NotificationLayout layout = BuildNotificationLayout(BuildViewState());
         if (m_showNotificationHistory && PointInRect(x, y, layout.historyToggleRect))
             return true;
+        if (m_showNotificationHistory && layout.historyProgress <= 0.04f &&
+            PointInRect(x, y, layout.historyCollapsedRect))
+        {
+            return true;
+        }
         if (m_showNotificationHistory && layout.historyProgress > 0.04f && PointInRect(x, y, layout.historyRect))
             return true;
         if (m_hasActiveNotification && m_hasLastActiveNotificationRect && PointInRect(x, y, m_lastActiveNotificationRect))
@@ -7738,9 +8028,21 @@ private:
         if (PointInRect(x, y, layout.historyToggleRect)) {
             ClearOverlayInputFocus();
             m_notificationHistoryCollapsed = !m_notificationHistoryCollapsed;
+            ClampNotificationHistoryPanelOffsets(BuildViewState());
             StartNotificationHistoryAnimation(m_notificationHistoryCollapsed ? 0.0f : 1.0f);
             NotifyOverlayPositionsChanged();
             Invalidate();
+            return true;
+        }
+
+        if (layout.historyProgress <= 0.04f &&
+            PointInRect(x, y, layout.historyCollapsedDragRect))
+        {
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            m_draggingNotificationHistoryPanel = true;
+            m_notificationUiMouseDown = true;
+            m_lastMouse = POINT{ x, y };
             return true;
         }
 
@@ -7761,6 +8063,15 @@ private:
             if (m_onNotificationHistoryClear)
                 m_onNotificationHistoryClear();
             Invalidate();
+            return true;
+        }
+
+        if (PointInRect(x, y, layout.historyDragRect)) {
+            ClearOverlayInputFocus();
+            SetCapture(m_hwnd);
+            m_draggingNotificationHistoryPanel = true;
+            m_notificationUiMouseDown = true;
+            m_lastMouse = POINT{ x, y };
             return true;
         }
 
@@ -7961,6 +8272,13 @@ private:
         const D2D1_RECT_F rect = layout.historyRect;
         const OverlayButton toggleButton = MakeOverlayButton(m_notificationHistoryCollapsed ? L"<" : L">", layout.historyToggleRect);
         if (layout.historyProgress <= 0.04f) {
+            m_overlayUi.DrawGlassPanel(layout.historyCollapsedRect, 10.0f);
+            m_overlayUi.DrawLabel(L"Notification History", m_overlayUi.TitleFormat(),
+                D2D1::RectF(
+                    layout.historyToggleRect.right + 8.0f,
+                    layout.historyCollapsedRect.top + 11.0f,
+                    layout.historyCollapsedRect.right - 10.0f,
+                    layout.historyCollapsedRect.bottom - 7.0f));
             m_overlayUi.DrawButton(toggleButton);
             return;
         }
@@ -8499,63 +8817,100 @@ private:
         if (!roadRoutes)
             return;
 
+        ComPtr<ID2D1Factory> factory;
+        ComPtr<ID2D1StrokeStyle> roadStrokeStyle;
+        rt->GetFactory(factory.GetAddressOf());
+        if (factory)
+            CreateRoundedRoadStrokeStyle(factory.Get(), roadStrokeStyle.GetAddressOf());
+
         const float casingWidth = zoom >= 8 ? 7.0f : 5.0f;
         const float roadWidth = zoom >= 8 ? 4.0f : 3.0f;
-        for (const RoadDepictionRoute& route : *roadRoutes) {
-            if (IsRoadDepictionHiddenFast(hiddenRoadDepictionIds, route))
-                continue;
-            if (!RoadRouteIntersectsView(view, route, zoom))
-                continue;
-
-            const std::vector<GeoPoint>& points = RoadRoutePointsForZoom(route, zoom);
-            for (size_t i = 1; i < points.size(); ++i) {
-                if (!RoadSegmentIntersectsView(view, points[i - 1], points[i]))
+        const auto drawPass = [&](ID2D1Brush* brush, float width) {
+            for (const RoadDepictionRoute& route : *roadRoutes) {
+                if (IsRoadDepictionHiddenFast(hiddenRoadDepictionIds, route))
+                    continue;
+                if (!RoadRouteIntersectsView(view, route, zoom))
                     continue;
 
-                D2D1_POINT_2F a = GeoToScreenForZoom(view, points[i - 1].lat, points[i - 1].lon, zoom);
-                D2D1_POINT_2F b = GeoToScreenForZoom(view, points[i].lat, points[i].lon, zoom);
-                rt->DrawLine(a, b, casingBrush, casingWidth);
-                rt->DrawLine(a, b, roadBrush, roadWidth);
+                const std::vector<GeoPoint>& points = RoadRoutePointsForZoom(route, zoom);
+                for (size_t i = 1; i < points.size(); ++i) {
+                    if (!RoadSegmentIntersectsView(view, points[i - 1], points[i]))
+                        continue;
+
+                    D2D1_POINT_2F a = GeoToScreenForZoom(view, points[i - 1].lat, points[i - 1].lon, zoom);
+                    D2D1_POINT_2F b = GeoToScreenForZoom(view, points[i].lat, points[i].lon, zoom);
+                    rt->DrawLine(a, b, brush, width, roadStrokeStyle.Get());
+                }
             }
-        }
+            };
+
+        // OS Open Roads stores a road as many short link features. Paint every
+        // casing first and every centre second so a link's dark end cap cannot
+        // overwrite the pale centre of the preceding link.
+        drawPass(casingBrush, casingWidth);
+        drawPass(roadBrush, roadWidth);
     }
 
     void DrawRoadDepictionLines(const ViewState& view)
     {
-        if (!m_rt || !m_showRoadDepictions)
+        if (!m_rt || !m_showRoadDepictions || !m_roadBrush || !m_roadCasingBrush)
             return;
         if (!m_roadDepictionRoutes)
             return;
 
         const float casingWidth = m_zoom >= 8 ? 7.0f : 5.0f;
         const float roadWidth = m_zoom >= 8 ? 4.0f : 3.0f;
-        for (const RoadDepictionRoute& route : *m_roadDepictionRoutes) {
-            if (IsRoadDepictionHiddenFast(m_normalizedHiddenRoadDepictionIds, route))
-                continue;
-            if (!RoadRouteIntersectsView(view, route, m_zoom))
-                continue;
-
-            const std::vector<GeoPoint>& points = RoadRoutePointsForZoom(route, m_zoom);
-            for (size_t i = 1; i < points.size(); ++i) {
-                if (!RoadSegmentIntersectsView(view, points[i - 1], points[i]))
+        const auto drawPass = [&](ID2D1Brush* brush, float width) {
+            for (const RoadDepictionRoute& route : *m_roadDepictionRoutes) {
+                if (IsRoadDepictionHiddenFast(m_normalizedHiddenRoadDepictionIds, route))
+                    continue;
+                if (!RoadRouteIntersectsView(view, route, m_zoom))
                     continue;
 
-                D2D1_POINT_2F a = GeoToScreen(view, points[i - 1].lat, points[i - 1].lon);
-                D2D1_POINT_2F b = GeoToScreen(view, points[i].lat, points[i].lon);
-                m_rt->DrawLine(a, b, m_roadCasingBrush.Get(), casingWidth);
-                m_rt->DrawLine(a, b, m_roadBrush.Get(), roadWidth);
+                const std::vector<GeoPoint>& points = RoadRoutePointsForZoom(route, m_zoom);
+                for (size_t i = 1; i < points.size(); ++i) {
+                    if (!RoadSegmentIntersectsView(view, points[i - 1], points[i]))
+                        continue;
+
+                    D2D1_POINT_2F a = GeoToScreen(view, points[i - 1].lat, points[i - 1].lon);
+                    D2D1_POINT_2F b = GeoToScreen(view, points[i].lat, points[i].lon);
+                    m_rt->DrawLine(a, b, brush, width, m_roadStrokeStyle.Get());
+                }
             }
-        }
+            };
+
+        drawPass(m_roadCasingBrush.Get(), casingWidth);
+        drawPass(m_roadBrush.Get(), roadWidth);
     }
 
-    void DrawRoadDepictionLabels(const ViewState& view)
+    void DrawRoadDepictionLabels(const ViewState& view, std::vector<D2D1_RECT_F>& occupiedRects)
     {
-        if (!m_rt || !m_showRoadDepictions || !m_noteTextFormat || m_zoom < 7 || m_interactivePan)
+        if (!m_rt || !m_showRoadDepictions || !m_roadLabelTextFormat || !m_textBrush || !m_panelBrush ||
+            m_zoom < 7)
             return;
         if (!m_roadDepictionRoutes)
             return;
 
-        std::unordered_set<std::wstring> drawnLabels;
+        struct RoadLabelCandidate
+        {
+            D2D1_POINT_2F anchor{};
+            float score = 0.0f;
+        };
+
+        struct RoadLabelGroup
+        {
+            std::wstring key;
+            std::wstring label;
+            std::vector<RoadLabelCandidate> candidates;
+        };
+
+        constexpr size_t kMaxCandidatesPerRoad = 64;
+        constexpr float kCandidateSeparationSq = 44.0f * 44.0f;
+        std::vector<RoadLabelGroup> groups;
+        std::unordered_map<std::wstring, size_t> groupIndices;
+        const float centreX = static_cast<float>(view.width) * 0.5f;
+        const float centreY = static_cast<float>(view.height) * 0.5f;
+
         for (const RoadDepictionRoute& route : *m_roadDepictionRoutes) {
             if (IsRoadDepictionHiddenFast(m_normalizedHiddenRoadDepictionIds, route))
                 continue;
@@ -8563,23 +8918,154 @@ private:
                 continue;
 
             std::wstring labelKey = !route.normalizedLabel.empty() ? route.normalizedLabel : ToLower(route.label);
-            if (!drawnLabels.insert(labelKey).second)
+            if (labelKey.empty() || route.label.empty())
                 continue;
+
+            auto inserted = groupIndices.emplace(labelKey, groups.size());
+            if (inserted.second)
+                groups.push_back({ labelKey, route.label, {} });
+            RoadLabelGroup& group = groups[inserted.first->second];
+
             const std::vector<GeoPoint>& points = RoadRoutePointsForZoom(route, m_zoom);
-            if (points.empty())
-                continue;
-            const GeoPoint& mid = points[points.size() / 2];
-            if (IsGeoPointInView(view, mid.lat, mid.lon)) {
-                D2D1_POINT_2F p = GeoToScreen(view, mid.lat, mid.lon);
-                D2D1_RECT_F rect = D2D1::RectF(p.x + 6.0f, p.y - 12.0f, p.x + 74.0f, p.y + 12.0f);
-                m_rt->DrawTextW(route.label.c_str(), static_cast<UINT32>(route.label.size()), m_noteTextFormat.Get(), rect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            for (size_t i = 1; i < points.size(); ++i) {
+                if (!RoadSegmentIntersectsView(view, points[i - 1], points[i]))
+                    continue;
+
+                const D2D1_POINT_2F a = GeoToScreen(view, points[i - 1].lat, points[i - 1].lon);
+                const D2D1_POINT_2F b = GeoToScreen(view, points[i].lat, points[i].lon);
+                const D2D1_POINT_2F anchor = D2D1::Point2F((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+                if (anchor.x < 12.0f || anchor.y < 12.0f ||
+                    anchor.x > static_cast<float>(view.width) - 12.0f ||
+                    anchor.y > static_cast<float>(view.height) - 12.0f)
+                {
+                    continue;
+                }
+
+                const float dx = anchor.x - centreX;
+                const float dy = anchor.y - centreY;
+                const float segmentDx = b.x - a.x;
+                const float segmentDy = b.y - a.y;
+                const float segmentLengthSq = segmentDx * segmentDx + segmentDy * segmentDy;
+                const float score = dx * dx + dy * dy - MinValue(segmentLengthSq, 2500.0f) * 0.12f;
+
+                bool merged = false;
+                for (RoadLabelCandidate& existing : group.candidates) {
+                    const float candidateDx = existing.anchor.x - anchor.x;
+                    const float candidateDy = existing.anchor.y - anchor.y;
+                    if (candidateDx * candidateDx + candidateDy * candidateDy < kCandidateSeparationSq) {
+                        if (score < existing.score)
+                            existing = { anchor, score };
+                        merged = true;
+                        break;
+                    }
+                }
+                if (merged)
+                    continue;
+
+                if (group.candidates.size() < kMaxCandidatesPerRoad) {
+                    group.candidates.push_back({ anchor, score });
+                    continue;
+                }
+
+                auto worst = std::max_element(
+                    group.candidates.begin(),
+                    group.candidates.end(),
+                    [](const RoadLabelCandidate& left, const RoadLabelCandidate& right) {
+                        return left.score < right.score;
+                    });
+                if (worst != group.candidates.end() && score < worst->score)
+                    *worst = { anchor, score };
             }
+        }
+
+        for (RoadLabelGroup& group : groups) {
+            std::sort(
+                group.candidates.begin(),
+                group.candidates.end(),
+                [](const RoadLabelCandidate& left, const RoadLabelCandidate& right) {
+                    return left.score < right.score;
+                });
+        }
+        std::sort(
+            groups.begin(),
+            groups.end(),
+            [](const RoadLabelGroup& left, const RoadLabelGroup& right) {
+                if (left.candidates.empty())
+                    return false;
+                if (right.candidates.empty())
+                    return true;
+                return left.candidates.front().score < right.candidates.front().score;
+            });
+
+        occupiedRects.reserve(occupiedRects.size() + groups.size());
+        const float badgeHeight = m_zoom >= 10 ? 23.0f : 21.0f;
+        for (const RoadLabelGroup& group : groups) {
+            if (group.candidates.empty())
+                continue;
+
+            const float textWidth = MeasureMapTextWidth(group.label, m_roadLabelTextFormat.Get(), 4000.0f);
+            const float badgeWidth = ClampValue(textWidth + 16.0f, 32.0f, 118.0f);
+            D2D1_RECT_F badgeRect{};
+            bool foundPlacement = false;
+            for (const RoadLabelCandidate& candidate : group.candidates) {
+                badgeRect = D2D1::RectF(
+                    candidate.anchor.x - badgeWidth * 0.5f,
+                    candidate.anchor.y - badgeHeight * 0.5f,
+                    candidate.anchor.x + badgeWidth * 0.5f,
+                    candidate.anchor.y + badgeHeight * 0.5f);
+                badgeRect = ClampRectToView(badgeRect, view);
+
+                const D2D1_RECT_F collisionRect = D2D1::RectF(
+                    badgeRect.left - 4.0f,
+                    badgeRect.top - 4.0f,
+                    badgeRect.right + 4.0f,
+                    badgeRect.bottom + 4.0f);
+                const bool collides = std::any_of(
+                    occupiedRects.begin(),
+                    occupiedRects.end(),
+                    [&](const D2D1_RECT_F& occupied) { return RectsIntersect(collisionRect, occupied); });
+                if (!collides) {
+                    occupiedRects.push_back(collisionRect);
+                    foundPlacement = true;
+                    break;
+                }
+            }
+            if (!foundPlacement)
+                continue;
+
+            const bool motorway = group.key.front() == L'm' || group.key.find(L"(m)") != std::wstring::npos;
+            const bool primaryRoad = group.key.front() == L'a';
+            ID2D1Brush* fillBrush = motorway
+                ? static_cast<ID2D1Brush*>(m_motorwayRoadLabelBrush.Get())
+                : primaryRoad
+                ? static_cast<ID2D1Brush*>(m_primaryRoadLabelBrush.Get())
+                : static_cast<ID2D1Brush*>(m_otherRoadLabelBrush.Get());
+            if (!fillBrush)
+                fillBrush = m_panelBrush.Get();
+
+            const D2D1_RECT_F shadowRect = D2D1::RectF(
+                badgeRect.left + 1.5f,
+                badgeRect.top + 2.0f,
+                badgeRect.right + 1.5f,
+                badgeRect.bottom + 2.0f);
+            m_rt->FillRoundedRectangle(D2D1::RoundedRect(shadowRect, 4.5f, 4.5f), m_panelBrush.Get());
+            const D2D1_ROUNDED_RECT badge = D2D1::RoundedRect(badgeRect, 4.5f, 4.5f);
+            m_rt->FillRoundedRectangle(badge, fillBrush);
+            m_rt->DrawRoundedRectangle(badge, m_textBrush.Get(), 1.2f);
+            m_rt->DrawTextW(
+                group.label.c_str(),
+                static_cast<UINT32>(group.label.size()),
+                m_roadLabelTextFormat.Get(),
+                badgeRect,
+                m_textBrush.Get(),
+                D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
     }
 
-    void DrawCityAnchors(const ViewState& view)
+    void DrawCityAnchors(const ViewState& view, std::vector<D2D1_RECT_F>& occupiedRects)
     {
-        if (!m_showAreaLabels)
+        if (!m_rt || !m_showAreaLabels || !m_textBrush || !m_panelBrush ||
+            !m_areaLabelBrush || !m_areaLabelGlowBrush || !m_areaLabelBackgroundBrush || !m_areaLabelTextBrush)
             return;
 
         struct CityAnchor
@@ -8610,12 +9096,78 @@ private:
             if (p.x < -16.0f || p.y < -16.0f || p.x > width + 16.0f || p.y > height + 16.0f)
                 continue;
 
-            m_rt->FillEllipse(D2D1::Ellipse(p, 4.0f, 4.0f), m_textBrush.Get());
-            m_rt->DrawEllipse(D2D1::Ellipse(p, 8.0f, 8.0f), m_panelBrush.Get(), 2.0f);
-            if (m_zoom >= 6 && m_noteTextFormat) {
-                D2D1_RECT_F rect = D2D1::RectF(p.x + 9.0f, p.y - 10.0f, p.x + 118.0f, p.y + 14.0f);
-                m_rt->DrawTextW(city.name, static_cast<UINT32>(wcslen(city.name)), m_noteTextFormat.Get(), rect, m_textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            if (m_zoom >= 6 && m_areaLabelTextFormat) {
+                const std::wstring label(city.name);
+                const float labelHeight = 20.0f;
+                const float labelWidth = ClampValue(
+                    MeasureMapTextWidth(label, m_areaLabelTextFormat.Get(), 4000.0f) + 16.0f,
+                    46.0f,
+                    132.0f);
+                constexpr float markerGap = 11.0f;
+                const D2D1_RECT_F candidates[] = {
+                    D2D1::RectF(p.x + markerGap, p.y - labelHeight * 0.5f,
+                        p.x + markerGap + labelWidth, p.y + labelHeight * 0.5f),
+                    D2D1::RectF(p.x - markerGap - labelWidth, p.y - labelHeight * 0.5f,
+                        p.x - markerGap, p.y + labelHeight * 0.5f),
+                    D2D1::RectF(p.x - labelWidth * 0.5f, p.y - markerGap - labelHeight,
+                        p.x + labelWidth * 0.5f, p.y - markerGap),
+                    D2D1::RectF(p.x - labelWidth * 0.5f, p.y + markerGap,
+                        p.x + labelWidth * 0.5f, p.y + markerGap + labelHeight)
+                };
+
+                D2D1_RECT_F labelRect{};
+                D2D1_RECT_F collisionRect{};
+                float bestOverlap = std::numeric_limits<float>::max();
+                bool foundPlacement = false;
+                for (const D2D1_RECT_F& rawCandidate : candidates) {
+                    const D2D1_RECT_F candidate = ClampRectToView(rawCandidate, view);
+                    const D2D1_RECT_F candidateCollision = D2D1::RectF(
+                        candidate.left - 3.0f,
+                        candidate.top - 3.0f,
+                        candidate.right + 3.0f,
+                        candidate.bottom + 3.0f);
+
+                    float overlap = 0.0f;
+                    for (const D2D1_RECT_F& occupied : occupiedRects)
+                        overlap += RectIntersectionArea(candidateCollision, occupied);
+                    if (overlap < bestOverlap) {
+                        bestOverlap = overlap;
+                        labelRect = candidate;
+                        collisionRect = candidateCollision;
+                    }
+                    if (overlap <= 0.0f) {
+                        foundPlacement = true;
+                        break;
+                    }
+                }
+                if (!foundPlacement)
+                    foundPlacement = bestOverlap < std::numeric_limits<float>::max();
+
+                if (foundPlacement) {
+                    occupiedRects.push_back(collisionRect);
+                    const D2D1_POINT_2F connectorEnd = D2D1::Point2F(
+                        ClampValue(p.x, labelRect.left, labelRect.right),
+                        ClampValue(p.y, labelRect.top, labelRect.bottom));
+                    m_rt->DrawLine(p, connectorEnd, m_areaLabelBrush.Get(), 1.0f, m_roadStrokeStyle.Get());
+
+                    const D2D1_ROUNDED_RECT nameplate = D2D1::RoundedRect(labelRect, 7.0f, 7.0f);
+                    m_rt->FillRoundedRectangle(nameplate, m_areaLabelBackgroundBrush.Get());
+                    m_rt->DrawRoundedRectangle(nameplate, m_areaLabelBrush.Get(), 0.9f);
+                    m_rt->DrawTextW(
+                        label.c_str(),
+                        static_cast<UINT32>(label.size()),
+                        m_areaLabelTextFormat.Get(),
+                        labelRect,
+                        m_areaLabelTextBrush.Get(),
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                }
             }
+
+            // A concentric target reads as a named place rather than an incident pin.
+            m_rt->FillEllipse(D2D1::Ellipse(p, 7.0f, 7.0f), m_areaLabelGlowBrush.Get());
+            m_rt->FillEllipse(D2D1::Ellipse(p, 4.5f, 4.5f), m_areaLabelTextBrush.Get());
+            m_rt->FillEllipse(D2D1::Ellipse(p, 2.3f, 2.3f), m_areaLabelBrush.Get());
+            m_rt->DrawEllipse(D2D1::Ellipse(p, 4.5f, 4.5f), m_areaLabelBrush.Get(), 0.9f);
         }
     }
 
@@ -9913,6 +10465,7 @@ private:
             m_draggingRoadIncidentPanel ||
             m_draggingRoadIncidentPanelScrollbar ||
             m_draggingRoadIncidentDetailsScrollbar ||
+            m_draggingNotificationHistoryPanel ||
             m_draggingNotificationHistoryScrollbar ||
             m_draggingNotificationHistoryContent;
     }
@@ -9980,8 +10533,9 @@ private:
         if (m_displayWorldMap)
             return;
 
-        DrawRoadDepictionLabels(overlayView);
-        DrawCityAnchors(overlayView);
+        std::vector<D2D1_RECT_F> occupiedLabelRects;
+        DrawRoadDepictionLabels(overlayView, occupiedLabelRects);
+        DrawCityAnchors(overlayView, occupiedLabelRects);
     }
 
     void DrawWorldBoundaryPreview(const ViewState& view)
@@ -10985,6 +11539,9 @@ private:
     D2D1_RECT_F m_mapEventContextMenuRect{};
     bool m_draggingNotificationHistoryScrollbar = false;
     bool m_draggingNotificationHistoryContent = false;
+    bool m_draggingNotificationHistoryPanel = false;
+    float m_notificationHistoryOffsetX = 0.0f;
+    float m_notificationHistoryOffsetY = 0.0f;
     bool m_responderChatCollapsed = false;
     bool m_responderChatInputFocused = false;
     bool m_canClearResponderChat = false;
@@ -11082,8 +11639,18 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_floodBrush;
     ComPtr<ID2D1SolidColorBrush> m_roadBrush;
     ComPtr<ID2D1SolidColorBrush> m_roadCasingBrush;
+    ComPtr<ID2D1SolidColorBrush> m_motorwayRoadLabelBrush;
+    ComPtr<ID2D1SolidColorBrush> m_primaryRoadLabelBrush;
+    ComPtr<ID2D1SolidColorBrush> m_otherRoadLabelBrush;
+    ComPtr<ID2D1SolidColorBrush> m_areaLabelBrush;
+    ComPtr<ID2D1SolidColorBrush> m_areaLabelGlowBrush;
+    ComPtr<ID2D1SolidColorBrush> m_areaLabelBackgroundBrush;
+    ComPtr<ID2D1SolidColorBrush> m_areaLabelTextBrush;
+    ComPtr<ID2D1StrokeStyle> m_roadStrokeStyle;
     ComPtr<ID2D1StrokeStyle> m_forecastErrorStrokeStyle;
     ComPtr<IDWriteTextFormat> m_noteTextFormat;
+    ComPtr<IDWriteTextFormat> m_roadLabelTextFormat;
+    ComPtr<IDWriteTextFormat> m_areaLabelTextFormat;
     ComPtr<ID2D1Bitmap> m_sceneBitmap;
     ComPtr<ID2D1Bitmap> m_sceneBitmapBack;
     bool m_sceneCacheDirty = false;

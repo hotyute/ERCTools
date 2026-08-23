@@ -21,6 +21,9 @@
   <ItemGroup>
     <ClCompile Include="account_creator.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
@@ -130,5 +133,10 @@
     </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <ImportGroup Label="ExtensionTargets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(ProjectDir)..\packages\nlohmann.json.3.12.0\build\native\nlohmann.json.targets" Condition="Exists('$(ProjectDir)..\packages\nlohmann.json.3.12.0\build\native\nlohmann.json.targets')" />
+  </ImportGroup>
+  <Target Name="EnsureNlohmannJsonNuGetPackage" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(ProjectDir)..\packages\nlohmann.json.3.12.0\build\native\nlohmann.json.targets')" Text="The nlohmann.json 3.12.0 NuGet package is missing. Restore NuGet packages for the solution, then rebuild." />
+  </Target>
 </Project>

@@ -25,6 +25,8 @@ struct MapOverlayPositions
     float commsY = 0.0f;
     float roadIncidentsX = 0.0f;
     float roadIncidentsY = 0.0f;
+    float notificationHistoryX = 0.0f;
+    float notificationHistoryY = 0.0f;
     bool roadIncidentsCollapsed = false;
     bool notificationHistoryCollapsed = false;
     bool usersCollapsed = false;

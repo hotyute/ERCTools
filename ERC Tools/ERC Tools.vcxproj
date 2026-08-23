@@ -70,6 +70,9 @@
     <Manifest Include="app.manifest" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
     <Content Include="assets\sounds\message.wav" />
     <Content Include="assets\sounds\notification.wav" />
     <Content Include="assets\sounds\private_message.wav" />
@@ -133,6 +136,11 @@
   <PropertyGroup>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -207,5 +215,9 @@
       SkipUnchangedFiles="true" />
   </Target>
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(ProjectDir)..\packages\nlohmann.json.3.12.0\build\native\nlohmann.json.targets" Condition="Exists('$(ProjectDir)..\packages\nlohmann.json.3.12.0\build\native\nlohmann.json.targets')" />
   </ImportGroup>
+  <Target Name="EnsureNlohmannJsonNuGetPackage" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(ProjectDir)..\packages\nlohmann.json.3.12.0\build\native\nlohmann.json.targets')" Text="The nlohmann.json 3.12.0 NuGet package is missing. Restore NuGet packages for the solution, then rebuild." />
+  </Target>
 </Project>

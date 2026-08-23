@@ -110,6 +110,7 @@ constexpr int IDM_VIEW_COMMS_INDICATOR = 2058;
 constexpr int IDM_VIEW_ROAD_INCIDENT_PANEL = 2061;
 constexpr int IDM_SETTINGS_DIAGNOSTICS = 2059;
 constexpr int IDM_SETTINGS_TEMPLATE = 2060;
+constexpr int IDM_SETTINGS_ALL_INCIDENTS = 2062;
 constexpr int IDC_SETTINGS_ALERT_FILTER = 2101;
 constexpr int IDC_SETTINGS_ALERT_ORDER = 2102;
 constexpr int IDC_SETTINGS_BOUNDARY_BTN = 2103;
@@ -293,10 +294,19 @@ constexpr int IDC_TEMPLATE_SHORTHAND_ADD = 2745;
 constexpr int IDC_TEMPLATE_SHORTHAND_UPDATE = 2746;
 constexpr int IDC_TEMPLATE_SHORTHAND_REMOVE = 2747;
 constexpr int IDC_TEMPLATE_SETTINGS_CLOSE = 2748;
+constexpr int IDC_ALL_INCIDENTS_TAB = 2751;
+constexpr int IDC_ALL_INCIDENTS_ROADS_LIST = 2752;
+constexpr int IDC_ALL_INCIDENTS_EARTHQUAKES_LIST = 2753;
+constexpr int IDC_ALL_INCIDENTS_WEATHER_SYSTEMS_LIST = 2754;
+constexpr int IDC_ALL_INCIDENTS_WEATHER_WARNINGS_LIST = 2755;
+constexpr int IDC_ALL_INCIDENTS_FLOODS_LIST = 2756;
+constexpr int IDC_ALL_INCIDENTS_REFRESH = 2757;
+constexpr int IDC_ALL_INCIDENTS_CLOSE = 2758;
 constexpr const wchar_t* kSettingsClassName = L"TrafficEnglandSettingsWindow";
 constexpr const wchar_t* kSoundsClassName = L"ERCToolsSoundsWindow";
 constexpr const wchar_t* kDiagnosticsClassName = L"ERCToolsDiagnosticsWindow";
 constexpr const wchar_t* kTemplateSettingsClassName = L"ERCToolsTemplateSettingsWindow";
+constexpr const wchar_t* kAllIncidentsClassName = L"ERCToolsAllIncidentsWindow";
 constexpr const wchar_t* kIncidentFiltersClassName = L"TrafficEnglandIncidentFiltersWindow";
 constexpr const wchar_t* kIncidentNotificationsClassName = L"TrafficEnglandIncidentNotificationsWindow";
 constexpr const wchar_t* kIncidentsListClassName = L"TrafficEnglandIncidentsListWindow";
@@ -485,6 +495,8 @@ struct ServerResult
 {
     ServerAction action = ServerAction::Poll;
     bool ok = false;
+    DWORD status = 0;
+    std::wstring code;
     bool chatOk = false;
     bool notesOk = false;
     bool usersOk = false;
@@ -2963,29 +2975,29 @@ private:
 
         LONG width = MaxLong(1L, rc.right - rc.left);
         LONG height = MaxLong(1L, rc.bottom - rc.top);
-
-        const int pad = 16;
-        const int labelH = 22;
-        const int controlH = 32;
-        const int statusH = 24;
-
-        const int topY = 12;
-        const int topBarH = topY;
-        int bodyTop = topBarH;
         // The incident browser is rendered by MapView. These controls remain as
         // hidden state holders for the existing filter/list selection pipeline.
         for (HWND h : { m_searchLabel, m_searchEdit, m_severityLabel, m_severityCombo, m_listView, m_detailsEdit })
             ShowWindow(h, SW_HIDE);
         ShowWindow(m_panelTabBtn, SW_HIDE);
 
-        int mapX = pad;
-        int mapY = bodyTop + pad;
-        LONG mapW = MaxLong(100L, width - mapX - pad);
-        LONG mapH = MaxLong(100L, height - mapY - statusH - pad);
-
-        MoveWindow(m_map.Hwnd(), mapX, mapY, mapW, mapH, TRUE);
-
+        // Let the status control choose its DPI-aware height, then give every
+        // remaining client pixel to the map. The menu is non-client area, so a
+        // map origin of (0, 0) sits directly beneath it without an artificial
+        // top or side gutter.
         SendMessageW(m_statusBar, WM_SIZE, 0, 0);
+        RECT statusRect{};
+        int statusHeight = 0;
+        if (GetWindowRect(m_statusBar, &statusRect))
+            statusHeight = MaxInt(0, statusRect.bottom - statusRect.top);
+
+        MoveWindow(
+            m_map.Hwnd(),
+            0,
+            0,
+            width,
+            MaxLong(1L, height - statusHeight),
+            TRUE);
     }
 
     void OnCommand(int id, int code)
@@ -3028,6 +3040,10 @@ private:
 
         case IDM_SETTINGS_DIAGNOSTICS:
             ShowDiagnosticsWindow();
+            break;
+
+        case IDM_SETTINGS_ALL_INCIDENTS:
+            ShowAllIncidentsWindow();
             break;
 
         case IDM_SETTINGS_TEMPLATE:
@@ -3478,14 +3494,22 @@ private:
 
     void SetStatusText(const std::wstring& text)
     {
+        std::wstring visibleText = text;
+        if (m_serverConnectionInterrupted &&
+            visibleText.find(L"Collaboration server") == std::wstring::npos)
+        {
+            if (!visibleText.empty())
+                visibleText += L" ";
+            visibleText += L"[Collaboration server disconnected; reconnecting automatically]";
+        }
         std::wstring title = kBaseTitle;
-        if (!text.empty()) {
+        if (!visibleText.empty()) {
             title += L" - ";
-            title += text;
+            title += visibleText;
         }
         SetWindowTextW(m_hwnd, title.c_str());
         if (m_statusBar)
-            SendMessageW(m_statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
+            SendMessageW(m_statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(visibleText.c_str()));
     }
 
     std::wstring SessionDisplayName() const
@@ -3681,6 +3705,8 @@ private:
                     readPosition("commsY", m_mapOverlayPositions.commsY);
                     readPosition("roadIncidentsX", m_mapOverlayPositions.roadIncidentsX);
                     readPosition("roadIncidentsY", m_mapOverlayPositions.roadIncidentsY);
+                    readPosition("notificationHistoryX", m_mapOverlayPositions.notificationHistoryX);
+                    readPosition("notificationHistoryY", m_mapOverlayPositions.notificationHistoryY);
                     readCollapsed("roadIncidentsCollapsed", m_mapOverlayPositions.roadIncidentsCollapsed);
                     readCollapsed("notificationHistoryCollapsed", m_mapOverlayPositions.notificationHistoryCollapsed);
                     readCollapsed("usersCollapsed", m_mapOverlayPositions.usersCollapsed);
@@ -4277,6 +4303,8 @@ private:
                 { "commsY", m_mapOverlayPositions.commsY },
                 { "roadIncidentsX", m_mapOverlayPositions.roadIncidentsX },
                 { "roadIncidentsY", m_mapOverlayPositions.roadIncidentsY },
+                { "notificationHistoryX", m_mapOverlayPositions.notificationHistoryX },
+                { "notificationHistoryY", m_mapOverlayPositions.notificationHistoryY },
                 { "roadIncidentsCollapsed", m_mapOverlayPositions.roadIncidentsCollapsed },
                 { "notificationHistoryCollapsed", m_mapOverlayPositions.notificationHistoryCollapsed },
                 { "usersCollapsed", m_mapOverlayPositions.usersCollapsed },
@@ -6301,6 +6329,7 @@ private:
         if (fitMap)
             m_map.FitToAlerts();
 
+        RefreshAllIncidentsRows();
         return m_filteredAlerts.size();
     }
 
@@ -6759,9 +6788,62 @@ private:
             m_map.SetOnlineUsers(m_onlineUsers);
     }
 
+    bool HandleServerPollFailure(const ServerResult& result)
+    {
+        const bool sessionInvalid =
+            result.status == 401 || ToLower(result.code) == L"session_invalid";
+        if (sessionInvalid) {
+            if (m_sessionExpiryHandled)
+                return true;
+
+            m_sessionExpiryHandled = true;
+            m_serverConnectionInterrupted = false;
+            m_onlineUsers.clear();
+            RenderOnlineUsers();
+            SetStatusText(L"Collaboration session expired; returning to sign in.");
+            MessageBoxW(
+                m_hwnd,
+                L"Your collaboration session is invalid or has expired. "
+                L"ERC Tools will return to the sign-in window.",
+                L"Session expired",
+                MB_OK | MB_ICONWARNING);
+            m_logoutRequested = true;
+            m_logoutSent = true;
+            DestroyWindow(m_hwnd);
+            return true;
+        }
+
+        if (!m_serverConnectionInterrupted) {
+            m_serverConnectionInterrupted = true;
+            m_onlineUsers.clear();
+            RenderOnlineUsers();
+        }
+        ++m_consecutiveServerFailures;
+        const unsigned shift = std::min(m_consecutiveServerFailures - 1u, 4u);
+        const ULONGLONG retrySeconds = std::min<ULONGLONG>(30, 2ull << shift);
+        m_nextServerPollTick = GetTickCount64() + retrySeconds * 1000;
+        SetStatusText(
+            L"Collaboration server connection lost; retrying automatically in " +
+            std::to_wstring(retrySeconds) + L" seconds.");
+        return false;
+    }
+
+    void HandleServerPollSuccess()
+    {
+        const bool restored = m_serverConnectionInterrupted;
+        m_serverConnectionInterrupted = false;
+        m_consecutiveServerFailures = 0;
+        m_nextServerPollTick = 0;
+        if (restored)
+            SetStatusText(L"Collaboration server connection restored.");
+    }
+
     void PollServerAsync()
     {
-        if (!IsOnlineMode())
+        if (!IsOnlineMode() || m_sessionExpiryHandled)
+            return;
+
+        if (m_nextServerPollTick != 0 && GetTickCount64() < m_nextServerPollTick)
             return;
 
         if (m_serverRequestInProgress.exchange(true))
@@ -6837,6 +6919,8 @@ private:
                 return;
             }
             if (unified.protocolAvailable) {
+                result->status = unified.status;
+                result->code = unified.code;
                 result->error = unified.error;
                 if (!g_appQuitting.load() && IsWindow(hwnd))
                     PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
@@ -6866,6 +6950,8 @@ private:
                 return;
             }
             if (binary.protocolAvailable) {
+                result->status = binary.status;
+                result->code = binary.code;
                 result->error = binary.error;
                 if (!g_appQuitting.load() && IsWindow(hwnd))
                     PostMessageW(hwnd, WM_APP_SERVER_READY, 0, reinterpret_cast<LPARAM>(result));
@@ -7785,6 +7871,7 @@ private:
             m_serverRequestInProgress.store(false);
 
         if (result->action == ServerAction::Poll && result->ok) {
+            HandleServerPollSuccess();
             if (result->collaborationVersion > 0)
                 m_collaborationVersion = result->collaborationVersion;
 
@@ -7838,6 +7925,9 @@ private:
 
             if (result->collaborationVersion > 0)
                 PollServerAsync();
+        }
+        else if (result->action == ServerAction::Poll) {
+            HandleServerPollFailure(*result);
         }
         else if (result->action == ServerAction::SendChat) {
             SetStatusText(result->ok ? L"Chat message sent." : L"Chat send failed; kept locally.");
@@ -8481,6 +8571,8 @@ private:
         AppendMenuW(settingsMenu, MF_STRING, IDM_SETTINGS_GENERAL, L"General...");
         AppendMenuW(settingsMenu, MF_STRING, IDM_SETTINGS_SOUNDS, L"Sounds...");
         AppendMenuW(settingsMenu, MF_STRING, IDM_SETTINGS_DIAGNOSTICS, L"Diagnostics...");
+        AppendMenuW(settingsMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(settingsMenu, MF_STRING, IDM_SETTINGS_ALL_INCIDENTS, L"All Incidents...");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENTS_LIST, L"Incidents List...");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_FILTERS, L"Incident Filters...");
         AppendMenuW(roadsMenu, MF_STRING, IDM_ROADS_INCIDENT_NOTIFICATIONS, L"Incident Notifications...");
@@ -10541,6 +10633,453 @@ private:
         {
             RefreshIncidentsListRows();
         }
+    }
+
+    static LRESULT CALLBACK AllIncidentsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        return self ? self->HandleAllIncidentsMessage(hwnd, msg, wParam, lParam) :
+            DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    LRESULT HandleAllIncidentsMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg) {
+        case WM_CREATE:
+            CreateAllIncidentsControls(hwnd);
+            return 0;
+        case WM_SIZE:
+            LayoutAllIncidentsWindow(hwnd);
+            return 0;
+        case WM_COMMAND:
+            OnAllIncidentsCommand(LOWORD(wParam), HIWORD(wParam));
+            return 0;
+        case WM_NOTIFY:
+            return OnAllIncidentsNotify(reinterpret_cast<NMHDR*>(lParam));
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return HandleModernCtlColor(msg, wParam);
+        case WM_DRAWITEM:
+            return OnDrawItem(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowAllIncidentsWindow()
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = AllIncidentsWndProc;
+            wc.hInstance = m_hInst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = ModernWindowBrush();
+            wc.lpszClassName = kAllIncidentsClassName;
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+
+        if (!m_allIncidentsWnd || !IsWindow(m_allIncidentsWnd)) {
+            m_allIncidentsWnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                kAllIncidentsClassName,
+                L"All Incidents",
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                1100,
+                650,
+                m_hwnd,
+                nullptr,
+                m_hInst,
+                this);
+        }
+
+        RefreshAllIncidentsRows();
+        ShowWindow(m_allIncidentsWnd, SW_SHOW);
+        SetForegroundWindow(m_allIncidentsWnd);
+    }
+
+    static void ConfigureAllIncidentsList(
+        HWND listView,
+        std::initializer_list<std::pair<const wchar_t*, int>> columns)
+    {
+        if (!listView)
+            return;
+        SendMessageW(listView, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
+            LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_INFOTIP);
+        ListView_SetBkColor(listView, kUiSurface);
+        ListView_SetTextBkColor(listView, CLR_NONE);
+        ListView_SetTextColor(listView, kUiText);
+
+        int index = 0;
+        for (const auto& [text, width] : columns) {
+            LVCOLUMNW column{};
+            column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            column.pszText = const_cast<LPWSTR>(text);
+            column.cx = width;
+            column.iSubItem = index;
+            SendMessageW(listView, LVM_INSERTCOLUMNW, index, reinterpret_cast<LPARAM>(&column));
+            ++index;
+        }
+    }
+
+    HWND CreateAllIncidentsList(HWND parent, int id)
+    {
+        HWND listView = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            WC_LISTVIEWW,
+            L"",
+            WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+            0, 0, 100, 100,
+            parent,
+            ControlId(id),
+            m_hInst,
+            nullptr);
+        if (listView) {
+            SendMessageW(listView, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(listView);
+        }
+        return listView;
+    }
+
+    void CreateAllIncidentsControls(HWND parent)
+    {
+        m_allIncidentsTab = CreateWindowExW(
+            0,
+            WC_TABCONTROLW,
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            12, 12, 100, 100,
+            parent,
+            ControlId(IDC_ALL_INCIDENTS_TAB),
+            m_hInst,
+            nullptr);
+        if (m_allIncidentsTab) {
+            SendMessageW(m_allIncidentsTab, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(m_allIncidentsTab);
+            TabCtrl_SetItemSize(m_allIncidentsTab, 184, 34);
+            const wchar_t* tabs[] = {
+                L"Road Incidents",
+                L"Earthquakes",
+                L"Weather Systems",
+                L"Weather Warnings",
+                L"Floods"
+            };
+            for (int i = 0; i < static_cast<int>(_countof(tabs)); ++i) {
+                TCITEMW item{};
+                item.mask = TCIF_TEXT;
+                item.pszText = const_cast<LPWSTR>(tabs[i]);
+                TabCtrl_InsertItem(m_allIncidentsTab, i, &item);
+            }
+            TabCtrl_SetCurSel(m_allIncidentsTab, 0);
+        }
+
+        m_allIncidentsRoadsList = CreateAllIncidentsList(parent, IDC_ALL_INCIDENTS_ROADS_LIST);
+        m_allIncidentsEarthquakesList = CreateAllIncidentsList(parent, IDC_ALL_INCIDENTS_EARTHQUAKES_LIST);
+        m_allIncidentsWeatherSystemsList = CreateAllIncidentsList(parent, IDC_ALL_INCIDENTS_WEATHER_SYSTEMS_LIST);
+        m_allIncidentsWeatherWarningsList = CreateAllIncidentsList(parent, IDC_ALL_INCIDENTS_WEATHER_WARNINGS_LIST);
+        m_allIncidentsFloodsList = CreateAllIncidentsList(parent, IDC_ALL_INCIDENTS_FLOODS_LIST);
+
+        ConfigureAllIncidentsList(m_allIncidentsRoadsList, {
+            { L"Severity", 90 }, { L"Road", 100 }, { L"Region", 120 },
+            { L"Incident", 430 }, { L"Updated", 190 }
+            });
+        ConfigureAllIncidentsList(m_allIncidentsEarthquakesList, {
+            { L"Mag", 70 }, { L"Time", 170 }, { L"Region", 580 }, { L"Depth km", 100 }
+            });
+        ConfigureAllIncidentsList(m_allIncidentsWeatherSystemsList, {
+            { L"System", 140 }, { L"Basin", 120 }, { L"Category", 100 },
+            { L"Wind", 100 }, { L"Updated", 180 }, { L"Latitude", 100 }, { L"Longitude", 100 }
+            });
+        ConfigureAllIncidentsList(m_allIncidentsWeatherWarningsList, {
+            { L"Colour", 80 }, { L"Type", 120 }, { L"Area", 280 },
+            { L"From", 150 }, { L"To", 150 }, { L"Headline", 360 }
+            });
+        ConfigureAllIncidentsList(m_allIncidentsFloodsList, {
+            { L"Severity", 150 }, { L"Area", 280 }, { L"Region", 140 },
+            { L"River/Sea", 180 }, { L"Updated", 170 }, { L"Message", 400 }
+            });
+
+        m_allIncidentsRefreshBtn = CreateWindowExW(
+            0, L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON,
+            0, 0, 102, 32, parent, ControlId(IDC_ALL_INCIDENTS_REFRESH), m_hInst, nullptr);
+        m_allIncidentsCloseBtn = CreateWindowExW(
+            0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | BS_PUSHBUTTON,
+            0, 0, 102, 32, parent, ControlId(IDC_ALL_INCIDENTS_CLOSE), m_hInst, nullptr);
+        for (HWND button : { m_allIncidentsRefreshBtn, m_allIncidentsCloseBtn }) {
+            if (!button)
+                continue;
+            SendMessageW(button, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ApplyExplorerTheme(button);
+        }
+
+        LayoutAllIncidentsWindow(parent);
+        RefreshAllIncidentsRows();
+    }
+
+    void LayoutAllIncidentsWindow(HWND parent)
+    {
+        if (!parent || !m_allIncidentsTab)
+            return;
+        RECT client{};
+        GetClientRect(parent, &client);
+        const int width = MaxInt(1, client.right - client.left);
+        const int height = MaxInt(1, client.bottom - client.top);
+        const int margin = 12;
+        const int buttonH = 32;
+        const int buttonGap = 8;
+        const int bottomArea = buttonH + margin * 2;
+
+        MoveWindow(m_allIncidentsTab, margin, margin,
+            MaxInt(100, width - margin * 2),
+            MaxInt(100, height - margin - bottomArea), TRUE);
+
+        RECT pageRect{};
+        GetClientRect(m_allIncidentsTab, &pageRect);
+        TabCtrl_AdjustRect(m_allIncidentsTab, FALSE, &pageRect);
+        MapWindowPoints(m_allIncidentsTab, parent, reinterpret_cast<POINT*>(&pageRect), 2);
+        for (HWND listView : {
+            m_allIncidentsRoadsList,
+            m_allIncidentsEarthquakesList,
+            m_allIncidentsWeatherSystemsList,
+            m_allIncidentsWeatherWarningsList,
+            m_allIncidentsFloodsList })
+        {
+            if (listView) {
+                MoveWindow(listView, pageRect.left, pageRect.top,
+                    MaxInt(40, pageRect.right - pageRect.left),
+                    MaxInt(40, pageRect.bottom - pageRect.top), TRUE);
+            }
+        }
+
+        const int closeX = MaxInt(margin, width - margin - 102);
+        MoveWindow(m_allIncidentsCloseBtn, closeX, height - margin - buttonH, 102, buttonH, TRUE);
+        MoveWindow(m_allIncidentsRefreshBtn, closeX - buttonGap - 102, height - margin - buttonH, 102, buttonH, TRUE);
+        ShowSelectedAllIncidentsTab();
+    }
+
+    void ShowSelectedAllIncidentsTab()
+    {
+        if (!m_allIncidentsTab)
+            return;
+        m_allIncidentsTabIndex = ClampValue(TabCtrl_GetCurSel(m_allIncidentsTab), 0, 4);
+        HWND lists[] = {
+            m_allIncidentsRoadsList,
+            m_allIncidentsEarthquakesList,
+            m_allIncidentsWeatherSystemsList,
+            m_allIncidentsWeatherWarningsList,
+            m_allIncidentsFloodsList
+        };
+        for (int i = 0; i < static_cast<int>(_countof(lists)); ++i) {
+            if (lists[i])
+                ShowWindow(lists[i], i == m_allIncidentsTabIndex ? SW_SHOW : SW_HIDE);
+        }
+        UpdateAllIncidentsStatus();
+    }
+
+    static int AppendAllIncidentsRow(HWND listView, int row, const std::vector<std::wstring>& values)
+    {
+        if (!listView || values.empty())
+            return -1;
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = row;
+        item.iSubItem = 0;
+        item.pszText = const_cast<LPWSTR>(values[0].c_str());
+        const int inserted = static_cast<int>(SendMessageW(
+            listView, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+        if (inserted < 0)
+            return inserted;
+        for (int i = 1; i < static_cast<int>(values.size()); ++i) {
+            LVITEMW sub{};
+            sub.iSubItem = i;
+            sub.pszText = const_cast<LPWSTR>(values[static_cast<size_t>(i)].c_str());
+            SendMessageW(listView, LVM_SETITEMTEXTW, inserted, reinterpret_cast<LPARAM>(&sub));
+        }
+        return inserted;
+    }
+
+    void UpdateAllIncidentsTabTitles()
+    {
+        if (!m_allIncidentsTab)
+            return;
+        const std::wstring labels[] = {
+            L"Road Incidents (" + std::to_wstring(m_filteredAlerts.size()) + L")",
+            L"Earthquakes (" + std::to_wstring(m_filteredEarthquakes.size()) + L")",
+            L"Weather Systems (" + std::to_wstring(m_filteredWeatherSystems.size()) + L")",
+            L"Weather Warnings (" + std::to_wstring(m_filteredWeatherWarnings.size()) + L")",
+            L"Floods (" + std::to_wstring(m_filteredFloods.size()) + L")"
+        };
+        for (int i = 0; i < static_cast<int>(_countof(labels)); ++i) {
+            TCITEMW item{};
+            item.mask = TCIF_TEXT;
+            item.pszText = const_cast<LPWSTR>(labels[i].c_str());
+            TabCtrl_SetItem(m_allIncidentsTab, i, &item);
+        }
+    }
+
+    void RefreshAllIncidentsRows()
+    {
+        if (!m_allIncidentsWnd || !IsWindow(m_allIncidentsWnd))
+            return;
+
+        m_syncingControls = true;
+        for (HWND listView : {
+            m_allIncidentsRoadsList,
+            m_allIncidentsEarthquakesList,
+            m_allIncidentsWeatherSystemsList,
+            m_allIncidentsWeatherWarningsList,
+            m_allIncidentsFloodsList })
+        {
+            if (listView)
+                ListView_DeleteAllItems(listView);
+        }
+
+        int row = 0;
+        for (const TrafficAlert& alert : m_filteredAlerts) {
+            AppendAllIncidentsRow(m_allIncidentsRoadsList, row++, {
+                BuildSeverityDisplay(alert.severity),
+                alert.road,
+                alert.region,
+                BuildAlertSummary(alert),
+                alert.updatedText
+                });
+        }
+
+        row = 0;
+        for (const EarthquakeEvent& event : m_filteredEarthquakes) {
+            wchar_t magnitude[32]{};
+            wchar_t depth[32]{};
+            swprintf_s(magnitude, L"%.1f", event.magnitude);
+            swprintf_s(depth, L"%.1f", event.depthKm);
+            AppendAllIncidentsRow(m_allIncidentsEarthquakesList, row++, {
+                magnitude, event.timeText, event.place, depth
+                });
+        }
+
+        row = 0;
+        for (const WeatherSystemEvent& system : m_filteredWeatherSystems) {
+            AppendAllIncidentsRow(m_allIncidentsWeatherSystemsList, row++, {
+                system.name,
+                system.basin,
+                DisplayWeatherSystemCategory(system.category, system.windKnots),
+                system.windText,
+                system.updatedText,
+                system.hasLocation ? FormatCoordinateForList(system.latitude, true) : L"",
+                system.hasLocation ? FormatCoordinateForList(system.longitude, false) : L""
+                });
+        }
+
+        row = 0;
+        for (const WeatherWarningEvent& warning : m_filteredWeatherWarnings) {
+            AppendAllIncidentsRow(m_allIncidentsWeatherWarningsList, row++, {
+                warning.colour,
+                warning.type,
+                warning.area,
+                warning.validFrom,
+                warning.validTo,
+                warning.headline
+                });
+        }
+
+        row = 0;
+        for (const FloodEvent& flood : m_filteredFloods) {
+            AppendAllIncidentsRow(m_allIncidentsFloodsList, row++, {
+                flood.severity,
+                flood.area,
+                flood.region,
+                flood.riverOrSea,
+                flood.timeChanged.empty() ? flood.timeRaised : flood.timeChanged,
+                flood.message
+                });
+        }
+
+        m_syncingControls = false;
+        UpdateAllIncidentsTabTitles();
+        UpdateAllIncidentsStatus();
+    }
+
+    void UpdateAllIncidentsStatus()
+    {
+        if (!m_allIncidentsWnd || !IsWindowVisible(m_allIncidentsWnd))
+            return;
+        const size_t counts[] = {
+            m_filteredAlerts.size(),
+            m_filteredEarthquakes.size(),
+            m_filteredWeatherSystems.size(),
+            m_filteredWeatherWarnings.size(),
+            m_filteredFloods.size()
+        };
+        const wchar_t* labels[] = {
+            L"road incident", L"earthquake", L"weather system", L"weather warning", L"flood"
+        };
+        const int index = ClampValue(m_allIncidentsTabIndex, 0, 4);
+        SetStatusText(L"All Incidents: " + std::to_wstring(counts[index]) + L" " + labels[index] + L" item(s).");
+    }
+
+    void RefreshSelectedAllIncidentsSource()
+    {
+        switch (m_allIncidentsTabIndex) {
+        case 0: RefreshFeedAsync(); break;
+        case 1: FetchEarthquakesAsync(false); break;
+        case 2: FetchWeatherSystemsAsync(false); break;
+        case 3: FetchWeatherWarningsAsync(false); break;
+        case 4: FetchFloodsAsync(false); break;
+        }
+    }
+
+    void OnAllIncidentsCommand(int id, int code)
+    {
+        if (id == IDC_ALL_INCIDENTS_CLOSE && code == BN_CLICKED) {
+            ShowWindow(m_allIncidentsWnd, SW_HIDE);
+            return;
+        }
+        if (id == IDC_ALL_INCIDENTS_REFRESH && code == BN_CLICKED)
+            RefreshSelectedAllIncidentsSource();
+    }
+
+    LRESULT OnAllIncidentsNotify(NMHDR* nmh)
+    {
+        if (!nmh)
+            return 0;
+        if (nmh->hwndFrom == m_allIncidentsTab && nmh->code == TCN_SELCHANGE) {
+            ShowSelectedAllIncidentsTab();
+            return 0;
+        }
+        if (nmh->code != LVN_ITEMCHANGED || m_syncingControls)
+            return 0;
+
+        NMLISTVIEW* change = reinterpret_cast<NMLISTVIEW*>(nmh);
+        if (change->iItem < 0 ||
+            (change->uNewState & LVIS_SELECTED) == 0 ||
+            (change->uOldState & LVIS_SELECTED) != 0)
+        {
+            return 0;
+        }
+        const size_t index = static_cast<size_t>(change->iItem);
+        if (nmh->hwndFrom == m_allIncidentsRoadsList && index < m_filteredAlerts.size())
+            SelectAlertById(m_filteredAlerts[index].id, true);
+        else if (nmh->hwndFrom == m_allIncidentsEarthquakesList && index < m_filteredEarthquakes.size())
+            SelectEarthquakeEventFromList(index, true);
+        else if (nmh->hwndFrom == m_allIncidentsWeatherSystemsList && index < m_filteredWeatherSystems.size())
+            SelectWeatherSystemEventFromList(index, true);
+        else if (nmh->hwndFrom == m_allIncidentsWeatherWarningsList && index < m_filteredWeatherWarnings.size())
+            SelectWeatherWarningEventFromList(index, true);
+        else if (nmh->hwndFrom == m_allIncidentsFloodsList && index < m_filteredFloods.size())
+            SelectFloodEventFromList(index, true);
+        return 0;
     }
 
     static LRESULT CALLBACK NotificationRegionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -13804,6 +14343,7 @@ private:
                 m_filteredWeatherSystems.push_back(system);
         }
         RenderWeatherSystemsListRows();
+        RefreshAllIncidentsRows();
         ApplyWeatherSystemVisibility();
         if (m_weatherSystemsListWnd && IsWindowVisible(m_weatherSystemsListWnd))
             SetStatusText(L"Showing " + std::to_wstring(m_filteredWeatherSystems.size()) + L" weather system(s).");
@@ -13838,6 +14378,7 @@ private:
                 m_filteredWeatherWarnings.push_back(warning);
         }
         RenderWeatherWarningsListRows();
+        RefreshAllIncidentsRows();
         ApplyWeatherWarningVisibility();
         if (save)
             SaveSettings();
@@ -13878,6 +14419,7 @@ private:
                 m_filteredFloods.push_back(flood);
         }
         RenderFloodsListRows();
+        RefreshAllIncidentsRows();
         ApplyFloodVisibility();
         if (save)
             SaveSettings();
@@ -15114,6 +15656,7 @@ private:
         StoreEarthquakeListFiltersFromControls();
         RebuildFilteredEarthquakes();
         RenderEarthquakeListRows();
+        RefreshAllIncidentsRows();
         ApplyEarthquakeVisibility();
         SaveSettings();
 
@@ -17251,6 +17794,15 @@ private:
     HWND m_soundsWnd = nullptr;
     HWND m_diagnosticsWnd = nullptr;
     HWND m_templateSettingsWnd = nullptr;
+    HWND m_allIncidentsWnd = nullptr;
+    HWND m_allIncidentsTab = nullptr;
+    HWND m_allIncidentsRoadsList = nullptr;
+    HWND m_allIncidentsEarthquakesList = nullptr;
+    HWND m_allIncidentsWeatherSystemsList = nullptr;
+    HWND m_allIncidentsWeatherWarningsList = nullptr;
+    HWND m_allIncidentsFloodsList = nullptr;
+    HWND m_allIncidentsRefreshBtn = nullptr;
+    HWND m_allIncidentsCloseBtn = nullptr;
     HWND m_cacheManagerWnd = nullptr;
     HWND m_incidentFiltersWnd = nullptr;
     HWND m_incidentNotificationsWnd = nullptr;
@@ -17427,6 +17979,7 @@ private:
     std::wstring m_templateWizardFloodId;
     size_t m_templateWizardStep = 0;
     size_t m_templateWizardTemplateIndex = 0;
+    int m_allIncidentsTabIndex = 0;
     TemplateContext m_templateWizardContext = TemplateContext::Roads;
     TemplateContext m_templateEditorContext = TemplateContext::Roads;
     bool m_templateWizardWeatherChooser = false;
@@ -17535,6 +18088,10 @@ private:
     UINT m_refreshIntervalMs = 5 * 60 * 1000;
     uint32_t m_collaborationVersion = 0;
     std::atomic_bool m_serverRequestInProgress{ false };
+    bool m_serverConnectionInterrupted = false;
+    bool m_sessionExpiryHandled = false;
+    unsigned m_consecutiveServerFailures = 0;
+    ULONGLONG m_nextServerPollTick = 0;
     std::atomic_bool m_earthquakeFetchInProgress{ false };
     std::atomic_bool m_weatherWarningsFetchInProgress{ false };
     std::atomic_bool m_floodsFetchInProgress{ false };

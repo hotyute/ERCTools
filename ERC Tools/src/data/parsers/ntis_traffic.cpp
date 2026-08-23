@@ -48,6 +48,14 @@ bool ParseNtisTrafficSnapshot(
             errorOut = L"The NTIS event snapshot is still being rebuilt.";
             return false;
         }
+        if (root.value("sourceStale", false)) {
+            statusOut = L"National Highways NTIS event feed is stale; no incidents are being shown.";
+            const std::wstring sourceUpdated = TrafficEnglandUpdatedText(
+                Utf8ToWide(root.value("sourceUpdatedAt", std::string())));
+            if (!sourceUpdated.empty())
+                statusOut += L" Last complete snapshot: " + sourceUpdated + L".";
+            return true;
+        }
 
         std::unordered_set<std::wstring> seenIds;
         for (const json& item : root["alerts"]) {

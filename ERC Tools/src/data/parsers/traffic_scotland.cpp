@@ -16,6 +16,22 @@ struct ScotlandListItem
     std::wstring description;
 };
 
+struct ScotlandDetail
+{
+    std::wstring updatedText;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    bool hasLocation = false;
+};
+
+struct ScotlandDetailCacheEntry
+{
+    ScotlandDetail detail;
+    ULONGLONG fetchedAt = 0;
+};
+
+constexpr ULONGLONG kScotlandDetailCacheMs = 60ULL * 1000ULL;
+
 std::wstring ExtractParagraphValue(
     const std::wstring& block,
     const std::wstring& label,
@@ -108,49 +124,88 @@ std::vector<ScotlandListItem> ParseList(const std::wstring& html)
     return items;
 }
 
-bool ParseDetailLocation(const std::string& body, double& latitudeOut, double& longitudeOut)
+std::wstring ExtractDetailLabelValue(const std::wstring& html, const std::wstring& label)
 {
+    const std::wstring lowerHtml = ToLower(html);
+    const size_t labelPos = lowerHtml.find(ToLower(label));
+    if (labelPos == std::wstring::npos)
+        return L"";
+
+    const size_t labelEnd = lowerHtml.find(L"</span>", labelPos);
+    if (labelEnd == std::wstring::npos)
+        return L"";
+    const size_t valueTag = lowerHtml.find(L"<span", labelEnd + 7);
+    if (valueTag == std::wstring::npos)
+        return L"";
+    const size_t valueStart = lowerHtml.find(L'>', valueTag);
+    if (valueStart == std::wstring::npos)
+        return L"";
+    const size_t valueEnd = lowerHtml.find(L"</span>", valueStart + 1);
+    if (valueEnd == std::wstring::npos)
+        return L"";
+    return StripHtmlTags(html.substr(valueStart + 1, valueEnd - valueStart - 1));
+}
+
+bool ParseDetail(const std::string& body, ScotlandDetail& detailOut)
+{
+    detailOut = {};
     const std::wstring html = Utf8ToWide(body);
+    detailOut.updatedText = ExtractDetailLabelValue(html, L"Last updated");
+
     std::wsmatch match;
     const std::wregex centerRegex(
         LR"(center\s*:\s*\{\s*lat\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*lng\s*:\s*(-?\d+(?:\.\d+)?)\s*\})",
         std::regex_constants::icase);
-    if (!std::regex_search(html, match, centerRegex) || match.size() < 3)
-        return false;
+    if (std::regex_search(html, match, centerRegex) && match.size() >= 3) {
+        try {
+            detailOut.latitude = std::stod(match[1].str());
+            detailOut.longitude = std::stod(match[2].str());
+            detailOut.hasLocation = detailOut.latitude >= -90.0 && detailOut.latitude <= 90.0 &&
+                detailOut.longitude >= -180.0 && detailOut.longitude <= 180.0;
+        }
+        catch (...) {
+            detailOut.hasLocation = false;
+        }
+    }
 
-    try {
-        latitudeOut = std::stod(match[1].str());
-        longitudeOut = std::stod(match[2].str());
-        return latitudeOut >= -90.0 && latitudeOut <= 90.0 &&
-            longitudeOut >= -180.0 && longitudeOut <= 180.0;
-    }
-    catch (...) {
-        return false;
-    }
+    return detailOut.hasLocation || !detailOut.updatedText.empty();
 }
 
-bool FetchDetailLocation(const std::wstring& sid, double& latitudeOut, double& longitudeOut)
+bool FetchDetail(const std::wstring& sid, ScotlandDetail& detailOut)
 {
     static std::mutex cacheMutex;
-    static std::unordered_map<std::wstring, GeoPoint> cache;
+    static std::unordered_map<std::wstring, ScotlandDetailCacheEntry> cache;
+    const ULONGLONG now = GetTickCount64();
+    ScotlandDetail cachedDetail;
+    bool hasCachedDetail = false;
     {
         std::lock_guard<std::mutex> lock(cacheMutex);
         auto found = cache.find(sid);
         if (found != cache.end()) {
-            latitudeOut = found->second.lat;
-            longitudeOut = found->second.lon;
-            return true;
+            cachedDetail = found->second.detail;
+            hasCachedDetail = true;
+            if (now - found->second.fetchedAt <= kScotlandDetailCacheMs) {
+                detailOut = cachedDetail;
+                return detailOut.hasLocation || !detailOut.updatedText.empty();
+            }
         }
     }
 
     std::string body;
     std::wstring error;
     const std::wstring url = L"https://www.traffic.gov.scot/more-details?sid=" + sid + L"&type=incidents";
-    if (!HttpGetText(url, body, error) || !ParseDetailLocation(body, latitudeOut, longitudeOut))
+    ScotlandDetail fetchedDetail;
+    if (!HttpGetText(url, body, error) || !ParseDetail(body, fetchedDetail)) {
+        if (hasCachedDetail) {
+            detailOut = cachedDetail;
+            return detailOut.hasLocation || !detailOut.updatedText.empty();
+        }
         return false;
+    }
 
     std::lock_guard<std::mutex> lock(cacheMutex);
-    cache[sid] = { latitudeOut, longitudeOut };
+    cache[sid] = { fetchedDetail, now };
+    detailOut = std::move(fetchedDetail);
     return true;
 }
 }
@@ -210,10 +265,17 @@ bool FetchTrafficScotlandAlerts(
                 if (index >= items.size())
                     break;
                 TrafficAlert& alert = alertsOut[index];
-                alert.hasLocation = FetchDetailLocation(
-                    items[index].sid,
-                    alert.latitude,
-                    alert.longitude);
+                ScotlandDetail detail;
+                FetchDetail(items[index].sid, detail);
+                alert.hasLocation = detail.hasLocation;
+                if (detail.hasLocation) {
+                    alert.latitude = detail.latitude;
+                    alert.longitude = detail.longitude;
+                }
+                if (!detail.updatedText.empty()) {
+                    alert.updatedText = detail.updatedText;
+                    alert.description += L"\r\nLast updated: " + detail.updatedText;
+                }
                 if (alert.hasLocation)
                     located.fetch_add(1);
             }
@@ -266,7 +328,17 @@ bool ParseTrafficScotlandAlertsFromBodies(
 
         auto detail = detailBodies.find(item.sid);
         if (detail != detailBodies.end()) {
-            alert.hasLocation = ParseDetailLocation(detail->second, alert.latitude, alert.longitude);
+            ScotlandDetail parsedDetail;
+            ParseDetail(detail->second, parsedDetail);
+            alert.hasLocation = parsedDetail.hasLocation;
+            if (parsedDetail.hasLocation) {
+                alert.latitude = parsedDetail.latitude;
+                alert.longitude = parsedDetail.longitude;
+            }
+            if (!parsedDetail.updatedText.empty()) {
+                alert.updatedText = parsedDetail.updatedText;
+                alert.description += L"\r\nLast updated: " + parsedDetail.updatedText;
+            }
             if (alert.hasLocation)
                 ++located;
         }

@@ -1,4 +1,5 @@
 import gc
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -20,6 +21,11 @@ class StaticResolver:
             "description": self.description,
             "distanceMetres": 10.0,
         }
+
+
+class MissingResolver:
+    def resolve_cached(self, latitude, longitude, source_road, resolution_db):
+        return None
 
 
 def make_record(record_type="Accident", probability="certain", comments=None,
@@ -85,6 +91,11 @@ class TrafficEnglandCompatibilityTests(unittest.TestCase):
     def test_abnormal_traffic_is_congestion(self):
         alert = self.normalise(make_record(record_type="AbnormalTraffic"))
         self.assertEqual("CONGESTION", alert["trafficEnglandEventType"])
+        self.assertTrue(alert["trafficEnglandVisible"])
+
+    def test_public_record_does_not_depend_on_auxiliary_network_lookup(self):
+        alert = self.normalise(make_record(), MissingResolver())
+        self.assertFalse(alert["networkResolved"])
         self.assertTrue(alert["trafficEnglandVisible"])
 
     def test_other_road_management_matches_former_public_label(self):
@@ -179,6 +190,74 @@ class TrafficEnglandCompatibilityTests(unittest.TestCase):
             ntis_receiver.parse_iso_time("2026-07-03T12:31:00Z"),
         ))
 
+    def test_public_clearance_band_uses_uk_time_and_upper_bound(self):
+        self.assertEqual(
+            "2026-08-15T13:30:00+00:00",
+            ntis_receiver.public_clearance_end_time(
+                "The event is expected to clear between 14:15 and 14:30 "
+                "on 15 August 2026"
+            ),
+        )
+
+    def test_public_clearance_band_rolls_midnight_into_next_day(self):
+        self.assertEqual(
+            "2026-08-17T23:00:00+00:00",
+            ntis_receiver.public_clearance_end_time(
+                "The event is expected to clear between 23:45 and 00:00 "
+                "on 17 August 2026"
+            ),
+        )
+
+    def test_active_unplanned_record_past_public_clearance_is_not_current(self):
+        result = ntis_receiver.normalise_record(
+            make_record(comments=[
+                "The M1 northbound between junctions J2 and J3",
+                "Road traffic collision",
+                "The event is expected to clear between 11:45 and 12:00 "
+                "on 3 July 2026",
+                "Currently Active",
+            ]),
+            "situation-1",
+            "2026-07-03T12:10:00Z",
+            "real",
+            StaticResolver(),
+            None,
+        )
+        self.assertFalse(result["current"])
+
+    def test_cached_unplanned_record_lazily_uses_public_clearance(self):
+        alert = {
+            "validityStatus": "active",
+            "overallStartTime": "2026-07-03T10:00:00Z",
+            "overallEndTime": "",
+            "trafficEnglandEventType": "INCIDENT",
+            "description": (
+                "Time To Clear : The event is expected to clear between "
+                "11:45 and 12:00 on 3 July 2026"
+            ),
+        }
+        self.assertFalse(ntis_receiver.cached_alert_is_current(
+            alert,
+            ntis_receiver.parse_iso_time("2026-07-03T12:10:00Z"),
+        ))
+
+    def test_public_clearance_fallback_does_not_expire_roadworks(self):
+        result = ntis_receiver.normalise_record(
+            make_record(record_type="MaintenanceWorks", comments=[
+                "The M1 northbound between junctions J2 and J3",
+                "Roadworks",
+                "The event is expected to clear between 11:45 and 12:00 "
+                "on 3 July 2026",
+                "Currently Active",
+            ]),
+            "situation-1",
+            "2026-07-03T12:10:00Z",
+            "real",
+            StaticResolver(),
+            None,
+        )
+        self.assertTrue(result["current"])
+
     def test_legacy_cached_alert_without_validity_metadata_remains_current(self):
         self.assertTrue(ntis_receiver.cached_alert_is_current({"id": "legacy"}))
 
@@ -215,8 +294,184 @@ class TrafficEnglandCompatibilityTests(unittest.TestCase):
         self.assertEqual("A1(M)", alert["road"])
         self.assertIn("The A1(M) northbound", alert["description"])
 
+    def test_public_snapshot_matches_former_unplanned_query(self):
+        document = {
+            "updatedAt": "2026-07-03T12:10:00+00:00",
+            "currentRecordCount": 4,
+            "alerts": [
+                {
+                    "id": "incident",
+                    "trafficEnglandVisible": True,
+                    "trafficEnglandUnplanned": True,
+                },
+                {
+                    "id": "roadworks",
+                    "trafficEnglandVisible": True,
+                    "trafficEnglandUnplanned": False,
+                },
+                {
+                    "id": "raw-hidden",
+                    "trafficEnglandVisible": False,
+                    "trafficEnglandUnplanned": True,
+                },
+                {"id": "raw-unconfirmed"},
+            ],
+        }
+        now = ntis_receiver.parse_iso_time("2026-07-03T12:11:00Z")
+
+        unplanned = ntis_receiver.public_snapshot(document, True, now)
+        self.assertEqual(["incident"], [item["id"] for item in unplanned["alerts"]])
+        self.assertEqual(1, unplanned["trafficEnglandPublicCount"])
+
+        all_public = ntis_receiver.public_snapshot(document, False, now)
+        self.assertEqual(
+            ["incident", "roadworks"],
+            [item["id"] for item in all_public["alerts"]],
+        )
+        self.assertEqual(2, all_public["trafficEnglandPublicCount"])
+
+    def test_quiet_change_driven_source_retains_current_cache(self):
+        document = {
+            "updatedAt": "2026-07-03T12:00:00+00:00",
+            "currentRecordCount": 1,
+            "alerts": [{
+                "id": "retained",
+                "trafficEnglandVisible": True,
+                "trafficEnglandUnplanned": True,
+            }],
+        }
+        result = ntis_receiver.public_snapshot(
+            document,
+            True,
+            ntis_receiver.parse_iso_time("2026-07-03T12:11:00Z"),
+        )
+        self.assertFalse(result["sourceStale"])
+        self.assertTrue(result["sourceQuiet"])
+        self.assertEqual(["retained"], [item["id"] for item in result["alerts"]])
+        self.assertEqual(1, result["currentRecordCount"])
+
+    def test_source_receive_time_governs_freshness_not_snapshot_build_time(self):
+        result = ntis_receiver.public_snapshot({
+            "updatedAt": "2026-07-03T12:10:30+00:00",
+            "sourceUpdatedAt": "2026-07-03T12:00:00+00:00",
+            "alerts": [{
+                "id": "stale-source",
+                "trafficEnglandVisible": True,
+                "trafficEnglandUnplanned": True,
+            }],
+        }, True, ntis_receiver.parse_iso_time("2026-07-03T12:11:00Z"))
+        self.assertFalse(result["sourceStale"])
+        self.assertTrue(result["sourceQuiet"])
+        self.assertEqual("2026-07-03T12:00:00+00:00", result["sourceUpdatedAt"])
+        self.assertEqual(["stale-source"], [item["id"] for item in result["alerts"]])
+
+    def test_legacy_full_refresh_latch_does_not_block_a_fresh_source(self):
+        result = ntis_receiver.public_snapshot({
+            "updatedAt": "2026-07-03T12:10:00+00:00",
+            "fullRefreshRequired": True,
+            "alerts": [{
+                "id": "untrusted",
+                "trafficEnglandVisible": True,
+                "trafficEnglandUnplanned": True,
+            }],
+        }, True, ntis_receiver.parse_iso_time("2026-07-03T12:11:00Z"))
+        self.assertFalse(result["sourceStale"])
+        self.assertEqual(["untrusted"], [item["id"] for item in result["alerts"]])
+
 
 class TrafficEnglandMigrationTests(unittest.TestCase):
+    def test_full_refresh_preserves_only_concurrent_updates_newer_than_refresh(self):
+        old_data_dir = ntis_receiver.DATA_DIR
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        try:
+            ntis_receiver.DATA_DIR = root
+            ntis_receiver.initialise_database()
+            processor = ntis_receiver.NtisEventProcessor(StaticResolver())
+            with ntis_receiver.open_database() as db:
+                ntis_receiver.metadata_set(db, "refresh_in_progress", "1")
+                ntis_receiver.metadata_set(db, "refresh_generation", "2")
+                ntis_receiver.metadata_set(
+                    db, "refresh_publication_time", "2026-07-03T12:00:00Z"
+                )
+                for record_id, version_time in (
+                        ("older-absent", "2026-07-03T11:59:00Z"),
+                        ("newer-concurrent", "2026-07-03T12:01:00Z")):
+                    db.execute(
+                        "INSERT INTO event_state("
+                        "record_id, version, version_time, situation_id, "
+                        "refresh_generation, received_at, ephemeral_key, alert_json"
+                        ") VALUES (?, 1, ?, 's', 1, '', '', '{}')",
+                        (record_id, version_time),
+                    )
+                self.assertTrue(processor._finalise_refresh_if_idle(db, force=True))
+                rows = db.execute(
+                    "SELECT record_id, refresh_generation FROM event_state"
+                ).fetchall()
+            self.assertEqual([("newer-concurrent", 2)], rows)
+        finally:
+            ntis_receiver.DATA_DIR = old_data_dir
+            gc.collect()
+
+    def test_database_context_closes_connection(self):
+        old_data_dir = ntis_receiver.DATA_DIR
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        try:
+            ntis_receiver.DATA_DIR = root
+            root.mkdir(parents=True, exist_ok=True)
+            with ntis_receiver.open_database() as db:
+                db.execute("SELECT 1").fetchone()
+            with self.assertRaises(sqlite3.ProgrammingError):
+                db.execute("SELECT 1")
+        finally:
+            ntis_receiver.DATA_DIR = old_data_dir
+
+    def test_startup_uses_last_source_receive_time_without_a_permanent_latch(self):
+        old_data_dir = ntis_receiver.DATA_DIR
+        old_snapshot_path = ntis_receiver.SNAPSHOT_PATH
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        try:
+            ntis_receiver.DATA_DIR = root
+            ntis_receiver.SNAPSHOT_PATH = root / "current" / "events.json"
+            ntis_receiver.initialise_database()
+            with ntis_receiver.open_database() as db:
+                db.execute(
+                    """
+                    INSERT INTO messages(
+                        feed, received_at, path, metadata_path, content_type,
+                        content_encoding, size_bytes, sha256, processed_at
+                    ) VALUES('event', '2000-01-01T00:00:00+00:00', 'payload',
+                             'meta', 'xml', '', 1, 'startup-hash', 'done')
+                    """
+                )
+                db.execute(
+                    "DELETE FROM processor_metadata WHERE key = 'last_event_received_at'"
+                )
+            ntis_receiver.write_json_document(ntis_receiver.SNAPSHOT_PATH, {
+                "updatedAt": "2000-01-02T00:00:00+00:00",
+                "alerts": [{"id": "legacy"}],
+            })
+
+            ntis_receiver.initialise_database()
+            document = json.loads(
+                ntis_receiver.SNAPSHOT_PATH.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "2000-01-01T00:00:00+00:00", document["sourceUpdatedAt"]
+            )
+            self.assertNotIn("fullRefreshRequired", document)
+            self.assertTrue(ntis_receiver.snapshot_is_stale(document))
+            with ntis_receiver.open_database() as db:
+                self.assertIsNone(db.execute(
+                    "SELECT value FROM processor_metadata "
+                    "WHERE key = 'full_refresh_required'"
+                ).fetchone())
+        finally:
+            ntis_receiver.DATA_DIR = old_data_dir
+            ntis_receiver.SNAPSHOT_PATH = old_snapshot_path
+
     def test_fused_congestion_freshness_is_clamped_and_persisted(self):
         old_data_dir = ntis_receiver.DATA_DIR
         root = Path(tempfile.mkdtemp())
